@@ -1162,7 +1162,10 @@ fn cached_taint_pass(
 ) -> Vec<Option<Vec<TaintFindings>>> {
     use crate::scan::scan_cache::{CacheKey, FileState, RuleState, TaintCache, sha256_hex};
     let cache_key = CacheKey::current(&config.lang);
-    let cache_path = config.cache_dir.as_ref().map(|d| TaintCache::path(d, language));
+    let cache_path = config
+        .cache_dir
+        .as_ref()
+        .map(|d| TaintCache::path(&cache_key.engine_dir(d), language));
     let previous = cache_path.as_ref().and_then(|p| TaintCache::load(p, &cache_key));
     let file_states: BTreeMap<String, FileState> = files
         .iter()
@@ -1622,7 +1625,13 @@ pub fn run_scan(config: &ScanConfig) -> ScanReport {
         .collect::<BTreeSet<String>>()
         .into_iter()
         .collect();
-    let pattern_cache_path = config.cache_dir.as_ref().map(|d| PatternCache::path(d));
+    // This binary's own cache folder; the folders of older binaries
+    // beyond the most recent ones are removed once per scan, here.
+    let pattern_cache_path = config.cache_dir.as_ref().map(|d| {
+        let engine_dir = pattern_key.engine_dir(d);
+        crate::scan::scan_cache::prune_engine_dirs(d, &engine_dir);
+        PatternCache::path(&engine_dir)
+    });
     let pattern_previous = pattern_cache_path
         .as_ref()
         .and_then(|p| PatternCache::load(p, &pattern_key, &rules_hash));

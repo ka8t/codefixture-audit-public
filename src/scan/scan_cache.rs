@@ -58,7 +58,24 @@ pub struct CacheKey {
     pub lang: String,
 }
 
+/// How many binaries keep their cache folder side by side: the most
+/// recently used ones; older folders are removed when a scan writes.
+pub const KEPT_ENGINE_DIRS: usize = 3;
+
 impl CacheKey {
+    /// The cache folder of this engine build in `base`: its version and a
+    /// short hash of its build stamp (`0.1.0+327.46ee715-3fa2c1d8`). Each
+    /// binary has its own folder (the maintainer, 2026-11-14), so that two binaries
+    /// used in turn on the same project (the private and the shared one,
+    /// two versions) never overwrite each other's cache.
+    pub fn engine_dir(&self, base: &Path) -> PathBuf {
+        let version: String = crate::BUILD_VERSION
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() || "+.-".contains(c) { c } else { '_' })
+            .collect();
+        base.join(format!("{version}-{}", &sha256_hex(self.engine.as_bytes())[..8]))
+    }
+
     /// The key of the running engine for `lang`.
     pub fn current(lang: &str) -> Self {
         let stamp = std::env::current_exe()
@@ -215,6 +232,32 @@ impl PatternCache {
     }
 }
 
+/// Removes the engine folders of `base` beyond the `KEPT_ENGINE_DIRS`
+/// most recently modified ones, `current` always kept. Errors are ignored:
+/// a folder left behind only costs disk space.
+pub fn prune_engine_dirs(base: &Path, current: &Path) {
+    let Ok(entries) = std::fs::read_dir(base) else {
+        return;
+    };
+    let entries: Vec<std::fs::DirEntry> = entries.flatten().collect();
+    // Files of the layout before per-binary folders (2026-11-14).
+    for e in &entries {
+        let name = e.file_name().to_string_lossy().to_string();
+        if e.path().is_file() && name.ends_with(".json.gz") {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+    let mut dirs: Vec<(std::time::SystemTime, PathBuf)> = entries
+        .into_iter()
+        .filter(|e| e.path().is_dir() && e.path() != current)
+        .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
+        .collect();
+    dirs.sort_by_key(|a| std::cmp::Reverse(a.0));
+    for (_, dir) in dirs.into_iter().skip(KEPT_ENGINE_DIRS.saturating_sub(1)) {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
 fn read_gz_json<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
     let file = std::fs::File::open(path).ok()?;
     let mut text = String::new();
@@ -285,6 +328,31 @@ mod tests {
         std::fs::write(&path, b"garbage").unwrap();
         assert!(TaintCache::load(&path, &key).is_none(), "unreadable: full scan");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_each_binary_has_its_own_folder_and_old_ones_are_pruned() {
+        let base = std::env::temp_dir().join(format!("sca-engines-{}", std::process::id()));
+        let key = |e: &str| CacheKey {
+            engine: e.to_string(),
+            lang: "fr".to_string(),
+        };
+        let a = key("a").engine_dir(&base);
+        let b = key("b").engine_dir(&base);
+        assert_ne!(a, b, "two binaries, two folders");
+        assert_eq!(a, key("a").engine_dir(&base), "same binary, same folder");
+        assert!(a.file_name().unwrap().to_string_lossy().starts_with(crate::BUILD_VERSION.split(|c: char| !c.is_ascii_alphanumeric() && !"+.-".contains(c)).next().unwrap()));
+        let mut made = Vec::new();
+        for e in ["e1", "e2", "e3", "e4", "e5"] {
+            let dir = key(e).engine_dir(&base);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            made.push(dir);
+        }
+        prune_engine_dirs(&base, &made[4]);
+        let left: Vec<bool> = made.iter().map(|d| d.exists()).collect();
+        assert_eq!(left, vec![false, false, true, true, true], "the 3 most recent kept");
+        std::fs::remove_dir_all(&base).ok();
     }
 
     #[test]

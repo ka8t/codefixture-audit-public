@@ -423,10 +423,20 @@ fn render_findings(
         let rk = &first.rule_key;
 
         let mut shared_html = String::new();
-        if !first.risk.is_empty() {
+        // The rule's own risk text, the one written for the reader (issue
+        // #184), rather than `first.risk`: for a data-flow finding that is
+        // the rule's short `message`, also used for the console line, and
+        // a report showed it instead of the explanation (2026-11-14).
+        let lang = t(report_locale, "locale_code");
+        let risk_text = rule_catalog
+            .get(rk.as_str())
+            .map(|rule| crate::scan::orchestrator::extract_i18n_block(rule, "risk", &lang))
+            .filter(|r| !r.is_empty())
+            .unwrap_or_else(|| first.risk.clone());
+        if !risk_text.is_empty() {
             shared_html.push_str(&format!(
                 r#"<details class="finding-risk-block" open><summary>⚠️ {i18n_risk}</summary><p>{}</p></details>"#,
-                linkify_acronyms(report_locale, &escape(&first.risk))
+                linkify_acronyms(report_locale, &escape(&risk_text))
             ));
         }
         if let Some(solution) = &first.solution
@@ -817,6 +827,26 @@ mod tests {
         assert!(html.contains("Risque de test"));
         assert!(html.contains("Solution de test"));
         assert!(html.contains(r#"class="rule-group-badge">2<"#));
+    }
+
+    #[test]
+    fn test_risk_block_shows_the_rule_risk_not_the_short_message() {
+        // A data-flow finding carries the rule's short `message` in
+        // `risk`; the report must explain with the rule's risk text.
+        let fr = load_report_locale("fr");
+        let mut f = finding("SECURITY", "taint_sqli", "SQLi", "a.py");
+        f.risk = "Injection SQL — données non fiables".to_string();
+        let refs = [&f];
+        let mut catalog = BTreeMap::new();
+        catalog.insert(
+            "taint_sqli".to_string(),
+            serde_json::json!({"risk": {"en": "An attacker can read your data.", "fr": "Un attaquant peut lire vos données."}}),
+        );
+        let html = render_findings(&refs, "HIGH", &fr, &catalog);
+        assert!(html.contains("Un attaquant peut lire vos données."), "{html}");
+        assert!(!html.contains("données non fiables"), "{html}");
+        let html = render_findings(&refs, "HIGH", &fr, &BTreeMap::new());
+        assert!(html.contains("données non fiables"), "fallback without the rule");
     }
 
     #[test]

@@ -693,10 +693,10 @@
       "benefit": "Protección de secretos en logs CI/CD y entornos fork."
     },
     "workflow_not_in_codeowners": {
-      "name": "Workflows de despliegue modificables sin revisión",
-      "risk": "Sus workflows de GitHub Actions (los archivos de .github/workflows/ que compilan y despliegan su código) pueden ser modificados por cualquier colaborador sin que nadie revise el cambio. Alguien podría cambiar cómo se despliega su código, o leer sus secretos, sin que nadie lo note.",
-      "solution": "Cree el archivo .github/CODEOWNERS (GitHub lee en él quién debe aprobar los cambios de qué archivos) con la línea /.github/workflows/ @su-equipo, y active « Require review from Code Owners » en las reglas de protección de rama del repositorio.",
-      "benefit": "Todo cambio en cómo se compila y despliega su código debe ser aprobado por una persona que usted eligió."
+      "name": "Los archivos que publican su aplicación pueden modificarse sin control",
+      "risk": "Su proyecto contiene archivos de automatización (carpeta .github/workflows/) que construyen su aplicación y la ponen en línea. Hoy, cualquier persona que pueda proponer cambios en el proyecto también puede modificarlos sin que un responsable lo apruebe. Podría publicar una versión con trampa de su aplicación, o hacerse con sus contraseñas de servicio.",
+      "solution": "Designe a una persona que deberá aprobar cualquier cambio en estos archivos: 1) en su proyecto, cree en la carpeta .github un archivo de texto llamado CODEOWNERS; 2) escriba en él una sola línea: /.github/workflows/ @usuario-GitHub-del-responsable; 3) en el sitio de GitHub, abra Settings, luego Branches, y en la rama principal marque « Require review from Code Owners ». A partir de entonces, ningún cambio en estos archivos se acepta sin la aprobación de esa persona.",
+      "benefit": "Nadie puede cambiar la forma en que se publica su aplicación sin la aprobación de un responsable."
     },
     "gha_secret_in_log": {
       "name": "Secreto impreso en el log del workflow",
@@ -723,10 +723,10 @@
       "benefit": "Elimina el riesgo de compromiso de infraestructura mediante pull requests maliciosos en repositorios públicos (OWASP CI-CD-06)."
     },
     "ci_curl_pipe_bash": {
-      "name": "Script remoto redirigido a shell",
-      "risk": "Redirigir un script remoto directamente a un shell ejecuta código arbitrario sin inspección, permitiendo ataques de supply chain si el recurso remoto está comprometido.",
-      "solution": "Descargar el script a un archivo primero, inspeccionarlo y ejecutarlo explícitamente tras la verificación.",
-      "benefit": "Previene la ejecución de código arbitrario desde recursos remotos comprometidos en el pipeline CI/CD (OWASP CI-CD-09)."
+      "name": "Un script descargado se ejecuta sin ser verificado",
+      "risk": "Un comando descarga un script de Internet y lo ejecuta en seguida (curl … | bash). Si el sitio que lo aloja es atacado, el script con trampa se ejecuta en su cadena de publicación, con sus contraseñas.",
+      "solution": "Verifique el script antes de ejecutarlo: 1) descárguelo en un archivo; 2) compare su huella (sha256sum) con la publicada por su autor; 3) ejecútelo solo si coinciden.",
+      "benefit": "Un sitio atacado no puede ejecutar código en su cadena de publicación."
     },
     "ci_insecure_download": {
       "name": "Descarga HTTP no cifrada en CI/CD",
@@ -771,10 +771,10 @@
       "benefit": "Previene ataques de inyección de variables de entorno que afectan todos los pasos siguientes del workflow."
     },
     "ci_docker_privileged": {
-      "name": "Contenedor Docker privilegiado en CI/CD",
-      "risk": "Ejecutar un contenedor CI/CD en modo privilegiado otorga acceso completo al kernel del host, dispositivos y namespaces — equivalente a root en el sistema host.",
-      "solution": "Eliminar el flag --privileged. Usar capacidades Linux específicas (--cap-add) solo para la funcionalidad exactamente requerida.",
-      "benefit": "Previene ataques de escape de contenedor y limita el radio de impacto de un job CI/CD comprometido al contenedor."
+      "name": "Un contenedor de la cadena de publicación tiene todos los derechos",
+      "risk": "Un contenedor se lanza con la opción --privileged y tiene entonces los mismos derechos que la máquina que lo aloja. Si este contenedor es atacado, el atacante controla toda la máquina.",
+      "solution": "Quite la opción --privileged; si de verdad hace falta una capacidad concreta, conceda solo esa con --cap-add (por ejemplo --cap-add NET_ADMIN).",
+      "benefit": "Un contenedor atacado queda encerrado en su contenedor."
     },
     "gha_dangerous_artefact": {
       "name": "Archivos sensibles subidos como artefacto",
@@ -789,16 +789,16 @@
       "benefit": "Elimina la superficie de ataque introducida por comandos workflow inseguros."
     },
     "gha_cache_poisoning": {
-      "name": "Riesgo de envenenamiento de caché en workflow de release",
-      "risk": "Usar cachés de build durante un workflow de release permite el envenenamiento de caché — una entrada comprometida puede inyectar código malicioso en un artefacto publicado.",
-      "solution": "Deshabilitar el caché en workflows de release (cache: false) o usar entornos aislados sin caché compartida.",
-      "benefit": "Garantiza que los artefactos publicados se construyen solo desde el código fuente, previniendo ataques de supply chain (OWASP CI-CD-09)."
+      "name": "La publicación puede reutilizar una caché con trampa",
+      "risk": "La publicación de su aplicación reutiliza archivos guardados en caché por ejecuciones anteriores. Si esa caché tenía trampa, código malicioso acaba en la versión que publica.",
+      "solution": "Desactive la caché en los pasos que publican su aplicación (cache: false), para que partan siempre de sus fuentes.",
+      "benefit": "Lo que publica se construye únicamente a partir de su código."
     },
     "dependabot_insecure_exec": {
-      "name": "Ejecución de código externo inseguro en Dependabot",
-      "risk": "insecure-external-code-execution: allow permite ejecutar scripts externos no verificados durante las actualizaciones de dependencias, habilitando ataques de supply chain.",
-      "solution": "Eliminar insecure-external-code-execution: allow de dependabot.yml.",
-      "benefit": "Previene la ejecución de código externo no verificado durante las actualizaciones automatizadas de dependencias."
+      "name": "Dependabot ejecuta código externo sin control",
+      "risk": "El archivo dependabot.yml contiene insecure-external-code-execution: allow. Durante las actualizaciones automáticas de sus bibliotecas, código descargado puede ejecutarse con acceso a sus secretos.",
+      "solution": "Elimine la línea insecure-external-code-execution: allow del archivo .github/dependabot.yml.",
+      "benefit": "Las actualizaciones automáticas ya no ejecutan código que usted no ha verificado."
     },
     "gha_github_app_no_revoke": {
       "name": "Token de GitHub App no revocado tras el job",
@@ -819,10 +819,10 @@
       "benefit": "Limita el radio de impacto a solo los secretos explícitamente referenciados, siguiendo el principio de mínimo privilegio."
     },
     "ci_netcat_reverse_shell": {
-      "name": "Reverse shell netcat en script CI/CD",
-      "risk": "El uso de netcat (nc) con una dirección IP en un script CI/CD es un fuerte indicador de reverse shell o exfiltración de datos.",
-      "solution": "Eliminar el comando netcat. Usar herramientas específicas con lista de permisos para pruebas de red legítimas.",
-      "benefit": "Detecta posibles reverse shells y canales de exfiltración en scripts de pipeline CI/CD."
+      "name": "Un comando abre una conexión sospechosa hacia el exterior (netcat)",
+      "risk": "Un script de publicación usa netcat (nc) con una dirección IP. Es el método clásico para abrir un acceso remoto a un atacante o para enviar sus datos al exterior.",
+      "solution": "Trate este comando como una posible intrusión: 1) elimínelo; 2) busque en el historial del repositorio quién lo añadió y cuándo; 3) cambie las contraseñas que usan sus scripts de publicación.",
+      "benefit": "Nadie puede servirse de sus scripts de publicación para acceder a sus máquinas."
     },
     "gha_secrets_bypass_redaction": {
       "name": "Bypass de redacción de secretos vía JSON",
@@ -1617,22 +1617,22 @@
       "benefit": "Cumplimiento del RGPD, menor exposición legal, soporte del derecho al olvido (Art. 17)."
     },
     "dockerfile_root_user": {
-      "name": "Dockerfile ejecutado como root",
-      "risk": "El contenedor se ejecuta como root por defecto, aumentando el radio de impacto en caso de compromiso (CWE-250).",
-      "solution": "Agregar directiva USER con un usuario no-root (ej: USER appuser) después de instalar dependencias.",
-      "benefit": "Principio de mínimo privilegio, menor riesgo de escape de contenedor."
+      "name": "Su aplicación se ejecuta como administrador en su contenedor",
+      "risk": "Sin línea USER, el contenedor ejecuta su aplicación con derechos de administrador (root). Si es atacada, el atacante obtiene esos derechos y puede modificar todo en el contenedor.",
+      "solution": "Añada al final del Dockerfile, tras instalar las dependencias, un usuario sin derechos especiales: RUN adduser --disabled-password appuser y después USER appuser.",
+      "benefit": "Un fallo en su aplicación no da derechos de administrador."
     },
     "dockerfile_unpinned_base": {
-      "name": "Imagen base sin versionar",
-      "risk": "Imagen base sin tag de versión (FROM node) descarga la última, causando builds no reproducibles y riesgos de cadena de suministro.",
-      "solution": "Fijar la imagen base a una versión específica o digest (ej: FROM node:20-alpine o FROM node@sha256:...).",
-      "benefit": "Builds reproducibles, protección contra ataques de cadena de suministro."
+      "name": "La imagen de partida del Dockerfile no tiene versión fija",
+      "risk": "La línea FROM toma siempre la última versión de la imagen de partida. Su aplicación puede entonces cambiar o romperse sin que usted modifique nada, o recibir una versión con trampa.",
+      "solution": "Indique una versión precisa en la línea FROM, por ejemplo FROM node:20-alpine en lugar de FROM node.",
+      "benefit": "Cada construcción de la imagen da el mismo resultado, con una versión que usted eligió."
     },
     "dockerfile_copy_all": {
-      "name": "COPY . . en Dockerfile",
-      "risk": "COPY . . copia todo el contexto de build, incluyendo secretos potenciales (.env, credenciales, claves SSH).",
-      "solution": "Usar un archivo .dockerignore y copiar solo los archivos/directorios necesarios.",
-      "benefit": "Imagen más ligera, sin exposición accidental de secretos en las capas del contenedor."
+      "name": "El Dockerfile copia todo el proyecto en la imagen, secretos incluidos",
+      "risk": "La línea COPY . . copia toda la carpeta del proyecto en la imagen Docker, incluidos archivos secretos como .env o claves. Cualquiera que obtenga la imagen puede leerlos.",
+      "solution": "Limite lo que entra en la imagen: 1) junto al Dockerfile, cree un archivo .dockerignore que liste .env, .git y sus archivos de claves; 2) sustituya COPY . . por la copia de solo las carpetas necesarias, por ejemplo COPY src/ ./src/.",
+      "benefit": "Sus secretos no terminan en las imágenes que publica."
     },
     "deprecated_api_java": {
       "name": "API obsoleta (Java)",
@@ -1905,10 +1905,10 @@
       "benefit": "Asegura que los recursos externos no han sido alterados, protege contra la compromisión del CDN."
     },
     "svg_scriptable_content": {
-      "name": "SVG con contenido scriptable",
-      "risk": "Archivos SVG que contienen etiquetas <script>, manejadores de eventos (onload, onclick) o elementos foreignObject pueden ejecutar JavaScript al renderizarse (CWE-79).",
-      "solution": "Sanear archivos SVG para eliminar elementos script, manejadores de eventos y foreignObject. Usar una biblioteca de saneamiento SVG o Content-Security-Policy.",
-      "benefit": "Previene ataques XSS mediante contenido SVG malicioso."
+      "name": "Una imagen SVG contiene código que se ejecuta",
+      "risk": "Este archivo SVG contiene una etiqueta <script>, un atributo como onload o un elemento foreignObject. El navegador ejecuta ese código al mostrar la imagen.",
+      "solution": "Limpie el archivo SVG: 1) elimine las etiquetas <script>, los atributos on… y los elementos foreignObject; 2) pase los SVG enviados por visitantes por una biblioteca de limpieza como DOMPurify antes de mostrarlos.",
+      "benefit": "Sus imágenes ya no pueden ejecutar código."
     },
     "graphql_introspection_enabled": {
       "name": "Introspección GraphQL habilitada",
@@ -2135,10 +2135,10 @@
       "benefit": "XSS protection on links."
     },
     "javascript_uri_html": {
-      "name": "javascript: URI in HTML attribute",
-      "risk": "href/action/src with javascript: executes arbitrary code on click or load (CWE-79).",
-      "solution": "Use normal URIs (/, #, https://) and event handlers.",
-      "benefit": "XSS protection in HTML attributes."
+      "name": "Un enlace ejecuta JavaScript (javascript:…)",
+      "risk": "Un atributo href, action o src empieza por javascript: y el navegador ejecuta ese código al hacer clic o al cargar. Si una parte viene de un visitante, un atacante puede hacer ejecutar su propio código.",
+      "solution": "Sustituya javascript: por una dirección real (/, # o https://…) y coloque la acción en un archivo .js con addEventListener().",
+      "benefit": "Sus enlaces ya no pueden servir para ejecutar código."
     },
     "data_uri_html": {
       "name": "Data URI with HTML content",
@@ -2147,10 +2147,10 @@
       "benefit": "Protection against HTML injection vía data URIs."
     },
     "data_uri_html_tag": {
-      "name": "Data URI HTML in tag",
-      "risk": "src/href with data:text/html loads executable HTML content directly in the browser (CWE-79).",
-      "solution": "Forbid data:text/html in src and href attributes.",
-      "benefit": "XSS protection vía HTML tags."
+      "name": "Un enlace o una imagen carga HTML oculto en su dirección",
+      "risk": "Un atributo src o href empieza por data:text/html, así que el navegador ejecuta la página oculta en esa dirección. Un atacante puede usarlo para hacer ejecutar su propio código.",
+      "solution": "Sustituya esta dirección data:text/html por un enlace a un archivo real de su sitio, y no acepte nunca una dirección data: procedente de un visitante.",
+      "benefit": "Sus páginas no ejecutan código oculto en una dirección."
     },
     "inline_event_handler": {
       "name": "Inline event handler",
@@ -2159,10 +2159,10 @@
       "benefit": "CSP compatibility and XSS protection."
     },
     "inline_event_handler_html": {
-      "name": "Inline event handler in HTML",
-      "risk": "on* attributes in HTML execute JavaScript directly, vulnerable to XSS (CWE-79).",
-      "solution": "Move JavaScript to separate .js files with addEventListener().",
-      "benefit": "HTML/JS separation and XSS protection."
+      "name": "JavaScript escrito directamente en el HTML (onclick=…)",
+      "risk": "Un atributo como onclick contiene JavaScript directamente en el HTML. El navegador ya no puede bloquear los scripts que un atacante lograra inyectar en la página.",
+      "solution": "Mueva este código a un archivo .js: 1) dé un id al elemento; 2) en el archivo .js, añada element.addEventListener('click', …); 3) elimine el atributo onclick del HTML.",
+      "benefit": "El navegador puede bloquear cualquier script que no venga de sus archivos."
     },
     "base64_credentials": {
       "name": "Base64 encoded credentials",
@@ -2453,10 +2453,10 @@
       "benefit": "Reduce la superficie de ataque y refuerza la seguridad de la aplicación."
     },
     "dom_clobbering": {
-      "name": "DOM Clobbering",
-      "risk": "Elementos nombrados location, document, etc. sobrescriben propiedades globales de JavaScript, permitiendo XSS o evasión de lógica (CWE-79).",
-      "solution": "Evitar usar nombres de propiedades globales de JavaScript como atributos id o name de elementos HTML.",
-      "benefit": "Reduce la superficie de ataque y refuerza la seguridad de la aplicación."
+      "name": "Un id o name de la página oculta una variable del navegador",
+      "risk": "Un elemento HTML tiene un id o un name como location o document. El navegador lo confunde con sus propias variables, lo que puede desviar su JavaScript y permitir un ataque.",
+      "solution": "Cambie el nombre de este id o name por uno propio de su página, por ejemplo bloque-location en lugar de location.",
+      "benefit": "Su JavaScript usa las variables del navegador y no un elemento de la página."
     },
     "fstring_in_logging": {
       "name": "F-string en logging",
@@ -2585,10 +2585,10 @@
       "benefit": "Reduce la superficie de ataque y refuerza la seguridad de la aplicación."
     },
     "taint_codeinj": {
-      "name": "Inyección de código (taint)",
-      "risk": "Un atacante puede ejecutar código Python arbitrario en el servidor.",
-      "solution": "Reemplazar la ejecución dinámica por ast.literal_eval() para el análisis de datos, o usar una lista blanca de operaciones permitidas.",
-      "benefit": "Reduce la superficie de ataque y refuerza la seguridad de la aplicación."
+      "name": "Inyección de código: un atacante puede hacer ejecutar su propio código",
+      "risk": "Un dato enviado por un visitante es ejecutado como código por su aplicación. Así, un atacante puede tomar el control del servidor y acceder a todos sus datos.",
+      "solution": "No ejecute nunca un dato recibido de un visitante como código: para leer un valor simple, use ast.literal_eval() en lugar de eval(); si no, elija entre una lista fija de acciones permitidas.",
+      "benefit": "Nadie puede hacer que su aplicación ejecute su propio código."
     },
     "taint_deserialization": {
       "name": "Deserialización (taint)",
@@ -2615,22 +2615,22 @@
       "benefit": "Reduce la superficie de ataque y refuerza la seguridad de la aplicación."
     },
     "taint_path_traversal": {
-      "name": "Traversal de ruta (taint)",
-      "risk": "Un atacante puede leer o escribir archivos arbitrarios en el servidor.",
-      "solution": "Usar path.basename() y validar que la ruta resuelta permanezca dentro del directorio permitido.",
-      "benefit": "Reduce la superficie de ataque y refuerza la seguridad de la aplicación."
+      "name": "Acceso a archivos fuera de la carpeta prevista",
+      "risk": "Un nombre de archivo enviado por un visitante sirve para abrir un archivo en el servidor. Con « ../ » un atacante puede leer o escribir otros archivos, como sus contraseñas o su configuración.",
+      "solution": "Compruebe la ruta antes de abrir el archivo: 1) calcule la ruta completa con os.path.realpath(); 2) recházela si no empieza por la carpeta permitida.",
+      "benefit": "Un visitante solo puede abrir los archivos que usted ha previsto."
     },
     "taint_rce": {
-      "name": "Ejecución de comando (taint)",
-      "risk": "Un atacante puede ejecutar comandos arbitrarios.",
-      "solution": "Evitar Runtime.exec con entrada de usuario; usar ProcessBuilder con listas de argumentos.",
-      "benefit": "Reduce la superficie de ataque y refuerza la seguridad de la aplicación."
+      "name": "Inyección de comandos: un atacante puede lanzar comandos en el servidor",
+      "risk": "Un dato enviado por un visitante se coloca en un comando del sistema lanzado por su aplicación. Así, un atacante puede ejecutar sus propios comandos en el servidor y tomar su control.",
+      "solution": "No construya el comando como texto: llame a subprocess.run() con una lista [programa, argumento] y shell=False, y acepte solo valores previstos de antemano.",
+      "benefit": "Nadie puede lanzar sus propios comandos en su servidor."
     },
     "taint_sqli": {
-      "name": "Inyección SQL (taint)",
-      "risk": "Un atacante puede leer, modificar o eliminar registros de la base de datos.",
-      "solution": "Usar consultas parametrizadas con placeholders (%s, ?).",
-      "benefit": "Reduce la superficie de ataque y refuerza la seguridad de la aplicación."
+      "name": "Inyección SQL: un atacante puede leer o modificar su base de datos",
+      "risk": "Un dato enviado por un visitante se inserta tal cual en una consulta a la base de datos. Así, un atacante puede leer, modificar o borrar sus datos, incluidos los de otros usuarios.",
+      "solution": "Pase el dato a la consulta como parámetro en lugar de insertarlo en su texto: escriba la consulta con un marcador (? o %s según su biblioteca) y dé el valor aparte.",
+      "benefit": "Sus datos ya no pueden leerse ni modificarse con una consulta manipulada."
     },
     "taint_ssrf": {
       "name": "SSRF (taint)",
@@ -2651,10 +2651,10 @@
       "benefit": "Reduce la superficie de ataque y refuerza la seguridad de la aplicación."
     },
     "taint_xss": {
-      "name": "XSS (taint)",
-      "risk": "Un atacante puede inyectar scripts maliciosos que se ejecutan en los navegadores de otros usuarios.",
-      "solution": "Escapar toda la entrada de usuario antes de renderizar en HTML. Usar el auto-escapado del framework o html.escape().",
-      "benefit": "Reduce la superficie de ataque y refuerza la seguridad de la aplicación."
+      "name": "Código malicioso inyectado en sus páginas (XSS)",
+      "risk": "Un dato enviado por un visitante se muestra tal cual en una página web. Un atacante puede introducir un script que se ejecuta en los demás usuarios y roba su sesión o sus credenciales.",
+      "solution": "Deje que su motor de plantillas escape el dato (Jinja2 o Django, sin |safe ni Markup()), o use html.escape(): sus caracteres especiales ya no se interpretan como código.",
+      "benefit": "Sus páginas ya no ejecutan código aportado por un visitante."
     },
     "taint_xxe": {
       "name": "XXE (taint)",
@@ -3377,16 +3377,16 @@
       "name": "XSS almacenado"
     },
     "taint_cmdi_js": {
-      "name": "Inyección de comandos (JavaScript)"
+      "name": "Inyección de comandos: un atacante puede lanzar comandos en el servidor"
     },
     "taint_pathtraversal_js": {
-      "name": "Recorrido de directorios (JavaScript)"
+      "name": "Acceso a archivos fuera de la carpeta prevista"
     },
     "taint_sqli_js": {
-      "name": "Inyección SQL (JavaScript)"
+      "name": "Inyección SQL: un atacante puede leer o modificar su base de datos"
     },
     "taint_xss_js": {
-      "name": "Cross-site scripting (JavaScript)"
+      "name": "Código malicioso inyectado en sus páginas (XSS)"
     },
     "tainted_format_string": {
       "name": "Cadena de formato controlada por el usuario"
@@ -3473,19 +3473,19 @@
       "name": "Campos sensibles del modelo en la respuesta"
     },
     "taint_cmdi_php": {
-      "name": "Inyección de comandos (PHP)"
+      "name": "Inyección de comandos: un atacante puede lanzar comandos en el servidor"
     },
     "taint_open_redirect_php": {
       "name": "Redirección abierta (PHP)"
     },
     "taint_pathtraversal_php": {
-      "name": "Recorrido de directorios (PHP)"
+      "name": "Acceso a archivos fuera de la carpeta prevista"
     },
     "taint_sqli_php": {
-      "name": "Inyección SQL (PHP)"
+      "name": "Inyección SQL: un atacante puede leer o modificar su base de datos"
     },
     "taint_xss_php": {
-      "name": "Cross-site scripting (PHP)"
+      "name": "Código malicioso inyectado en sus páginas (XSS)"
     },
     "unbounded_decompression": {
       "name": "Descompresión sin límite de tamaño"
