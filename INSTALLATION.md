@@ -80,17 +80,17 @@ macOS:
 
 ```bash
 ./target/release/sast-engine --version
-./target/release/sast-engine rules list target/release/rules.scapack | head -1
+./target/release/sast-engine list-rules | head -1
 ```
 
 Windows:
 
 ```powershell
 .\target\release\sast-engine.exe --version
-.\target\release\sast-engine.exe rules list target\release\rules.scapack
+.\target\release\sast-engine.exe list-rules | Select-Object -First 1
 ```
 
-`--version` prints the build, for example `sast-engine 0.1.0+42.c5be809`: the commit count and short commit hash say exactly which code you built. Every analysis prints it on its first line too. `rules list` prints the number of rule files in the pack on its first line: 38 for the demonstration rules this repository ships.
+`--version` prints the build, for example `sast-engine 0.1.0+42.c5be809`: the commit count and short commit hash say exactly which code you built. Every analysis prints it on its first line too. `list-rules` prints the number of rules on its first line: 26 for the demonstration rules this repository ships.
 
 Every command below is run from the `sast-engine-public` folder, with the engine's full path.
 
@@ -111,7 +111,7 @@ macOS:
 mkdir -p ~/sast-engine-rules
 cp ~/Downloads/rules.scapack ~/Downloads/advisories.sadb ~/sast-engine-rules/
 cp ~/sast-engine-rules/rules.scapack ~/sast-engine-rules/advisories.sadb target/release/
-./target/release/sast-engine rules list target/release/rules.scapack | head -1
+./target/release/sast-engine list-rules | head -1
 ```
 
 Windows:
@@ -120,10 +120,10 @@ Windows:
 mkdir ~\sast-engine-rules
 copy ~\Downloads\rules.scapack, ~\Downloads\advisories.sadb ~\sast-engine-rules\
 copy ~\sast-engine-rules\rules.scapack, ~\sast-engine-rules\advisories.sadb target\release\
-.\target\release\sast-engine.exe rules list target\release\rules.scapack
+.\target\release\sast-engine.exe list-rules | Select-Object -First 1
 ```
 
-`rules list` must now print more than 700 rule files. Each build (steps 4 and 11) puts the demonstration pack back next to the engine: copy the full pack again after every build. Instead of copying, you can also add `--rules ~/sast-engine-rules/rules.scapack` and `--advisories ~/sast-engine-rules/advisories.sadb` to each analysis.
+`list-rules` must now print more than 600 rules. Each build (steps 4 and 11) puts the demonstration pack back next to the engine: copy the full pack again after every build. Instead of copying the rules, you can also add `--rules ~/sast-engine-rules/rules.scapack` to each analysis; `advisories.sadb` must sit next to the engine.
 
 ## Step 7: describe your project (first run)
 
@@ -154,30 +154,30 @@ The file looks like this; you can edit it by hand at any time:
 - `languages`: the languages checked. Accepted values: `python`, `java`, `javascript`, `typescript` (same rules as `javascript`), `php`, `csharp`, `html`, `yaml`, `dockerfile`; the Dockerfile rules are always added. If you later add code in another language, add it here: until then, every analysis warns that those files are checked by no rule.
 - `paths.include` and `paths.exclude`: the folders analysed and skipped.
 
-The questions are asked only in an interactive terminal. In a script, a CI job, or with `--quiet`, the engine analyses the whole folder without asking.
+The questions are asked only in an interactive terminal. In a script or a CI job, the engine analyses the whole folder without asking.
 
 ## Step 8: run the analysis
 
-For a complete analysis, rules and dependencies, in English:
+For a complete analysis, in English:
 
 macOS:
 
 ```bash
 cd ~/sast-engine-public
-./target/release/sast-engine scan /path/to/your/project --lang en --with-deps
+./target/release/sast-engine scan /path/to/your/project --lang en
 ```
 
 Windows:
 
 ```powershell
 cd ~\sast-engine-public
-.\target\release\sast-engine.exe scan C:\path\to\your\project --lang en --with-deps
+.\target\release\sast-engine.exe scan C:\path\to\your\project --lang en
 ```
 
 For a report in French, Spanish or German, replace `--lang en` with `--lang fr`, `--lang es` or `--lang de`.
 
 - `--lang` sets the language of the report: `en`, `fr`, `es` or `de`.
-- `--with-deps` also compares the versions pinned in your dependency files (`requirements.txt`, `package-lock.json`, `pom.xml`, `composer.lock`…) with published vulnerabilities, using `advisories.sadb` (step 6). Without that file, the analysis says the dependencies were not checked; it never reports them as free of vulnerabilities.
+- The versions pinned in your dependency files (`requirements.txt`, `package-lock.json`, `pom.xml`, `composer.lock`…) are compared with published vulnerabilities as soon as `advisories.sadb` sits next to the engine (step 6); the output names the database it read. Without that file, the dependencies are not checked.
 
 The terminal first shows what was loaded, then the progress and a summary:
 
@@ -192,17 +192,17 @@ The terminal first shows what was loaded, then the progress and a summary:
 [sast-engine] 601 file(s) scanned, 101913 line(s) of code, 2960 finding(s)
 ```
 
-Options are added to the same command, for example `./target/release/sast-engine scan /path/to/your/project --lang en --severity HIGH,CRITICAL`. Useful options:
+Options are added to the same command, for example `./target/release/sast-engine scan /path/to/your/project --lang en --no-cache`:
 
 | Option | Effect |
 |---|---|
-| `--severity HIGH,CRITICAL` | keeps only these severities |
-| `--only-category security` | analyses one category only (the list: `./target/release/sast-engine list-rules`) |
+| `--lang en\|fr\|es\|de` | language of the report |
+| `--no-cache` | analyses everything again (see step 10) |
+| `--format sarif` | writes a SARIF file instead of the HTML report, for an IDE or a code platform; it is printed to the terminal, redirect it with `> result.sarif` |
 | `--exclude 'tests/'` | skips more files (repeatable) |
-| `--quick` | turns off `--with-deps`, `--with-tests` and the database options, for a faster run |
-| `--format sarif --output result.sarif` | SARIF file for an IDE or a code platform, instead of HTML |
-| `--quiet` | prints the report path only |
-| `--no-cache` | analyses everything again, ignoring the cache of step 10 |
+| `--only-category security` | analyses one category only (the list: `./target/release/sast-engine list-rules`) |
+| `--quick` | skips the dependency check, for a faster run |
+| `--rules <file>` | uses another rule pack than the one next to the engine |
 
 ## Step 9: read the report
 
@@ -234,20 +234,9 @@ The next analysis is much faster: it only redoes the files you changed and those
 To silence a finding you have reviewed:
 
 1. click 🚫 on the finding in the report (as many as needed), then the download button in the panel that appears: it saves a `.sca-suppress.json` file;
-2. move that file to the root of your project;
-3. pass it to the next analyses:
+2. move that file to the root of your project.
 
-macOS:
-
-```bash
-./target/release/sast-engine scan /path/to/your/project --lang en --with-deps --suppress-file /path/to/your/project/.sca-suppress.json
-```
-
-Windows:
-
-```powershell
-.\target\release\sast-engine.exe scan C:\path\to\your\project --lang en --with-deps --suppress-file C:\path\to\your\project\.sca-suppress.json
-```
+The next analyses read it by themselves.
 
 A suppression applies to that rule, file and line content: if the line changes, the finding comes back, so that a new problem is never hidden.
 
@@ -287,7 +276,7 @@ The engine and `rules.scapack` (plus `advisories.sadb` if you have it) are all a
 | `cargo: command not found` | close and reopen the terminal (step 2); on Windows, restart the session |
 | `linker 'link.exe' not found` (Windows) | the C++ build tools are missing: run the third `winget` line of step 2 |
 | the engine stops and names a missing `rules.scapack` | run `cargo build --release` again, or copy the pack next to the engine (step 6) |
-| `No advisory database (…): dependencies were not checked` | `advisories.sadb` is not next to the engine: step 6, or pass `--advisories` |
+| dependencies are never checked | `advisories.sadb` is not next to the engine: step 6 |
 | a language of your project is never checked | add it to `languages` in `audit.config.json` (step 7) |
 | `git pull` refuses | see the end of step 11 |
 

@@ -2384,6 +2384,19 @@ pub fn run_scan(config: &ScanConfig) -> ScanReport {
         advisory_database = Some(status);
         let vulnerable_count = vulnerable.len();
         all_findings.extend(vulnerable);
+        // Dependency findings name their file relative to the scanned root,
+        // like every other finding, and obey the report's 🚫 suppressions:
+        // they carried the absolute path of the tester's machine and could
+        // not be hidden (2026-11-14).
+        for f in all_findings.iter_mut().filter(|f| f.category == "DEPENDENCIES") {
+            if let Ok(rel) = Path::new(&f.file).strip_prefix(&config.root) {
+                f.file = rel.to_string_lossy().replace('\\', "/");
+            }
+        }
+        all_findings.retain(|f| {
+            f.category != "DEPENDENCIES"
+                || !suppressions.is_suppressed(&f.rule_key, &f.file, &f.code)
+        });
         dependency_stats = Some(DependencyStats {
             total_scanned: all_deps.len(),
             unpinned: unpinned.len(),
@@ -3043,6 +3056,44 @@ mod tests {
         assert_eq!(cached.findings.iter().filter(|f| f.rule_key == "taint_q").count(), 2);
         let stat = cached.cache_stats.iter().find(|s| s.language == "csharp").unwrap();
         assert_eq!((stat.dirty, stat.analysed), (1, 1), "only B.cs redone");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn test_dependency_findings_use_relative_paths_and_obey_suppressions() {
+        // A dependency finding named the absolute path of the dependency
+        // file (the tester's own machine in the report and in SARIF), and
+        // the report's 🚫 button never hid it (2026-11-14).
+        let root = temp_dir();
+        let rules_dir = root.join("rules");
+        std::fs::create_dir_all(&rules_dir).unwrap();
+        write(&root, "requirements.txt", "django\n");
+        let config = ScanConfig {
+            root: root.clone(),
+            rules_path: rules_dir.clone(),
+            with_deps: true,
+            exclude_patterns: vec![],
+            ..ScanConfig::default()
+        };
+        let report = run_scan(&config);
+        let dep = report
+            .findings
+            .iter()
+            .find(|f| f.rule_key == "unpinned_dependency")
+            .expect("unpinned dependency reported");
+        assert_eq!(dep.file, "requirements.txt");
+        let hash = crate::project::suppress::line_hash(&dep.code);
+        let suppress_path = root.join(".sca-suppress.json");
+        std::fs::write(
+            &suppress_path,
+            format!(r#"{{"suppressions": [{{"rule_key": "unpinned_dependency", "file": "requirements.txt", "code_hash": {hash}}}]}}"#),
+        )
+        .unwrap();
+        let report = run_scan(&ScanConfig {
+            suppress_file: Some(suppress_path),
+            ..config
+        });
+        assert!(report.findings.iter().all(|f| f.rule_key != "unpinned_dependency"));
         std::fs::remove_dir_all(&root).ok();
     }
 

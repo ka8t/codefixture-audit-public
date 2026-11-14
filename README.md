@@ -21,7 +21,7 @@ Windows (PowerShell):
 ```
 
 - `--lang` sets the report language: `en`, `fr`, `es` or `de`.
-- If you received `advisories.sadb`, add `--with-deps` to also check your dependencies against published vulnerabilities (see [step 6](INSTALLATION.md#step-6-add-the-full-catalog-and-the-vulnerability-database-optional)).
+- If you received `advisories.sadb`, place it next to the engine: your dependencies are then also checked against published vulnerabilities (see [step 6](INSTALLATION.md#step-6-add-the-full-catalog-and-the-vulnerability-database-optional)).
 - The first run on a project asks what to analyse and writes `audit.config.json`; run the same command again for the analysis.
 - The report is written into your project, under `audit-reports/`: the terminal prints its path on the `Report generated` line. Open it in a browser.
 

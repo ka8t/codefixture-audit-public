@@ -310,36 +310,6 @@ fn read_rules_or_exit(
     })
 }
 
-/// `sast-engine rules list <pack>` (ADR-0040): the rule files of a pack
-/// (or folder), one per line with the first 12 hex characters of their
-/// SHA-256 — the value `rules diff` compares.
-fn run_rules_list_command(lang: &str, path: &Path) -> ExitCode {
-    let script_locale = sast_engine::i18n::load_script_locale(lang);
-    if path.is_dir() && !RULE_FOLDERS_ACCEPTED {
-        emit_error(
-            &sast_engine::i18n::t(&script_locale, "scan_rules_pack_only")
-                .replace("{path}", &path.display().to_string()),
-        );
-        return ExitCode::from(2);
-    }
-    let files = match read_rules_or_exit(path, &script_locale) {
-        Ok(files) => files,
-        Err(code) => return code,
-    };
-    let mut out = std::io::stdout().lock();
-    let _ = writeln!(
-        out,
-        "{}",
-        sast_engine::i18n::t(&script_locale, "rules_list_header")
-            .replace("{path}", &path.display().to_string())
-            .replace("{count}", &files.len().to_string())
-    );
-    for (rel, content) in &files {
-        let hash = sast_engine::rules::pack_format::source_sha256(content);
-        let _ = writeln!(out, "  {}  {rel}", &hash[..12]);
-    }
-    ExitCode::SUCCESS
-}
 
 /// Rule languages declared by the project (ADR-0038): the `languages` key
 /// of `audit.config.json`, warning once about the values that name no
@@ -949,6 +919,126 @@ struct Cli {
     command: Command,
 }
 
+/// Formats of `scan --format`: the shared binary writes the HTML report or
+/// SARIF (for an IDE or a code platform); the plain-text listing is a
+/// private tool (2026-11-14).
+const SCAN_FORMATS: &[&str] = &["html", "sarif"];
+
+/// Options of `scan` kept for the private binary only (2026-11-14): the
+/// shared binary offers a short list, checks the dependencies as soon as
+/// `advisories.sadb` sits next to it and reads the project's
+/// `.sca-suppress.json` by itself; these options then take their default.
+#[derive(clap::Args, Debug)]
+struct ScanExtraArgs {
+    /// Console log format: `text` (default, `[sast-engine] …` lines)
+    /// or `json` (one JSON object per line: `timestamp`, `level`,
+    /// `message`, `duration_ms` for phases — ticket #92).
+    #[arg(long, default_value = "text", value_parser = ["text", "json"])]
+    log_format: String,
+    /// Output file. Absent by default with `--format html`: writes
+    /// `<PREFIX>-REPORT-<timestamp>.html` (`PREFIX` from
+    /// `brand.json`, `SCA` by default) into `audit-reports/` of
+    /// the scanned folder (Audit uses `docs/audit-reports/`). Absent with
+    /// `--format text`/`sarif`: stdout.
+    #[arg(long)]
+    output: Option<PathBuf>,
+    /// `.sca-suppress.json` file.
+    #[arg(long)]
+    suppress_file: Option<PathBuf>,
+    /// Only displays the report, not the summary on stderr.
+    #[arg(long)]
+    quiet: bool,
+    /// Runs the audited project's test suite (opt-in, executes
+    /// arbitrary project code).
+    #[arg(long)]
+    with_tests: bool,
+    /// Explicit test command (otherwise auto-detected).
+    #[arg(long)]
+    test_command: Option<String>,
+    /// Detects unpinned dependencies, and dependencies whose exact
+    /// version has a published vulnerability according to the offline
+    /// advisory database (see `--advisories`).
+    #[arg(long)]
+    with_deps: bool,
+    /// PostgreSQL host — enables the DB schema audit if present.
+    #[arg(long)]
+    db_host: Option<String>,
+    #[arg(long)]
+    db_port: Option<u16>,
+    #[arg(long)]
+    db_name: Option<String>,
+    #[arg(long)]
+    db_user: Option<String>,
+    /// `.env` file containing the DB password (default: `.env`).
+    #[arg(long)]
+    db_password_env_file: Option<String>,
+    /// Variable in the `.env` file carrying the password (default: `DB_PASSWORD`).
+    #[arg(long)]
+    db_password_env_var: Option<String>,
+    /// History directory (JSON export after every scan, compared
+    /// against the last baseline found).
+    #[arg(long)]
+    data_dir: Option<PathBuf>,
+    /// Rule identifier to disable (repeatable).
+    #[arg(long = "disable-rule")]
+    disable_rule: Vec<String>,
+    /// Severities to keep, comma-separated (e.g.
+    /// "HIGH,CRITICAL"). Accepted values: CRITICAL/HIGH/MEDIUM/LOW/INFO.
+    #[arg(long)]
+    severity: Option<String>,
+    /// Offline advisory database file of published vulnerabilities,
+    /// read by `--with-deps` (ADR-0042) — default: `advisories.sadb`
+    /// next to the executable. Missing: no vulnerability matching, and
+    /// the scan says so; the rest of `--with-deps` is unchanged. The
+    /// scan itself never uses the network.
+    #[arg(long)]
+    advisories: Option<PathBuf>,
+    /// `brand.json` runtime customization file (ticket #87/spec
+    /// #83) — default: `brand.json` next to the executable
+    /// (like `advisories` above).
+    /// Absent or invalid: strictly unchanged behavior ("CodeFixture"
+    /// defaults).
+    #[arg(long)]
+    brand_file: Option<PathBuf>,
+    /// Also writes a CycloneDX SBOM of the statically detected
+    /// dependencies (`<PREFIX>-SBOM-<timestamp>.json` in the data
+    /// directory) (mirrors `--sbom`).
+    #[arg(long)]
+    sbom: bool,
+    /// Writes a JSON file of scan metrics (files/LOC scanned,
+    /// findings by severity, per-phase durations, exit code) to this
+    /// path — opt-in, local file only (ticket #90).
+    #[arg(long)]
+    metrics_output: Option<PathBuf>,
+}
+
+impl Default for ScanExtraArgs {
+    fn default() -> Self {
+        Self {
+            log_format: "text".to_string(),
+            output: None,
+            suppress_file: None,
+            quiet: false,
+            with_tests: false,
+            test_command: None,
+            with_deps: false,
+            db_host: None,
+            db_port: None,
+            db_name: None,
+            db_user: None,
+            db_password_env_file: None,
+            db_password_env_var: None,
+            data_dir: None,
+            disable_rule: Vec::new(),
+            severity: None,
+            advisories: None,
+            brand_file: None,
+            sbom: false,
+            metrics_output: None,
+        }
+    }
+}
+
 #[derive(Subcommand)]
 // Expected, harmless size gap: this enum only exists during CLI
 // argument parsing (never stored in a collection/hot loop) — boxing
@@ -966,27 +1056,13 @@ enum Command {
         /// project's languages are kept.
         #[arg(long)]
         rules: Option<PathBuf>,
-        /// Output format: `text`, `sarif` or `html`.
-        #[arg(long, default_value = "html")]
+        /// Output format: `html` (the report, default) or `sarif` (for an
+        /// IDE or a code platform).
+        #[arg(long, default_value = "html", value_parser = clap::builder::PossibleValuesParser::new(SCAN_FORMATS))]
         format: String,
         /// HTML report language (`en`/`fr`/`es`/`de`).
         #[arg(long, default_value = "en")]
         lang: String,
-        /// Console log format: `text` (default, `[sast-engine] …` lines)
-        /// or `json` (one JSON object per line: `timestamp`, `level`,
-        /// `message`, `duration_ms` for phases — ticket #92).
-        #[arg(long, default_value = "text", value_parser = ["text", "json"])]
-        log_format: String,
-        /// Output file. Absent by default with `--format html`: writes
-        /// `<PREFIX>-REPORT-<timestamp>.html` (`PREFIX` from
-        /// `brand.json`, `SCA` by default) into `audit-reports/` of
-        /// the scanned folder (Audit uses `docs/audit-reports/`). Absent with
-        /// `--format text`/`sarif`: stdout.
-        #[arg(long)]
-        output: Option<PathBuf>,
-        /// `.sca-suppress.json` file.
-        #[arg(long)]
-        suppress_file: Option<PathBuf>,
         /// Analyses everything again, without reading or writing the taint
         /// cache of `audit-reports/audit-datas/cache/` (by default, a
         /// re-scan only redoes the files a change can affect).
@@ -995,78 +1071,13 @@ enum Command {
         /// Exclusion pattern (repeatable, glob/directory/extension).
         #[arg(long = "exclude")]
         exclude: Vec<String>,
-        /// Only displays the report, not the summary on stderr.
-        #[arg(long)]
-        quiet: bool,
-        /// Runs the audited project's test suite (opt-in, executes
-        /// arbitrary project code).
-        #[arg(long)]
-        with_tests: bool,
-        /// Explicit test command (otherwise auto-detected).
-        #[arg(long)]
-        test_command: Option<String>,
-        /// Detects unpinned dependencies, and dependencies whose exact
-        /// version has a published vulnerability according to the offline
-        /// advisory database (see `--advisories`).
-        #[arg(long)]
-        with_deps: bool,
-        /// PostgreSQL host — enables the DB schema audit if present.
-        #[arg(long)]
-        db_host: Option<String>,
-        #[arg(long)]
-        db_port: Option<u16>,
-        #[arg(long)]
-        db_name: Option<String>,
-        #[arg(long)]
-        db_user: Option<String>,
-        /// `.env` file containing the DB password (default: `.env`).
-        #[arg(long)]
-        db_password_env_file: Option<String>,
-        /// Variable in the `.env` file carrying the password (default: `DB_PASSWORD`).
-        #[arg(long)]
-        db_password_env_var: Option<String>,
-        /// History directory (JSON export after every scan, compared
-        /// against the last baseline found).
-        #[arg(long)]
-        data_dir: Option<PathBuf>,
-        /// Quick mode — disables with-tests/with-deps/the database
-        /// even if these options are otherwise requested.
+        /// Quick mode: skips the dependency check, for a faster run (in
+        /// the private build, also the project tests and the database audit).
         #[arg(long)]
         quick: bool,
         /// Scans only a single rule category (e.g. "security").
         #[arg(long)]
         only_category: Option<String>,
-        /// Rule identifier to disable (repeatable).
-        #[arg(long = "disable-rule")]
-        disable_rule: Vec<String>,
-        /// Severities to keep, comma-separated (e.g.
-        /// "HIGH,CRITICAL"). Accepted values: CRITICAL/HIGH/MEDIUM/LOW/INFO.
-        #[arg(long)]
-        severity: Option<String>,
-        /// Offline advisory database file of published vulnerabilities,
-        /// read by `--with-deps` (ADR-0042) — default: `advisories.sadb`
-        /// next to the executable. Missing: no vulnerability matching, and
-        /// the scan says so; the rest of `--with-deps` is unchanged. The
-        /// scan itself never uses the network.
-        #[arg(long)]
-        advisories: Option<PathBuf>,
-        /// `brand.json` runtime customization file (ticket #87/spec
-        /// #83) — default: `brand.json` next to the executable
-        /// (like `advisories` above).
-        /// Absent or invalid: strictly unchanged behavior ("CodeFixture"
-        /// defaults).
-        #[arg(long)]
-        brand_file: Option<PathBuf>,
-        /// Also writes a CycloneDX SBOM of the statically detected
-        /// dependencies (`<PREFIX>-SBOM-<timestamp>.json` in the data
-        /// directory) (mirrors `--sbom`).
-        #[arg(long)]
-        sbom: bool,
-        /// Writes a JSON file of scan metrics (files/LOC scanned,
-        /// findings by severity, per-phase durations, exit code) to this
-        /// path — opt-in, local file only (ticket #90).
-        #[arg(long)]
-        metrics_output: Option<PathBuf>,
     },
     /// Lists the builtin rules by category (mirrors `--list-rules`).
     ListRules {
@@ -1078,36 +1089,17 @@ enum Command {
         #[arg(long)]
         rules: Option<PathBuf>,
     },
-    /// Rule pack tools (ADR-0040).
-    Rules {
-        #[command(subcommand)]
-        action: RulesAction,
-    },
+    // `rules` (pack tools) is a private tool: the shared binary scans and
+    // lists its rules with `list-rules` (the maintainer, 2026-11-14).
 }
 
-/// Subcommands of `sast-engine rules`.
-#[derive(Subcommand)]
-enum RulesAction {
-    /// Lists the rule files of a pack with the start of their SHA-256.
-    List {
-        /// Rule pack (`*.scapack`).
-        pack: PathBuf,
-        /// Message language (`en`/`fr`/`es`/`de`).
-        #[arg(long, default_value = "en")]
-        lang: String,
-    },
-}
 
 impl Command {
     /// Console language of the subcommand, for messages emitted outside
     /// it (the panic hook).
     fn lang(&self) -> &str {
         match self {
-            Command::Scan { lang, .. }
-            | Command::ListRules { lang, .. }
-            | Command::Rules {
-                action: RulesAction::List { lang, .. },
-            } => lang,
+            Command::Scan { lang, .. } | Command::ListRules { lang, .. } => lang,
         }
     }
 }
@@ -1190,64 +1182,21 @@ fn dispatch(command: Command) -> ExitCode {
             rules,
             format,
             lang,
-            log_format,
-            output,
-            suppress_file,
             no_cache,
             exclude,
-            quiet,
-            with_tests,
-            test_command,
-            with_deps,
-            db_host,
-            db_port,
-            db_name,
-            db_user,
-            db_password_env_file,
-            db_password_env_var,
-            data_dir,
             quick,
             only_category,
-            disable_rule,
-            severity,
-            advisories,
-            brand_file,
-            sbom,
-            metrics_output,
         } => run_scan_command(ScanArgs {
             path,
             rules,
             format,
             lang,
-            log_format,
-            output,
-            suppress_file,
             no_cache,
             exclude,
-            quiet,
-            with_tests,
-            test_command,
-            with_deps,
-            db_host,
-            db_port,
-            db_name,
-            db_user,
-            db_password_env_file,
-            db_password_env_var,
-            data_dir,
             quick,
             only_category,
-            disable_rule,
-            severity,
-            advisories,
-            brand_file,
-            sbom,
-            metrics_output,
         }),
         Command::ListRules { lang, rules } => run_list_rules_command(&lang, rules),
-        Command::Rules {
-            action: RulesAction::List { pack, lang },
-        } => run_rules_list_command(&lang, &pack),
     }
 }
 
@@ -1426,30 +1375,10 @@ struct ScanArgs {
     rules: Option<PathBuf>,
     format: String,
     lang: String,
-    log_format: String,
-    output: Option<PathBuf>,
-    suppress_file: Option<PathBuf>,
     no_cache: bool,
     exclude: Vec<String>,
-    quiet: bool,
-    with_tests: bool,
-    test_command: Option<String>,
-    with_deps: bool,
-    db_host: Option<String>,
-    db_port: Option<u16>,
-    db_name: Option<String>,
-    db_user: Option<String>,
-    db_password_env_file: Option<String>,
-    db_password_env_var: Option<String>,
-    data_dir: Option<PathBuf>,
     quick: bool,
     only_category: Option<String>,
-    disable_rule: Vec<String>,
-    severity: Option<String>,
-    advisories: Option<PathBuf>,
-    brand_file: Option<PathBuf>,
-    sbom: bool,
-    metrics_output: Option<PathBuf>,
 }
 
 fn run_scan_command(args: ScanArgs) -> ExitCode {
@@ -1458,11 +1387,17 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
         rules,
         format,
         lang,
+        no_cache,
+        exclude,
+        quick,
+        only_category,
+    } = args;
+    // The shared binary has none of these options: their defaults.
+    let extra = ScanExtraArgs::default();
+    let ScanExtraArgs {
         log_format,
         output,
         suppress_file,
-        no_cache,
-        exclude,
         quiet,
         with_tests,
         test_command,
@@ -1474,15 +1409,13 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
         db_password_env_file,
         db_password_env_var,
         data_dir,
-        quick,
-        only_category,
         disable_rule,
         severity,
         advisories,
         brand_file,
         sbom,
         metrics_output,
-    } = args;
+    } = extra;
     let t_command_start = std::time::Instant::now();
     JSON_LOGS.store(log_format == "json", std::sync::atomic::Ordering::Relaxed);
     // Loaded right from the start, before the first possible error —
@@ -1728,6 +1661,12 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
     // (ADR-0042). A missing file only disables vulnerability matching, and
     // the scan says so.
     let advisories = advisories.or_else(sast_engine::project::advisory_file::default_path);
+    // Dependencies are checked as soon as the database is there (the maintainer,
+    // 2026-11-14): a tester who received `advisories.sadb` and placed it
+    // next to the engine gets the check without any option. Without the
+    // file, nothing changes: no check, unless `--with-deps` asks for it
+    // and the scan then says the database is missing.
+    let with_deps = with_deps || advisories.as_ref().is_some_and(|p| p.is_file());
 
     // Default: next to the executable (ticket #87/spec #83, like
     // `advisories` above). `load_brand_file`
@@ -1784,6 +1723,14 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
             output.as_deref(),
         ))
         .collect();
+
+    // The suppressions saved with the report's 🚫 button are read from the
+    // project's root by themselves (the maintainer, 2026-11-14), `--suppress-file`
+    // naming another file in the private binary.
+    let suppress_file = suppress_file.or_else(|| {
+        let at_root = path.join(".sca-suppress.json");
+        at_root.is_file().then_some(at_root)
+    });
 
     // Taint cache next to the history (`scan_cache`), unless `--no-cache`.
     let cache_dir = data_dir
