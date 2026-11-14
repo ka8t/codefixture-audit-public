@@ -16,7 +16,21 @@ This guide takes you, step by step, from nothing installed to a complete analysi
 | [10](#step-10-fix-and-analyse-again) | Fix and analyse again | — |
 | [11](#step-11-update-the-engine) | Update the engine | 2 min |
 
+Read [Known limits](#known-limits) first: the engine is tested on macOS only, and the first analysis of a project takes two runs.
+
 Commands are given for macOS (Terminal) and Windows (PowerShell). Replace `/path/to/your/project` (or `C:\path\to\your\project`) with the folder of the code you want to analyse.
+
+## Known limits
+
+These are the cases where the engine may not behave as you expect, with what to do.
+
+- **Tested on macOS only.** Every step of this guide was run on macOS. Windows (part of steps 2 to 11) and Linux have not been tested: the commands are given, but you may be the first to run them. If a step fails, note the command and the full message it printed, and send them to CodeFixture.
+- **The first analysis takes two runs.** The first time you analyse a project, the engine asks what to analyse (step 7), writes `audit.config.json`, and stops without a report. This is expected: run the same command again. In a script or a CI job there are no questions and the first run produces the report.
+- **The demo rules give a thin report.** The 38 demonstration rules of this repository cover a small part of what the engine detects. On a real project their findings may come mostly from a few rules, such as JavaScript written in HTML attributes (`onclick=…`). The full rule pack (step 6) gives the complete report.
+- **Dependencies are checked only with `advisories.sadb`.** Without that file next to the engine (step 6), your dependencies are not compared with published vulnerabilities. The report then simply has no dependency findings: it does not mean your dependencies are safe. The file also ages: ask for a new one from time to time.
+- **Some findings have no automatic fix.** When the engine cannot rewrite your line safely, the report says so and gives the solution in words, with a generic example. Fixing the line is then up to you.
+- **A finding can be a false positive.** If a finding is wrong (the value is already checked, or cannot come from a user), hide it with 🚫 (step 10) and report it: it helps improve the rules.
+- **First installation takes time.** Installing Rust and the first build take about 10 to 15 minutes (steps 2 and 4). Later builds and analyses are much faster; a re-run on an unchanged project takes a few seconds thanks to the cache.
 
 ## Step 1: check what you need
 

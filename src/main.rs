@@ -599,6 +599,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_rerun_command_is_the_typed_command_ready_to_copy() {
+        let args = ["./target/release/sast-engine", "scan", "/Users/me/My Project", "--lang", "fr"]
+            .iter()
+            .map(|s| s.to_string());
+        assert_eq!(
+            rerun_command(args),
+            "./target/release/sast-engine scan '/Users/me/My Project' --lang fr"
+        );
+    }
+
+    #[test]
     fn test_format_duration_picks_unit_by_magnitude() {
         use std::time::Duration;
         let cases = [
@@ -923,6 +934,20 @@ struct Cli {
 /// SARIF (for an IDE or a code platform); the plain-text listing is a
 /// private tool (2026-11-14).
 const SCAN_FORMATS: &[&str] = &["html", "sarif"];
+
+/// The command line the user typed, ready to copy and run again: each
+/// argument as it was, quoted when it holds a space or a quote.
+fn rerun_command(args: impl Iterator<Item = String>) -> String {
+    args.map(|a| {
+        if a.is_empty() || a.contains([' ', '\'', '"']) {
+            format!("'{}'", a.replace('\'', "'\\''"))
+        } else {
+            a
+        }
+    })
+    .collect::<Vec<_>>()
+    .join(" ")
+}
 
 /// Options of `scan` kept for the private binary only (2026-11-14): the
 /// shared binary offers a short list, checks the dependencies as soon as
@@ -1452,7 +1477,15 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
         let mut reader = stdin.lock();
         let mut writer = std::io::stderr();
         return match run_config_wizard(&mut reader, &mut writer, &path, &say) {
-            Ok(ConfigWizardOutcome::Written(_)) => ExitCode::SUCCESS,
+            // The settings are written but nothing was analysed: say so
+            // plainly and give the exact command to run again (the maintainer,
+            // 2026-11-14: a tester expects a report after the first run).
+            Ok(ConfigWizardOutcome::Written(_)) => {
+                eprintln!();
+                eprintln!("    {}", rerun_command(std::env::args()));
+                eprintln!();
+                ExitCode::SUCCESS
+            }
             Ok(ConfigWizardOutcome::Declined) => ExitCode::from(1),
             Ok(ConfigWizardOutcome::InputClosed) => {
                 eprintln!();

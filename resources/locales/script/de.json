@@ -95,7 +95,7 @@
   "config_prompt_input_closed": "Eingabe geschlossen — keine Datei erstellt.",
   "config_prompt_write_error": "Schreibfehler: {error}",
   "config_prompt_yes_answers": "j,ja",
-  "config_wizard_intro": "Keine audit.config.json in {path}. Beantworten Sie einige Fragen, um sie zu erstellen; die Analyse startet, sobald die Datei existiert.",
+  "config_wizard_intro": "Erste Analyse dieses Projekts ({path}): Beantworten Sie 2 oder 3 Fragen (Eingabe behält die Standardwahl). Die Engine speichert Ihre Antworten in audit.config.json und hält dann an, ohne Bericht: Danach starten Sie denselben Befehl erneut, um zu analysieren.",
   "config_wizard_scope_title": "Was soll analysiert werden?",
   "config_wizard_scope_all": "Der ganze Ordner",
   "config_wizard_scope_some": "Nur einige Unterordner",
@@ -110,7 +110,7 @@
   "config_wizard_preview": "Datei {path}:",
   "config_wizard_defaults_note": "Die Einträge **/…/** sind standardmäßig ausgeschlossen (Abhängigkeiten, Build-Ausgaben, Caches). Die Datei kann später bearbeitet werden.",
   "config_wizard_write_question": "Diese Datei schreiben? [J/n]",
-  "config_wizard_written": "Geschrieben: {path}. Führen Sie denselben Befehl erneut aus, um die Analyse zu starten.",
+  "config_wizard_written": "Einstellungen gespeichert in {path}.",
   "config_wizard_declined": "Keine Datei geschrieben. Führen Sie den Befehl erneut aus, um neu zu antworten; mit --quiet wird der ganze Ordner ohne Datei analysiert.",
   "internal_panic": "Interner Fehler (Vorfall {incident}). Der Befehl wurde abgebrochen. Details für den Support: {log}",
   "internal_panic_no_log": "Interner Fehler (Vorfall {incident}). Der Befehl wurde abgebrochen; das Absturzprotokoll konnte nicht geschrieben werden.",
@@ -379,5 +379,6 @@
   "scan_internal_error": "Interner Fehler: {error}",
   "scan_rule_skipped": "Regel übersprungen ({path}): {error}",
   "scan_cache_line": "Cache ({language}): {dirty}/{files} Datei(en) seit dem letzten Scan geändert, {analysed}/{total} Datenflussanalysen neu ausgeführt.",
-  "scan_cache_patterns_line": "Cache (Musterregeln): {analysed}/{files} Datei(en) neu analysiert, die übrigen seit dem letzten Scan unverändert."
+  "scan_cache_patterns_line": "Cache (Musterregeln): {analysed}/{files} Datei(en) neu analysiert, die übrigen seit dem letzten Scan unverändert.",
+  "config_wizard_run_again": "Es wurde noch keine Analyse durchgeführt. Um Ihr Projekt jetzt zu analysieren, starten Sie denselben Befehl erneut:"
 }

@@ -4,6 +4,20 @@ Security scanner for source code by [CodeFixture](https://codefixture.com). It a
 
 This repository holds the complete engine and a sample of its detection rules. The analysis runs on your machine: your code never leaves it.
 
+## Known limits
+
+Read this before you start: these are the cases where the engine may not behave as you expect.
+
+| Limit | What it means for you |
+|---|---|
+| **Tested on macOS only** | Windows and Linux have not been tested yet. The Windows commands are given but have never been run; please report any problem. |
+| **The first analysis takes two runs** | The first command asks 2 or 3 questions (press Enter to keep the defaults), writes `audit.config.json` in your project, then stops and asks you to run the same command again. The second run produces the report. |
+| **The demo rules give a thin report** | This repository ships 38 demonstration rules, a small part of the catalog. Without the full rule pack, most findings may come from a few rules (for example JavaScript written in HTML attributes). |
+| **Dependencies are checked only with `advisories.sadb`** | Without that file next to the engine, the dependencies of your project are not compared with published vulnerabilities, and the report does not list them as safe either. |
+| **First installation takes time** | Installing Rust and the first build take about 10 to 15 minutes. Later builds and analyses are much faster. |
+
+Details and workarounds: [Known limits](INSTALLATION.md#known-limits) in the guide.
+
 ## Analyse a folder
 
 Once the engine is built (see below), run from the `sast-engine-public` folder, replacing the path with the folder of your code:

@@ -95,7 +95,7 @@
   "config_prompt_input_closed": "Entrada cerrada: no se creó ningún archivo.",
   "config_prompt_write_error": "Error de escritura: {error}",
   "config_prompt_yes_answers": "s,si,sí",
-  "config_wizard_intro": "No hay audit.config.json en {path}. Responda a unas preguntas para crearlo; el análisis se inicia cuando el archivo existe.",
+  "config_wizard_intro": "Primer análisis de este proyecto ({path}): responda a 2 o 3 preguntas (Intro mantiene la opción por defecto). El motor guarda sus respuestas en audit.config.json y se detiene, sin informe: después volverá a lanzar el mismo comando para analizar.",
   "config_wizard_scope_title": "¿Qué hay que analizar?",
   "config_wizard_scope_all": "Toda la carpeta",
   "config_wizard_scope_some": "Solo algunas subcarpetas",
@@ -110,7 +110,7 @@
   "config_wizard_preview": "Archivo {path}:",
   "config_wizard_defaults_note": "Las entradas **/…/** se excluyen por defecto (dependencias, resultados de compilación, cachés). El archivo se puede editar después.",
   "config_wizard_write_question": "¿Escribir este archivo? [S/n]",
-  "config_wizard_written": "Escrito: {path}. Vuelva a ejecutar el mismo comando para iniciar el análisis.",
+  "config_wizard_written": "Ajustes guardados en {path}.",
   "config_wizard_declined": "No se escribió ningún archivo. Vuelva a ejecutar el comando para responder de nuevo; con --quiet se analiza toda la carpeta sin archivo.",
   "internal_panic": "Error interno (incidente {incident}). El comando se ha detenido. Detalles para el soporte: {log}",
   "internal_panic_no_log": "Error interno (incidente {incident}). El comando se ha detenido; no se pudo escribir el registro del fallo.",
@@ -379,5 +379,6 @@
   "scan_internal_error": "Error interno: {error}",
   "scan_rule_skipped": "Regla ignorada ({path}): {error}",
   "scan_cache_line": "Caché ({language}): {dirty}/{files} archivo(s) modificado(s) desde el último análisis, {analysed}/{total} análisis de flujo rehechos.",
-  "scan_cache_patterns_line": "Caché (reglas de patrón): {analysed}/{files} archivo(s) analizado(s) de nuevo, los demás sin cambios desde el último análisis."
+  "scan_cache_patterns_line": "Caché (reglas de patrón): {analysed}/{files} archivo(s) analizado(s) de nuevo, los demás sin cambios desde el último análisis.",
+  "config_wizard_run_again": "Todavía no se ha hecho ningún análisis. Para analizar su proyecto ahora, vuelva a lanzar el mismo comando:"
 }

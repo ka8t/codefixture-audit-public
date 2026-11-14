@@ -95,7 +95,7 @@
   "config_prompt_input_closed": "Input closed — no file created.",
   "config_prompt_write_error": "Write error: {error}",
   "config_prompt_yes_answers": "y,yes",
-  "config_wizard_intro": "No audit.config.json in {path}. Answer a few questions to create it; the scan starts once the file exists.",
+  "config_wizard_intro": "First analysis of this project ({path}): answer 2 or 3 questions (Enter keeps the default choice). The engine saves your answers in audit.config.json and then stops, without a report: you will run the same command again to analyse.",
   "config_wizard_scope_title": "What should be scanned?",
   "config_wizard_scope_all": "The whole folder",
   "config_wizard_scope_some": "Some sub-folders only",
@@ -110,7 +110,7 @@
   "config_wizard_preview": "File {path}:",
   "config_wizard_defaults_note": "The **/…/** entries are excluded by default (dependencies, build output, caches). The file can be edited later.",
   "config_wizard_write_question": "Write this file? [Y/n]",
-  "config_wizard_written": "Written: {path}. Run the same command again to start the scan.",
+  "config_wizard_written": "Settings saved in {path}.",
   "config_wizard_declined": "No file written. Run the command again to answer again; with --quiet the whole folder is scanned without a file.",
   "internal_panic": "Internal error (incident {incident}). The command stopped. Details for support: {log}",
   "internal_panic_no_log": "Internal error (incident {incident}). The command stopped; the crash log could not be written.",
@@ -379,5 +379,6 @@
   "scan_internal_error": "Internal error: {error}",
   "scan_rule_skipped": "Rule skipped ({path}): {error}",
   "scan_cache_line": "Cache ({language}): {dirty}/{files} file(s) changed since the last scan, {analysed}/{total} taint analyses redone.",
-  "scan_cache_patterns_line": "Cache (pattern rules): {analysed}/{files} file(s) analysed again, the others unchanged since the last scan."
+  "scan_cache_patterns_line": "Cache (pattern rules): {analysed}/{files} file(s) analysed again, the others unchanged since the last scan.",
+  "config_wizard_run_again": "No analysis has run yet. To analyse your project now, run the same command again:"
 }

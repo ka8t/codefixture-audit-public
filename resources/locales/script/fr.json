@@ -95,7 +95,7 @@
   "config_prompt_input_closed": "Entrée fermée — pas de fichier créé.",
   "config_prompt_write_error": "Erreur d'écriture : {error}",
   "config_prompt_yes_answers": "o,oui",
-  "config_wizard_intro": "Aucun audit.config.json dans {path}. Répondez à quelques questions pour le créer ; l'analyse se lance une fois le fichier en place.",
+  "config_wizard_intro": "Première analyse de ce projet ({path}) : répondez à 2 ou 3 questions (Entrée garde le choix par défaut). Le moteur enregistre vos réponses dans audit.config.json puis s'arrête, sans rapport : vous relancerez ensuite la même commande pour analyser.",
   "config_wizard_scope_title": "Que faut-il analyser ?",
   "config_wizard_scope_all": "Tout le dossier",
   "config_wizard_scope_some": "Certains sous-dossiers seulement",
@@ -110,7 +110,7 @@
   "config_wizard_preview": "Fichier {path} :",
   "config_wizard_defaults_note": "Les entrées **/…/** sont exclues par défaut (dépendances, résultats de compilation, caches). Le fichier reste modifiable ensuite.",
   "config_wizard_write_question": "Écrire ce fichier ? [O/n]",
-  "config_wizard_written": "Écrit : {path}. Relancez la même commande pour lancer l'analyse.",
+  "config_wizard_written": "Réglages enregistrés dans {path}.",
   "config_wizard_declined": "Aucun fichier écrit. Relancez la commande pour répondre à nouveau ; avec --quiet, tout le dossier est analysé sans fichier.",
   "internal_panic": "Erreur interne (incident {incident}). La commande s'est arrêtée. Détails pour le support : {log}",
   "internal_panic_no_log": "Erreur interne (incident {incident}). La commande s'est arrêtée ; le journal de plantage n'a pas pu être écrit.",
@@ -379,5 +379,6 @@
   "scan_internal_error": "Erreur interne : {error}",
   "scan_rule_skipped": "Règle ignorée ({path}) : {error}",
   "scan_cache_line": "Cache ({language}) : {dirty}/{files} fichier(s) modifié(s) depuis la dernière analyse, {analysed}/{total} analyses de flux refaites.",
-  "scan_cache_patterns_line": "Cache (règles de motif) : {analysed}/{files} fichier(s) réanalysé(s), les autres sont inchangés depuis la dernière analyse."
+  "scan_cache_patterns_line": "Cache (règles de motif) : {analysed}/{files} fichier(s) réanalysé(s), les autres sont inchangés depuis la dernière analyse.",
+  "config_wizard_run_again": "Aucune analyse n'a encore été faite. Pour analyser votre projet maintenant, relancez la même commande :"
 }

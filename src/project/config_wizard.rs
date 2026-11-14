@@ -266,6 +266,10 @@ pub fn run_config_wizard<R: BufRead, W: Write>(
         "[sast-engine] {}",
         say("config_wizard_written").replace("{path}", &written.display().to_string())
     )?;
+    // Nothing was analysed yet: said plainly, the caller then prints the
+    // exact command to run again (2026-11-14).
+    writeln!(writer)?;
+    writeln!(writer, "[sast-engine] {}", say("config_wizard_run_again"))?;
     Ok(ConfigWizardOutcome::Written(written))
 }
 
@@ -309,7 +313,9 @@ mod tests {
         assert!(file["paths"]["exclude"].as_array().unwrap().contains(&"**/node_modules/**".into()));
         assert_eq!(file["languages"], serde_json::json!(["python"]));
         assert!(out.contains("\"include\""), "the file is shown: {out}");
-        assert!(out.contains("Run the same command again"), "{out}");
+        assert!(out.contains("Settings saved in"), "{out}");
+        assert!(out.contains("No analysis has run yet"), "{out}");
+        assert!(out.contains("run the same command again"), "{out}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
