@@ -1,23 +1,39 @@
-//! Rule pack file format (ADR-0037, simplified by ADR-0040): how the
-//! `.sca` rule files of a catalog travel as one file, `rules.scapack`,
-//! and are opened at run time.
+//! Rule pack file format (ADR-0037, simplified by ADR-0040, version
+//! rules added by ADR-0043): how a catalog travels as one file,
+//! `rules.scapack`, and is opened at run time.
 //!
-//! Layout of a `.scapack` file:
+//! Layout of a `.scapack` file (format 2):
 //!
 //! ```text
-//! b"SCAPACK1" | header length (u32, little endian) | header (JSON) | payload
+//! b"SCAPACK2" | header length (u32, little endian) | header (JSON)
+//!             | rules section | version rules section (optional)
 //! ```
 //!
 //! - The header is clear JSON: format version, pack name, number of rule
-//!   files and the fingerprint of the key that opens the pack.
-//! - The payload is the JSON list of `[relative path, .sca source]`
-//!   pairs, sorted by path, encrypted with ChaCha20-Poly1305 and the
-//!   public demo key. The header bytes are authenticated as associated
-//!   data: changing the name, the count or the fingerprint makes
-//!   decryption fail.
-//! - The nonce is derived from the header and the payload (ADR-0040), not
-//!   drawn at random: the same rules always give the same file, so an
-//!   unchanged catalog leaves the shared repository unchanged.
+//!   files, the fingerprint of the key that opens the pack and the byte
+//!   length of each section.
+//! - The **rules section** is the JSON list of `[relative path, .sca
+//!   source]` pairs, sorted by path, encrypted with ChaCha20-Poly1305 and
+//!   the public demo key.
+//! - The **version rules section** (ADR-0043) holds the published
+//!   vulnerabilities the dependencies are checked against: package,
+//!   ecosystem, affected versions, CVE ids. Its content is an advisory
+//!   container (`advisories.sadb` layout, `project::advisory_file`), kept
+//!   as bytes here: this module neither compresses nor reads it, so
+//!   `build.rs` only copies the editor's file into the pack. Encrypted
+//!   apart from the rules, so a scan decrypts it only when its
+//!   dependencies phase runs: the full catalog's copy weighs tens of
+//!   megabytes. Length 0 when the pack carries none.
+//! - Each section is authenticated with the header bytes and its own
+//!   name as associated data: changing the header, or swapping the two
+//!   sections, makes decryption fail.
+//! - Each nonce is derived from the header, the section name and its
+//!   content (ADR-0040), not drawn at random: the same rules always give
+//!   the same file, so an unchanged catalog leaves the shared repository
+//!   unchanged.
+//!
+//! Format 1 (`SCAPACK1`, rules only) is refused with a message saying to
+//! rebuild the pack: a binary and its pack are always delivered together.
 //!
 //! The demo key is written in the source: the encryption only keeps the
 //! rules from being copied as they are, it protects nothing (ADR-0040).
@@ -47,16 +63,37 @@ pub const DEMO_PACK_FILE_NAME: &str = "rules-demo.scapack";
 /// Name stored in the header of the demo pack.
 pub const DEMO_PACK_NAME: &str = "demo";
 
+/// Version rules of the full catalog (ADR-0043): the editor's advisory
+/// database, at the root of the private repository, written by
+/// `sast-advisories update` and never committed nor delivered.
+pub const FULL_VERSION_RULES_FILE: &str = "advisories.sadb";
+
+/// Version rules of the demo pack (ADR-0043), relative to the rules
+/// folder: a small selection of well-known vulnerabilities, committed,
+/// written by `sast-advisories demo` from the editor's database.
+pub const DEMO_VERSION_RULES_FILE: &str = "advisories/demo.sadb";
+
 /// Magic bytes at the start of every pack, version included: a future
 /// incompatible layout gets a new magic rather than a guess.
-const MAGIC: &[u8; 8] = b"SCAPACK1";
+const MAGIC: &[u8; 8] = b"SCAPACK2";
+
+/// Magic of format 1 (ADR-0040, rules only), recognised to name it.
+const MAGIC_V1: &[u8; 8] = b"SCAPACK1";
 
 /// Version written in the header's `format` field.
-const FORMAT_VERSION: u64 = 1;
+const FORMAT_VERSION: u64 = 2;
 
 /// Upper bound on the clear header, so a corrupt length cannot make the
 /// reader allocate or slice past a sane size.
 const MAX_HEADER_LEN: usize = 64 * 1024;
+
+/// Associated-data names of the two sections.
+const RULES_SECTION: &[u8] = b"rules";
+const VERSION_RULES_SECTION: &[u8] = b"version_rules";
+
+/// Nonce (12 bytes) and authentication tag (16 bytes) around each
+/// encrypted section (`rules_crypto::encrypt_bytes_with_aad_and_nonce`).
+const SECTION_OVERHEAD: usize = 12 + 16;
 
 /// One rule file of a pack: path relative to the catalog root (for
 /// example `python/security/eval.sca`) and its `.sca` source.
@@ -69,8 +106,19 @@ pub struct PackHeader {
     pub name: String,
     /// Fingerprint of the key that opens the pack ([`key_fingerprint`]).
     pub key_fingerprint: String,
-    /// Number of rule files in the payload.
+    /// Number of rule files in the rules section.
     pub rule_files: usize,
+    /// Encrypted length of the rules section.
+    pub rules_bytes: usize,
+    /// Encrypted length of the version rules section, 0 without one.
+    pub version_rules_bytes: usize,
+}
+
+impl PackHeader {
+    /// Whether the pack carries version rules (ADR-0043).
+    pub fn has_version_rules(&self) -> bool {
+        self.version_rules_bytes > 0
+    }
 }
 
 /// The public demo key (ADR-0037, ADR-0040): written in the source on
@@ -97,54 +145,92 @@ pub fn key_fingerprint(key: &[u8; 32]) -> String {
 }
 
 /// Builds a pack holding `files` (sorted here by relative path, so the
-/// result does not depend on the caller's order) encrypted with the demo
-/// key. Deterministic: the same name and files give the same bytes.
-pub fn write_pack(name: &str, files: &[RuleSource]) -> Vec<u8> {
-    write_pack_with_key(name, files, &demo_key())
+/// result does not depend on the caller's order) and, when given, the
+/// version rules `version_rules` (an advisory container, stored as it
+/// is), encrypted with the demo key. Deterministic: the same name, files
+/// and version rules give the same bytes.
+pub fn write_pack(name: &str, files: &[RuleSource], version_rules: Option<&[u8]>) -> Vec<u8> {
+    write_pack_with_key(name, files, version_rules, &demo_key())
 }
 
 /// [`write_pack`] with another key: only the tests use it, to check that
 /// a pack for an unknown key is refused.
-pub fn write_pack_with_key(name: &str, files: &[RuleSource], key: &[u8; 32]) -> Vec<u8> {
+pub fn write_pack_with_key(
+    name: &str,
+    files: &[RuleSource],
+    version_rules: Option<&[u8]>,
+    key: &[u8; 32],
+) -> Vec<u8> {
     let mut sorted: Vec<&RuleSource> = files.iter().collect();
     sorted.sort();
+    let rules_plain = serde_json::to_vec(&sorted).expect("JSON payload");
+    // An empty container is no version rules at all.
+    let version_plain = version_rules.filter(|bytes| !bytes.is_empty());
+    let rules_bytes = rules_plain.len() + SECTION_OVERHEAD;
+    let version_rules_bytes = version_plain.map_or(0, |v| v.len() + SECTION_OVERHEAD);
     // Written by hand, keys in alphabetical order: `serde_json::json!`
     // orders keys by insertion or alphabetically depending on the
     // `preserve_order` feature, which differs between `build.rs` and the
     // binary (ticket #153). The bytes must not depend on it: the build's
-    // `rules-demo.scapack` and `rules pack --demo` must be identical, and
-    // the alphabetical order is the one already published.
+    // `rules-demo.scapack` and `rules pack --demo` must be identical.
     let header_bytes = format!(
-        "{{\"format\":{FORMAT_VERSION},\"key_fingerprint\":{},\"name\":{},\"rule_files\":{}}}",
+        "{{\"format\":{FORMAT_VERSION},\"key_fingerprint\":{},\"name\":{},\"rule_files\":{},\"rules_bytes\":{rules_bytes},\"version_rules_bytes\":{version_rules_bytes}}}",
         serde_json::Value::from(key_fingerprint(key)),
         serde_json::Value::from(name),
         sorted.len()
     )
     .into_bytes();
-    let payload_plain = serde_json::to_vec(&sorted).expect("JSON payload");
-    // Content-derived nonce: the nonce changes whenever the header or any
-    // rule changes, so it never repeats for two different plaintexts.
-    let mut hasher = Sha256::new();
-    hasher.update(b"sast-engine-pack-nonce-v1");
-    hasher.update((header_bytes.len() as u64).to_le_bytes());
-    hasher.update(&header_bytes);
-    hasher.update(&payload_plain);
-    let nonce: [u8; 12] = hasher.finalize()[..12].try_into().expect("12 bytes");
-    let payload =
-        rules_crypto::encrypt_bytes_with_aad_and_nonce(&payload_plain, &header_bytes, key, &nonce);
 
-    let mut out = Vec::with_capacity(MAGIC.len() + 4 + header_bytes.len() + payload.len());
+    let mut out = Vec::with_capacity(MAGIC.len() + 4 + header_bytes.len() + rules_bytes + version_rules_bytes);
     out.extend_from_slice(MAGIC);
     out.extend_from_slice(&(header_bytes.len() as u32).to_le_bytes());
     out.extend_from_slice(&header_bytes);
-    out.extend_from_slice(&payload);
+    out.extend_from_slice(&seal(&header_bytes, RULES_SECTION, &rules_plain, key));
+    if let Some(plain) = version_plain {
+        out.extend_from_slice(&seal(&header_bytes, VERSION_RULES_SECTION, plain, key));
+    }
     out
 }
 
-/// Splits a pack into its header, the raw header bytes (the associated
-/// data of the payload) and the encrypted payload. `Err` with a short
-/// reason if the file is not a pack or is truncated.
-fn split_pack(bytes: &[u8]) -> Result<(PackHeader, &[u8], &[u8]), String> {
+/// Encrypts one section. The associated data is the header followed by
+/// the section name; the nonce is derived from both and the content, so
+/// it changes whenever any of them changes and never repeats for two
+/// different plaintexts.
+fn seal(header_bytes: &[u8], section: &[u8], plain: &[u8], key: &[u8; 32]) -> Vec<u8> {
+    let aad = [header_bytes, section].concat();
+    let mut hasher = Sha256::new();
+    hasher.update(b"sast-engine-pack-nonce-v2");
+    hasher.update((aad.len() as u64).to_le_bytes());
+    hasher.update(&aad);
+    hasher.update(plain);
+    let nonce: [u8; 12] = hasher.finalize()[..12].try_into().expect("12 bytes");
+    rules_crypto::encrypt_bytes_with_aad_and_nonce(plain, &aad, key, &nonce)
+}
+
+/// Decrypts one section with the demo key, `Err` naming the pack as
+/// corrupt when authentication fails.
+fn open_section(header_bytes: &[u8], section: &[u8], blob: &[u8], key: &[u8; 32]) -> Result<Vec<u8>, String> {
+    let aad = [header_bytes, section].concat();
+    rules_crypto::decrypt_bytes_with_aad(blob, &aad, key).ok_or_else(|| "rule pack is corrupt or was altered".to_string())
+}
+
+/// A pack split into its parts: header, raw header bytes (the associated
+/// data of both sections) and the two encrypted sections.
+struct PackParts<'a> {
+    header: PackHeader,
+    header_bytes: &'a [u8],
+    rules: &'a [u8],
+    version_rules: &'a [u8],
+}
+
+/// Parses the clear header at the start of `bytes` (magic, length,
+/// JSON): the header and the offset where the sections start. Only the
+/// first bytes of a pack are needed, so a scan can tell whether a pack
+/// carries version rules without reading or decrypting it.
+fn parse_header(bytes: &[u8]) -> Result<(PackHeader, usize), String> {
+    if bytes.starts_with(MAGIC_V1) {
+        return Err("rule pack in format 1, which this engine no longer reads: rebuild it (ADR-0043)".to_string());
+    }
     let rest = bytes
         .strip_prefix(MAGIC.as_slice())
         .ok_or_else(|| "not a rule pack (unknown file signature)".to_string())?;
@@ -156,19 +242,13 @@ fn split_pack(bytes: &[u8]) -> Result<(PackHeader, &[u8], &[u8]), String> {
     if header_len > MAX_HEADER_LEN || header_len > rest.len() {
         return Err("truncated rule pack (header)".to_string());
     }
-    let (header_bytes, payload) = rest.split_at(header_len);
-    let header: serde_json::Value = serde_json::from_slice(header_bytes)
+    let header: serde_json::Value = serde_json::from_slice(&rest[..header_len])
         .map_err(|e| format!("invalid rule pack header: {e}"))?;
     let format = header.get("format").and_then(|v| v.as_u64());
     if format != Some(FORMAT_VERSION) {
         return Err(format!(
             "unsupported rule pack format {format:?}, expected {FORMAT_VERSION}"
         ));
-    }
-    // Packs signed under ADR-0037 end with a signature this format no
-    // longer reads: refuse them by name rather than as a corrupt file.
-    if header.get("signed").and_then(|v| v.as_bool()) == Some(true) {
-        return Err("signed rule pack: no longer supported (ADR-0040)".to_string());
     }
     let text = |key: &str| {
         header
@@ -177,30 +257,46 @@ fn split_pack(bytes: &[u8]) -> Result<(PackHeader, &[u8], &[u8]), String> {
             .map(String::from)
             .ok_or_else(|| format!("invalid rule pack header: missing \"{key}\""))
     };
-    let rule_files = header
-        .get("rule_files")
-        .and_then(|v| v.as_u64())
-        .ok_or_else(|| "invalid rule pack header: missing \"rule_files\"".to_string())?
-        as usize;
+    let number = |key: &str| {
+        header
+            .get(key)
+            .and_then(|v| v.as_u64())
+            .map(|n| n as usize)
+            .ok_or_else(|| format!("invalid rule pack header: missing \"{key}\""))
+    };
     let parsed = PackHeader {
         name: text("name")?,
         key_fingerprint: text("key_fingerprint")?,
-        rule_files,
+        rule_files: number("rule_files")?,
+        rules_bytes: number("rules_bytes")?,
+        version_rules_bytes: number("version_rules_bytes")?,
     };
-    Ok((parsed, header_bytes, payload))
+    Ok((parsed, MAGIC.len() + 4 + header_len))
 }
 
-/// Reads only the clear header of a pack, without decrypting it.
-pub fn read_header(bytes: &[u8]) -> Result<PackHeader, String> {
-    split_pack(bytes).map(|(header, ..)| header)
+/// Splits a pack into its parts. `Err` with a short reason if the file is
+/// not a pack, is truncated, or is in a format this engine does not read.
+fn split_pack(bytes: &[u8]) -> Result<PackParts<'_>, String> {
+    let (parsed, body_start) = parse_header(bytes)?;
+    let header_bytes = &bytes[MAGIC.len() + 4..body_start];
+    let body = &bytes[body_start..];
+    // The two sections fill the rest of the file exactly.
+    if parsed.rules_bytes.checked_add(parsed.version_rules_bytes) != Some(body.len()) {
+        return Err("truncated rule pack (sections)".to_string());
+    }
+    let (rules, version_rules) = body.split_at(parsed.rules_bytes);
+    Ok(PackParts {
+        header: parsed,
+        header_bytes,
+        rules,
+        version_rules,
+    })
 }
 
-/// Opens a pack with the demo key: its header and its rule files. `Err`
-/// if the file is not a valid pack, if it needs another key (a client
-/// pack of ADR-0037), or if any byte of the header or payload was altered.
-pub fn open_pack(bytes: &[u8]) -> Result<(PackHeader, Vec<RuleSource>), String> {
+/// Checks that the pack is meant for the demo key, the only one this
+/// engine has.
+fn demo_key_for(header: &PackHeader) -> Result<[u8; 32], String> {
     let key = demo_key();
-    let (header, header_bytes, payload) = split_pack(bytes)?;
     if header.key_fingerprint != key_fingerprint(&key) {
         return Err(format!(
             "rule pack needs key {}, this engine only has the demo key {} (ADR-0040)",
@@ -208,14 +304,53 @@ pub fn open_pack(bytes: &[u8]) -> Result<(PackHeader, Vec<RuleSource>), String> 
             key_fingerprint(&key)
         ));
     }
-    let plain = rules_crypto::decrypt_bytes_with_aad(payload, header_bytes, &key)
-        .ok_or_else(|| "rule pack is corrupt or was altered".to_string())?;
+    Ok(key)
+}
+
+/// Reads only the clear header of a pack, without decrypting it.
+pub fn read_header(bytes: &[u8]) -> Result<PackHeader, String> {
+    split_pack(bytes).map(|parts| parts.header)
+}
+
+/// Reads the clear header of the pack file at `path` from its first
+/// bytes only: what a scan checks before deciding whether its
+/// dependencies phase runs (ADR-0043). The sections are not read, so a
+/// truncated pack is only reported when it is opened.
+pub fn read_header_from_file(path: &Path) -> Result<PackHeader, String> {
+    use std::io::Read;
+    let file = std::fs::File::open(path).map_err(|e| format!("unreadable rule pack: {e}"))?;
+    let mut prefix = Vec::new();
+    file.take((MAGIC.len() + 4 + MAX_HEADER_LEN) as u64)
+        .read_to_end(&mut prefix)
+        .map_err(|e| format!("unreadable rule pack: {e}"))?;
+    parse_header(&prefix).map(|(header, _)| header)
+}
+
+/// Opens the rules section of a pack with the demo key: its header and
+/// its rule files. `Err` if the file is not a valid pack, if it needs
+/// another key (a client pack of ADR-0037), or if any byte of the header
+/// or of the section was altered. The version rules are not decrypted.
+pub fn open_pack(bytes: &[u8]) -> Result<(PackHeader, Vec<RuleSource>), String> {
+    let parts = split_pack(bytes)?;
+    let key = demo_key_for(&parts.header)?;
+    let plain = open_section(parts.header_bytes, RULES_SECTION, parts.rules, &key)?;
     let files: Vec<RuleSource> =
         serde_json::from_slice(&plain).map_err(|e| format!("invalid rule pack content: {e}"))?;
-    if files.len() != header.rule_files {
+    if files.len() != parts.header.rule_files {
         return Err("rule pack content does not match its header".to_string());
     }
-    Ok((header, files))
+    Ok((parts.header, files))
+}
+
+/// Decrypts the version rules section of a pack (ADR-0043): the bytes of
+/// its advisory container, `Ok(None)` when the pack carries none.
+pub fn open_version_rules(bytes: &[u8]) -> Result<Option<Vec<u8>>, String> {
+    let parts = split_pack(bytes)?;
+    if !parts.header.has_version_rules() {
+        return Ok(None);
+    }
+    let key = demo_key_for(&parts.header)?;
+    open_section(parts.header_bytes, VERSION_RULES_SECTION, parts.version_rules, &key).map(Some)
 }
 
 /// Every `.sca` file under `root`, as `(path relative to root with `/`
@@ -359,7 +494,7 @@ mod tests {
 
     #[test]
     fn test_pack_round_trip_sorts_files_and_keeps_header() {
-        let pack = write_pack("demo", &sample());
+        let pack = write_pack("demo", &sample(), None);
         let (header, files) = open_pack(&pack).expect("pack opens with the demo key");
         assert_eq!(header.name, "demo");
         assert_eq!(header.rule_files, 2);
@@ -372,7 +507,7 @@ mod tests {
 
     #[test]
     fn test_pack_payload_is_not_readable_in_clear() {
-        let pack = write_pack("demo", &sample());
+        let pack = write_pack("demo", &sample(), None);
         let text = String::from_utf8_lossy(&pack);
         assert!(!text.contains("rule a"), "rule source must be encrypted");
     }
@@ -383,17 +518,17 @@ mod tests {
     fn test_pack_is_deterministic_and_content_dependent() {
         let mut reversed = sample();
         reversed.reverse();
-        assert_eq!(write_pack("demo", &sample()), write_pack("demo", &reversed));
+        assert_eq!(write_pack("demo", &sample(), None), write_pack("demo", &reversed, None));
         let mut changed = sample();
         changed[0].1.push(' ');
-        assert_ne!(write_pack("demo", &sample()), write_pack("demo", &changed));
+        assert_ne!(write_pack("demo", &sample(), None), write_pack("demo", &changed, None));
     }
 
     #[test]
     fn test_open_pack_rejects_other_key_corrupt_and_truncated() {
-        let pack = write_pack("demo", &sample());
+        let pack = write_pack("demo", &sample(), None);
 
-        let other = write_pack_with_key("client", &sample(), &[7u8; 32]);
+        let other = write_pack_with_key("client", &sample(), None, &[7u8; 32]);
         assert!(open_pack(&other).unwrap_err().contains("needs key"));
 
         let mut corrupt = pack.clone();
@@ -410,7 +545,7 @@ mod tests {
     /// length, so the layout stays valid) breaks decryption.
     #[test]
     fn test_open_pack_rejects_altered_header() {
-        let mut bytes = write_pack("demo", &sample());
+        let mut bytes = write_pack("demo", &sample(), None);
         let pos = bytes
             .windows(b"\"rule_files\":2".len())
             .position(|w| w == b"\"rule_files\":2")
@@ -419,27 +554,29 @@ mod tests {
         assert!(open_pack(&bytes).unwrap_err().contains("corrupt"));
     }
 
-    /// A pack signed under ADR-0037 is refused by name.
+    /// A pack of format 1 (ADR-0040, signed ones of ADR-0037 included)
+    /// is refused by name, with the way out.
     #[test]
-    fn test_signed_pack_is_refused_with_a_clear_reason() {
-        let header =
-            br#"{"format":1,"name":"x","key_fingerprint":"0","rule_files":0,"signed":true}"#;
-        let mut bytes = MAGIC.to_vec();
+    fn test_format_1_pack_is_refused_with_a_clear_reason() {
+        let header = br#"{"format":1,"name":"x","key_fingerprint":"0","rule_files":0}"#;
+        let mut bytes = MAGIC_V1.to_vec();
         bytes.extend_from_slice(&(header.len() as u32).to_le_bytes());
         bytes.extend_from_slice(header);
-        assert!(read_header(&bytes).unwrap_err().contains("signed"));
+        let err = read_header(&bytes).unwrap_err();
+        assert!(err.contains("format 1") && err.contains("rebuild"), "{err}");
     }
 
     /// Ticket #153: the header bytes are fixed (alphabetical keys, no
     /// space), whatever the `serde_json` features of the build.
     #[test]
     fn test_pack_header_bytes_are_fixed() {
-        let pack = write_pack("de\"mo", &sample());
+        let pack = write_pack("de\"mo", &sample(), None);
         let len = u32::from_le_bytes(pack[8..12].try_into().unwrap()) as usize;
         let header = std::str::from_utf8(&pack[12..12 + len]).unwrap();
         let expected = format!(
-            "{{\"format\":1,\"key_fingerprint\":\"{}\",\"name\":\"de\\\"mo\",\"rule_files\":2}}",
-            key_fingerprint(&demo_key())
+            "{{\"format\":2,\"key_fingerprint\":\"{}\",\"name\":\"de\\\"mo\",\"rule_files\":2,\"rules_bytes\":{},\"version_rules_bytes\":0}}",
+            key_fingerprint(&demo_key()),
+            read_header(&pack).unwrap().rules_bytes
         );
         assert_eq!(header, expected);
         assert_eq!(read_header(&pack).unwrap().name, "de\"mo");
@@ -515,5 +652,49 @@ mod tests {
             source_sha256(""),
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         );
+    }
+
+    // --- version rules section (ADR-0043) ---
+
+    #[test]
+    fn test_version_rules_round_trip_apart_from_the_rules() {
+        let container = b"SADB-container-bytes".to_vec();
+        let pack = write_pack("builtin", &sample(), Some(&container));
+        let header = read_header(&pack).unwrap();
+        assert!(header.has_version_rules());
+        assert_eq!(header.version_rules_bytes, container.len() + SECTION_OVERHEAD);
+        assert_eq!(open_version_rules(&pack).unwrap(), Some(container));
+        let (_, files) = open_pack(&pack).unwrap();
+        assert_eq!(files.len(), 2, "rules unchanged by the second section");
+        assert!(!String::from_utf8_lossy(&pack).contains("SADB-container"), "encrypted");
+    }
+
+    #[test]
+    fn test_pack_without_version_rules_has_none() {
+        for pack in [write_pack("demo", &sample(), None), write_pack("demo", &sample(), Some(b""))] {
+            assert!(!read_header(&pack).unwrap().has_version_rules());
+            assert_eq!(open_version_rules(&pack).unwrap(), None);
+        }
+        assert_eq!(write_pack("demo", &sample(), None), write_pack("demo", &sample(), Some(b"")));
+    }
+
+    #[test]
+    fn test_version_rules_change_the_pack_deterministically() {
+        let a = write_pack("demo", &sample(), Some(b"one"));
+        assert_eq!(a, write_pack("demo", &sample(), Some(b"one")));
+        assert_ne!(a, write_pack("demo", &sample(), Some(b"two")));
+    }
+
+    /// Each section is bound to its name and to the header: an altered
+    /// byte, or a truncated section, is refused.
+    #[test]
+    fn test_version_rules_section_is_authenticated() {
+        let pack = write_pack("demo", &sample(), Some(b"version rules"));
+        let mut corrupt = pack.clone();
+        let last = corrupt.len() - 1;
+        corrupt[last] ^= 0xFF;
+        assert!(open_version_rules(&corrupt).unwrap_err().contains("corrupt"));
+        assert!(open_pack(&corrupt).is_ok(), "the rules section is intact");
+        assert!(open_version_rules(&pack[..pack.len() - 1]).unwrap_err().contains("truncated"));
     }
 }

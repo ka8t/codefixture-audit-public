@@ -31,6 +31,9 @@ pub fn compile_to_json(node: &RuleNode) -> Value {
     result.insert("mode".to_string(), json!(mode));
     result.insert("message".to_string(), texts_to_value(&node.message.texts));
 
+    if !node.name.texts.is_empty() {
+        result.insert("name".to_string(), texts_to_value(&node.name.texts));
+    }
     if !node.risk.texts.is_empty() {
         result.insert("risk".to_string(), texts_to_value(&node.risk.texts));
     }

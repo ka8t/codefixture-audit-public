@@ -38,6 +38,7 @@ use crate::report::compliance_html::{
 use crate::report::data::{ReportData, compute_report_data};
 use crate::report::exports::sarif::ReportFinding;
 use crate::report::findings_html::render_severity_section;
+use crate::rules::identity::RuleCatalog;
 use crate::report::report_assets::{
     asset_data_uri, load_asset, load_template, load_vendor_chart_js,
 };
@@ -65,7 +66,7 @@ pub struct ReportContext<'a> {
     pub total_lines_code: usize,
     pub total_files_scanned: usize,
     pub health_thresholds: HealthThresholds,
-    pub rule_catalog: &'a BTreeMap<String, Value>,
+    pub rule_catalog: &'a RuleCatalog,
 }
 
 fn category_severity_matrix(
@@ -107,7 +108,7 @@ fn language_severity_data(findings: &[ReportFinding]) -> Value {
 /// exist on the AuditRust side — approximated by the size of the
 /// loaded rule catalog. The chart has one slice for the catalog's rules
 /// (`json_builtin`) and one for the client's (`json_custom`).
-fn taint_chart_data(findings: &[ReportFinding], rule_catalog: &BTreeMap<String, Value>) -> Value {
+fn taint_chart_data(findings: &[ReportFinding], rule_catalog: &RuleCatalog) -> Value {
     let taint_findings: Vec<&ReportFinding> =
         findings.iter().filter(|f| f.taint_flow.is_some()).collect();
     let mut by_rule: serde_json::Map<String, Value> = serde_json::Map::new();
@@ -240,7 +241,7 @@ fn build_chart_data(
     report_locale: &Value,
     data: &ReportData,
     findings: &[ReportFinding],
-    rule_catalog: &BTreeMap<String, Value>,
+    rule_catalog: &RuleCatalog,
     compliance: &ComplianceResults,
 ) -> Value {
     let (compliance, asvs, nist, compliance_score) = (
@@ -464,9 +465,15 @@ fn render_glossary_html(report_locale: &Value) -> (String, String) {
 /// distinguish builtin/custom (`ScanConfig` has only one
 /// `rules_dir`), so `custom_rules` is always empty, like a real
 /// Python scan with no `json_custom` rule loaded.
+///
+/// Deliberate deviation from Python (2026-11-15): Audit printed
+/// `./run_audit.py . --create-rule` under the text, a command of the
+/// Python tool. No command of this engine fits instead: `create-rule`
+/// writes catalog rules (private build), and the shared build reads no
+/// custom rule at all (ADR-0041). The empty state only describes them.
 fn render_custom_rules_section(report_locale: &Value) -> String {
     let body = format!(
-        r#"<div class="custom-rules-empty"><div class="custom-rules-empty-icon">📜</div><p class="custom-rules-empty-title">{}</p><p class="custom-rules-empty-desc">{}</p><code class="custom-rules-cmd">./run_audit.py . --create-rule</code></div>"#,
+        r#"<div class="custom-rules-empty"><div class="custom-rules-empty-icon">📜</div><p class="custom-rules-empty-title">{}</p><p class="custom-rules-empty-desc">{}</p></div>"#,
         t(report_locale, "custom_rules_none"),
         t(report_locale, "custom_rules_none_desc"),
     );
@@ -954,7 +961,7 @@ pub fn generate_html(
 mod tests {
     use super::*;
 
-    fn ctx(rule_catalog: &BTreeMap<String, Value>) -> ReportContext<'_> {
+    fn ctx(rule_catalog: &RuleCatalog) -> ReportContext<'_> {
         ReportContext {
             project_name: "my-project".to_string(),
             project_version: "1.0.0".to_string(),
@@ -984,6 +991,7 @@ mod tests {
     ) -> ReportFinding {
         ReportFinding {
             rule_key: rule_key.to_string(),
+            rule_language: "python".to_string(),
             rule_name: rule_name.to_string(),
             category: category.to_string(),
             severity: severity.to_string(),

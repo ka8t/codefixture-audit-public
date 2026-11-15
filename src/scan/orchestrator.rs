@@ -34,34 +34,29 @@
 //! `JavaCallGraph::build` (same logical dict), cf. doc of
 //! `java_summary::collect_java_field_types`.
 //!
+//! The taint passes live in the `taint` submodule (`orchestrator/taint/`):
+//! one file per language for what sets it apart, the shared work (files
+//! and rules of the language, cache, merge into the report) written once.
+//!
 //! `ast` mode and `hook` rules remain out of scope (cf. `engine::dispatch`).
 #![allow(dead_code)]
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use rayon::prelude::*;
 use tree_sitter::{Parser as TsParser, Tree};
 
-use crate::project::suppress::{Suppressions, is_inline_ignored};
+use crate::project::suppress::Suppressions;
 use crate::report::exports::sarif::{ReportFinding, TaintFlow, TaintStep};
 use crate::scan::counters::{count_java_loc, count_js_loc, count_python_loc};
-use crate::scan::dataflow::call_graph::{CallGraph, FileInput};
-use crate::scan::dataflow::csharp_summary::{
-    collect_csharp_field_types, collect_csharp_local_types, compute_csharp_file_summaries,
-};
-use crate::scan::dataflow::csharp_taint_scan::run_taint_rule_csharp;
-use crate::scan::dataflow::java_call_graph::JavaCallGraph;
-use crate::scan::dataflow::java_summary::{collect_java_field_types, collect_java_local_types};
-use crate::scan::dataflow::java_taint_scan::run_taint_rule_java;
-use crate::scan::dataflow::js_call_graph::JsCallGraph;
-use crate::scan::dataflow::js_taint_scan::run_taint_rule_js;
-use crate::scan::dataflow::php_call_graph::PhpCallGraph;
-use crate::scan::dataflow::php_taint_scan::run_taint_rule_php;
-use crate::scan::dataflow::rule_loader::{extract_cwe, extract_message, rule_json_to_specs};
-use crate::scan::dataflow::taint_scan::run_taint_rule;
+use crate::scan::dataflow::rule_loader::{extract_cwe, extract_message};
 use crate::scan::discovery::{FileDiscoveryConfig, SkippedDir, find_files_and_skipped};
-use crate::scan::engine::dispatch::{DispatchOutcome, dispatch_rule};
+use crate::scan::engine::file_contains::FileLocation;
+
+mod patterns;
+mod taint;
+use taint::TaintLanguage;
 
 /// Source language of a discovered file, detected by extension.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -285,15 +280,13 @@ pub struct ScanConfig {
     /// Explicit test command; if absent and `with_tests`, tries
     /// auto-detection (`testing::auto_detect_test_command`).
     pub test_command: Option<String>,
-    /// Detects unpinned dependencies and, when `advisories_file` is a
-    /// database, dependencies with a published vulnerability (opt-in,
-    /// offline — cf. `dependencies.rs`, `advisories.rs`).
+    /// Runs the dependencies phase even when the rule pack carries no
+    /// version rules (private `--with-deps`): unpinned dependencies are
+    /// reported, and the scan says the versions were not checked. A pack
+    /// with version rules runs the phase anyway (ADR-0043), unless
+    /// `quick_mode`. Offline either way (`dependencies.rs`,
+    /// `advisories.rs`).
     pub with_deps: bool,
-    /// Offline advisory database `advisories.sadb` written by
-    /// `tools/sast-advisories` (ADR-0042), read during the dependencies
-    /// phase. `None` or a missing file: no vulnerability matching, and
-    /// `ScanReport::advisory_database` says so.
-    pub advisories_file: Option<PathBuf>,
     /// PostgreSQL schema audit (opt-in — network connection to the
     /// audited project's database, cf. `database::live`).
     pub database: Option<crate::project::database::live::DbConfig>,
@@ -422,7 +415,6 @@ impl Default for ScanConfig {
             with_tests: false,
             test_command: None,
             with_deps: false,
-            advisories_file: None,
             database: None,
             datas_dir: None,
             legacy_datas_dir: None,
@@ -478,6 +470,10 @@ pub struct ScanReport {
     /// robustness of `compute_file_summaries` on the Python side (a broken
     /// rule doesn't stop the others).
     pub rule_errors: Vec<(PathBuf, String)>,
+    /// Rules of one identity met twice while loading (a client rule
+    /// replacing a catalog rule, a rule defined twice in one source):
+    /// printed by the CLI, so no rule is left out without a word.
+    pub rule_conflicts: Vec<crate::rules::catalog::RuleConflict>,
     /// Rule languages whose rules were read (ADR-0038), sorted: the
     /// declared `target_languages`, or the languages of the discovered
     /// files.
@@ -499,18 +495,18 @@ pub struct ScanReport {
     /// in walk order. Printed by the CLI, so code in a skipped folder never
     /// goes unchecked without a word.
     pub skipped_dirs: Vec<SkippedDir>,
-    /// Catalog of compiled rules, indexed by id — needed by the
-    /// HTML report (`report::html::generate_html`, `fix_before`/
-    /// `fix_after` of `report::findings_html::generate_fix_suggestion`).
-    pub rule_catalog: BTreeMap<String, serde_json::Value>,
+    /// Catalog of compiled rules, indexed by identity (language + name):
+    /// where the reports read each finding's rule texts (risk, solution,
+    /// `fix_before`/`fix_after`), see `rules::identity`.
+    pub rule_catalog: crate::rules::identity::RuleCatalog,
     /// Results of the audited project's tests, if `with_tests` was active.
     pub test_results: Option<crate::project::testing::TestResults>,
     /// Dependency statistics, if `with_deps` was active.
     pub dependency_stats: Option<DependencyStats>,
-    /// The advisory database the dependencies were checked against, or
-    /// why they were not (ADR-0042: never "none vulnerable" when nothing
-    /// was checked). `None` without `with_deps`.
-    pub advisory_database: Option<AdvisoryDatabaseStatus>,
+    /// The version rules the dependencies were checked against, or why
+    /// they were not (ADR-0042, ADR-0043: never "none vulnerable" when
+    /// nothing was checked). `None` when the dependencies phase did not run.
+    pub version_rules: Option<VersionRulesStatus>,
     /// Extracted schema, if `database` was configured and the connection succeeded.
     pub database_schema: Option<crate::project::database::schema::DatabaseSchema>,
     /// Schema statistics (compared against the baseline if available).
@@ -549,25 +545,41 @@ pub struct DependencyStats {
     pub vulnerable: usize,
 }
 
-/// What the dependencies phase found as advisory database (ADR-0042).
+/// What the dependencies phase found as version rules (ADR-0043): the
+/// published vulnerabilities carried by the rule pack.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AdvisoryDatabaseStatus {
-    /// Read: its path, creation date (newest OSV data) and advisories
-    /// per ecosystem, in file order.
+pub enum VersionRulesStatus {
+    /// Read from the pack at `pack`: creation date (newest OSV data) and
+    /// advisories per ecosystem, in pack order.
     Read {
-        path: PathBuf,
+        pack: PathBuf,
         created: String,
         counts: Vec<(String, usize)>,
     },
-    /// No file at this path (or no path at all): dependencies were not
-    /// checked against published vulnerabilities.
-    Missing { path: Option<PathBuf> },
-    /// A file that could not be used, with why.
-    Unreadable { path: PathBuf, error: String },
+    /// The rules come from a pack without version rules, or from a folder
+    /// of plain rules: dependencies were not checked against published
+    /// vulnerabilities.
+    Missing,
+    /// Version rules that could not be opened, with why.
+    Unreadable { error: String },
+}
+
+/// Opens the version rules of the rule pack at `path` (ADR-0043): the
+/// advisory container of its version rules section. A folder of plain
+/// rules carries none.
+fn read_version_rules(path: &Path) -> Result<Option<crate::project::advisory_file::DatabaseFile>, String> {
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let bytes = std::fs::read(path).map_err(|e| format!("unreadable rule pack: {e}"))?;
+    match crate::rules::pack_format::open_version_rules(&bytes)? {
+        Some(container) => crate::project::advisory_file::decode(path, container).map(Some),
+        None => Ok(None),
+    }
 }
 
 /// `vulnerable_dependency` findings for the dependencies of `deps` hit
-/// by the offline advisory database `file` (ADR-0035, ADR-0042) — one finding
+/// by the version rules `file` of the pack (ADR-0035, ADR-0043) — one finding
 /// per dependency, listing every distinct vulnerability, so a package
 /// with ten CVEs does not bury the report under ten lines. The severity
 /// is the highest among them. Unreadable database files are reported on
@@ -575,6 +587,7 @@ pub enum AdvisoryDatabaseStatus {
 fn vulnerable_dependency_findings(
     file: &crate::project::advisory_file::DatabaseFile,
     deps: &[crate::project::dependencies::Dependency],
+    root: &Path,
 ) -> Vec<ReportFinding> {
     use crate::project::advisories;
 
@@ -582,7 +595,7 @@ fn vulnerable_dependency_findings(
         deps.iter().map(|d| d.ecosystem.clone()).collect();
     let (db, errors) = advisories::load(file, &ecosystems);
     for error in errors {
-        eprintln!("[sast-engine] advisory database skipped: {error}");
+        eprintln!("[sast-engine] version rules skipped: {error}");
     }
     let rank = |s: &str| match s {
         "CRITICAL" => 4,
@@ -640,6 +653,7 @@ fn vulnerable_dependency_findings(
             };
             ReportFinding {
                 rule_key: "vulnerable_dependency".to_string(),
+                rule_language: String::new(), // no catalog rule: the version rules of the pack.
                 rule_name: "Vulnerable dependency".to_string(),
                 category: "DEPENDENCIES".to_string(),
                 severity: severity.to_string(),
@@ -655,7 +669,7 @@ fn vulnerable_dependency_findings(
                     },
                     listed.join("; ")
                 ),
-                file: dep.file.to_string_lossy().to_string(),
+                file: project_relative_path(root, &dep.file),
                 line: dep.line,
                 solution: Some(solution),
                 cwe,
@@ -753,6 +767,17 @@ fn rule_display_message(rule_json: &serde_json::Value, lang: &str) -> String {
     }
 }
 
+/// The `language` of a compiled rule, `""` when it has none: written on
+/// each of its findings, so the report reads the rule of the finding's
+/// own language (`ReportFinding::rule_id`).
+fn rule_language(rule_json: &serde_json::Value) -> String {
+    rule_json
+        .get("language")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string()
+}
+
 fn engine_finding_to_report(
     f: &crate::scan::engine::Finding,
     rule_json: &serde_json::Value,
@@ -764,6 +789,7 @@ fn engine_finding_to_report(
         crate::report::text::context_lines(source_lines, f.line, 2);
     ReportFinding {
         rule_key: f.rule_id.clone(),
+        rule_language: rule_language(rule_json),
         rule_name: f.rule_id.clone(),
         category: f.category.clone(),
         severity: f.severity.clone(),
@@ -876,6 +902,7 @@ fn taint_finding_to_report(
         .unwrap_or_else(|| f.sink_text.clone());
     ReportFinding {
         rule_key: f.rule_id.clone(),
+        rule_language: rule_language(rule_json),
         rule_name: f.rule_id.clone(),
         // Category declared by the DSL rule, not a pseudo-category
         // "Taint" — mirrors `cat_key = flow.category.upper()` on the
@@ -1042,6 +1069,99 @@ struct ParsedFile {
     language: SourceLanguage,
 }
 
+impl ParsedFile {
+    /// Both paths of the file, as the pattern rules need them:
+    /// project-relative for folder conditions, on-disk for the
+    /// governance-file walk (see `FileLocation`).
+    fn location(&self) -> FileLocation<'_> {
+        FileLocation {
+            absolute: &self.filepath,
+            relative: &self.rel_path,
+        }
+    }
+}
+
+/// What the passes of phases B and C read from the scan and add to it:
+/// one value for the whole scan, handed to the pattern pass (`patterns`)
+/// then to each taint pass (`taint`).
+struct PassContext<'s> {
+    config: &'s ScanConfig,
+    /// The user's suppressions (`.sca-suppress.json`).
+    suppressions: &'s Suppressions,
+    /// Cache folder of this engine, `None` when the scan runs without cache.
+    cache: Option<&'s crate::scan::scan_cache::CacheContext>,
+    /// The report's findings, in the order the passes add them.
+    findings: &'s mut Vec<ReportFinding>,
+    /// One line per pass that used the cache, for the console summary.
+    cache_stats: &'s mut Vec<crate::scan::scan_cache::CacheStat>,
+}
+
+/// Reads and parses one discovered file: its text, lines, tree and
+/// language, with its path relative to `root`. Returns the lines of code
+/// it counts along with it, or `None` when the file cannot be read or
+/// parsed (it is then left out of the scan, as before). Phase A runs it
+/// on every file in parallel; the tests build their files with it, so
+/// they see a file exactly as a scan does.
+fn parse_file(root: &Path, filepath: &Path) -> Option<(usize, ParsedFile)> {
+    let language = SourceLanguage::from_path(filepath)?; // unknown extension/name: should not happen (discovery already filtered).
+    let source_bytes = std::fs::read(filepath).ok()?;
+    let source_text = String::from_utf8_lossy(&source_bytes).into_owned();
+    let all_lines = split_lines_with_terminators(&source_text);
+    let source_lines_plain: Vec<String> =
+        all_lines.iter().map(|(_, t)| t.clone()).collect();
+    let rel_path = project_relative_path(root, filepath);
+
+    let mut parser = TsParser::new();
+    let ts_lang: tree_sitter::Language = match language {
+        SourceLanguage::Python => tree_sitter_python::LANGUAGE.into(),
+        SourceLanguage::Java => tree_sitter_java::LANGUAGE.into(),
+        SourceLanguage::JavaScript => tree_sitter_javascript::LANGUAGE.into(),
+        SourceLanguage::TypeScript => ts_grammar_for(filepath),
+        SourceLanguage::Php => tree_sitter_php::LANGUAGE_PHP.into(),
+        SourceLanguage::CSharp => tree_sitter_c_sharp::LANGUAGE.into(),
+        SourceLanguage::Html => tree_sitter_html::LANGUAGE.into(),
+        SourceLanguage::Yaml => tree_sitter_yaml::LANGUAGE.into(),
+        // The only crate with no official org (ticket #69): older
+        // API, a `language()` function that already returns
+        // `tree_sitter::Language` — no `LanguageFn`/`.into()`
+        // like the 8 other grammars in this match.
+        SourceLanguage::Dockerfile => tree_sitter_dockerfile_updated::language(),
+    };
+    parser.set_language(&ts_lang).ok()?;
+    let tree = parser.parse(&source_text, None)?;
+
+    let loc = match language {
+        SourceLanguage::Python => count_python_loc(&source_bytes, &tree),
+        SourceLanguage::Java => count_java_loc(&source_bytes, &tree),
+        // `count_js_loc` operates purely on the "comment"
+        // kind-string, identical across JS/TS/PHP/C#/HTML/YAML/
+        // Dockerfile (verified empirically on the 4 new
+        // grammars, ticket #69: a single "comment" node, no
+        // line_comment/block_comment split like in Java) — no
+        // need for a dedicated per-language counter.
+        SourceLanguage::JavaScript
+        | SourceLanguage::TypeScript
+        | SourceLanguage::Php
+        | SourceLanguage::CSharp
+        | SourceLanguage::Html
+        | SourceLanguage::Yaml
+        | SourceLanguage::Dockerfile => count_js_loc(&source_bytes, &tree),
+    };
+    Some((
+        loc,
+        ParsedFile {
+            rel_path,
+            filepath: filepath.to_path_buf(),
+            source_bytes,
+            source_text,
+            all_lines,
+            source_lines_plain,
+            tree,
+            language,
+        },
+    ))
+}
+
 /// Breakdown of already-parsed files by language — `BTreeMap` for a
 /// stable (alphabetical) display order, not the order files were
 /// encountered in. Computed once, reused by three consumers that used
@@ -1123,151 +1243,16 @@ fn reads_language_files(config: &ScanConfig, tag: &str) -> bool {
     }
 }
 
-/// Findings of one taint rule on one file.
-type TaintFindings = Vec<crate::scan::dataflow::transfer::Finding>;
-
-/// Runs every taint rule of one language on its files, reusing the taint
-/// cache of the previous scan (`scan_cache`, issue #183).
-///
-/// Shared by the five taint passes; each gives what is specific to its
-/// language: `dependency_fingerprint` (what a file resolves from the
-/// others), `resolve` (the call graph's incremental summary resolution),
-/// `consumes_changed` (whether a file reads a summary that changed) and
-/// `run_file` (the analysis of one file with its summaries). A file keeps
-/// its previous findings for a rule when neither its text, nor what it
-/// resolves, nor any summary it reads changed; the result is the
-/// per-rule, per-file findings each pass already merged, in the same
-/// order, so the report is the one of a full scan.
-#[allow(clippy::too_many_arguments)]
-fn cached_taint_pass(
-    language: &str,
-    files: &[&ParsedFile],
-    rule_jsons: &[&serde_json::Value],
-    config: &ScanConfig,
-    dependency_fingerprint: &(dyn Fn(&str) -> String + Sync),
-    resolve: &(dyn Fn(
-        &crate::scan::dataflow::transfer::RuleSpecs,
-        Option<&crate::scan::dataflow::call_graph::SummaryReuse>,
-    ) -> crate::scan::dataflow::call_graph::ResolvedSummaries
-          + Sync),
-    consumes_changed: &(dyn Fn(&str, &BTreeSet<crate::scan::dataflow::call_graph::NodeKey>) -> bool
-          + Sync),
-    run_file: &(dyn Fn(
-        &ParsedFile,
-        &mut crate::scan::dataflow::transfer::RuleSpecs,
-        &crate::scan::dataflow::call_graph::ResolvedSummaries,
-    ) -> TaintFindings
-          + Sync),
-    cache_stats: &mut Vec<crate::scan::scan_cache::CacheStat>,
-) -> Vec<Option<Vec<TaintFindings>>> {
-    use crate::scan::scan_cache::{CacheKey, FileState, RuleState, TaintCache, sha256_hex};
-    let cache_key = CacheKey::current(&config.lang);
-    let cache_path = config
-        .cache_dir
-        .as_ref()
-        .map(|d| TaintCache::path(&cache_key.engine_dir(d), language));
-    let previous = cache_path.as_ref().and_then(|p| TaintCache::load(p, &cache_key));
-    let file_states: BTreeMap<String, FileState> = files
-        .iter()
-        .map(|pf| {
-            (
-                pf.rel_path.clone(),
-                FileState {
-                    hash: sha256_hex(&pf.source_bytes),
-                    deps: sha256_hex(dependency_fingerprint(&pf.rel_path).as_bytes()),
-                },
-            )
-        })
-        .collect();
-    let dirty: BTreeSet<String> = previous.as_ref().map_or_else(
-        || file_states.keys().cloned().collect(),
-        |cache| cache.dirty_files(&file_states),
-    );
-
-    // Per rule: its per-file findings, id, cache entry and analyses run.
-    type RuleRun = (Vec<TaintFindings>, String, RuleState, usize);
-    let runs: Vec<Option<RuleRun>> = rule_jsons
-        .par_iter()
-        .map(|rule_json| {
-            // `Some` as soon as the rule has a source and a sink, whatever
-            // its `patterns` (a `regex+taint` rule goes through both phases).
-            let base_specs = rule_json_to_specs(rule_json, &config.lang)?;
-            let rule_hash =
-                sha256_hex(serde_json::to_string(rule_json).unwrap_or_default().as_bytes());
-            let prior = previous
-                .as_ref()
-                .and_then(|c| c.rules.get(&base_specs.rule_id))
-                .filter(|r| r.rule_hash == rule_hash);
-            let prior_summaries = prior.map(RuleState::previous_summaries);
-            let reuse = prior_summaries.as_ref().map(|previous| {
-                crate::scan::dataflow::call_graph::SummaryReuse {
-                    previous,
-                    dirty_files: &dirty,
-                }
-            });
-            let resolved = resolve(&base_specs, reuse.as_ref());
-            // Cloned once per rule, not per file: only the per-file parts
-            // (summaries, type map) change between files.
-            let mut node_specs = base_specs.clone();
-            let mut analysed = 0usize;
-            let mut per_file = Vec::with_capacity(files.len());
-            for pf in files {
-                if let Some(prior) = prior
-                    && !dirty.contains(&pf.rel_path)
-                    && !consumes_changed(&pf.rel_path, &resolved.changed)
-                    && let Some(findings) = prior.findings.get(&pf.rel_path)
-                {
-                    per_file.push(findings.clone());
-                    continue;
-                }
-                analysed += 1;
-                per_file.push(run_file(pf, &mut node_specs, &resolved));
-            }
-            let state = RuleState {
-                rule_hash,
-                summaries: resolved
-                    .all
-                    .iter()
-                    .map(|((f, n), s)| (f.clone(), n.clone(), (**s).clone()))
-                    .collect(),
-                findings: files
-                    .iter()
-                    .zip(&per_file)
-                    .map(|(pf, f)| (pf.rel_path.clone(), f.clone()))
-                    .collect(),
-            };
-            Some((per_file, base_specs.rule_id.clone(), state, analysed))
-        })
-        .collect();
-
-    if let Some(path) = &cache_path {
-        let mut cache = TaintCache::new(cache_key);
-        cache.files = file_states;
-        let mut analysed = 0;
-        let mut total = 0;
-        for (_, rule_id, state, n) in runs.iter().flatten() {
-            cache.rules.insert(rule_id.clone(), state.clone());
-            analysed += n;
-            total += files.len();
-        }
-        // Nothing redone and no file changed: the cache on disk is already
-        // this one, rewriting it would only cost time. A cache that cannot
-        // be written only costs the next scan its speed: never an error of
-        // this one.
-        if previous.is_none() || !dirty.is_empty() || analysed > 0 {
-            let _ = cache.save(path);
-        }
-        cache_stats.push(crate::scan::scan_cache::CacheStat {
-            language: language.to_string(),
-            files: files.len(),
-            dirty: dirty.len(),
-            analysed,
-            total,
-        });
-    }
-    runs.into_iter()
-        .map(|run| run.map(|(per_file, _, _, _)| per_file))
-        .collect()
+/// `path` as every finding names its file: relative to the scanned `root`,
+/// with `/` separators on every system. A path outside `root` is kept as
+/// it is. The single place of this rule, used for the analysed files and
+/// for the dependency findings (which named the absolute path of the
+/// user's machine until 2026-11-14).
+fn project_relative_path(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/")
 }
 
 /// Runs a full scan on `config.root`.
@@ -1373,11 +1358,13 @@ pub fn run_scan(config: &ScanConfig) -> ScanReport {
                 .iter()
                 .any(|lang| rule_languages.iter().any(|l| l == lang.rule_tag()))
     };
-    let taint_python_active = has_language(&[SourceLanguage::Python]);
-    let taint_java_active = has_language(&[SourceLanguage::Java]);
-    let taint_js_active = has_language(&[SourceLanguage::JavaScript, SourceLanguage::TypeScript]);
-    let taint_php_active = has_language(&[SourceLanguage::Php]);
-    let taint_csharp_active = has_language(&[SourceLanguage::CSharp]);
+    // Each pass declares its file languages once (`TaintLanguage::
+    // FILE_LANGUAGES`): the pass reads the same list to pick its files.
+    let taint_python_active = has_language(taint::PythonTaint::FILE_LANGUAGES);
+    let taint_java_active = has_language(taint::JavaTaint::FILE_LANGUAGES);
+    let taint_js_active = has_language(taint::JsTaint::FILE_LANGUAGES);
+    let taint_php_active = has_language(taint::PhpTaint::FILE_LANGUAGES);
+    let taint_csharp_active = has_language(taint::CSharpTaint::FILE_LANGUAGES);
 
     // Rules, phase A, phase B — always run.
     const CORE_PHASES: usize = 3;
@@ -1385,7 +1372,22 @@ pub fn run_scan(config: &ScanConfig) -> ScanReport {
     // (computing `total_phases`) and by the `if` guard of its own
     // block further down — prevents the two from drifting apart if one
     // is changed without the other.
-    let deps_phase_active = config.with_deps && !config.quick_mode;
+    // ADR-0043: a pack carrying version rules checks the dependencies of
+    // every scan whose project declares some; its header says so without
+    // decrypting anything. A project without any manifest has nothing to
+    // check, so it gets no phase and no line about version rules (it got
+    // both on 2026-11-15, for every scan of a code-only project).
+    // `with_deps` runs the phase anyway. The dependencies read here are
+    // the ones the phase checks: they are read once.
+    let pack_has_version_rules = config.rules_path.is_file()
+        && crate::rules::pack_format::read_header_from_file(&config.rules_path)
+            .is_ok_and(|header| header.has_version_rules());
+    let mut declared_dependencies = ((config.with_deps || pack_has_version_rules) && !config.quick_mode)
+        // Root + every `paths.include` entry, like Python — see
+        // `dependencies::collect_dependencies` (fix 2026-11-04).
+        .then(|| crate::project::dependencies::collect_dependencies(&config.root, &config.include_paths));
+    let deps_phase_active = !config.quick_mode
+        && (config.with_deps || (pack_has_version_rules && declared_dependencies.as_ref().is_some_and(|d| !d.is_empty())));
     let tests_phase_active = config.with_tests && !config.quick_mode;
     let database_phase_active = config.database.is_some() && !config.quick_mode;
     let total_phases = CORE_PHASES
@@ -1425,16 +1427,16 @@ pub fn run_scan(config: &ScanConfig) -> ScanReport {
     // then the custom rules folder; only the target languages' rule files
     // are kept. A pack that cannot be opened is reported with the invalid
     // rule files.
+    // Every rule goes through one registry: each identity (language +
+    // name) runs once, a client rule replacing the catalog rule of the
+    // same identity (`RuleRegistry`).
     let mut rule_sources = Vec::new();
-    let mut loaded_rule_jsons = Vec::new();
+    let mut registry = crate::rules::catalog::RuleRegistry::default();
     let mut rule_errors: Vec<(PathBuf, String)> = Vec::new();
     let mut load_source = |path: &Path, origin: crate::rules::catalog::RuleOrigin| {
         let mut loaded = crate::rules::catalog::load_rules(path, &rule_languages, origin);
-        let (rules, mut errors) =
-            crate::rules::catalog::compile_loaded_rules(&loaded, &rule_languages);
-        loaded_rule_jsons.extend(rules);
+        registry.add_source(&loaded, &rule_languages);
         rule_errors.append(&mut loaded.errors);
-        rule_errors.append(&mut errors);
         rule_sources.push(loaded.summary());
     };
     load_source(
@@ -1449,6 +1451,8 @@ pub fn run_scan(config: &ScanConfig) -> ScanReport {
     {
         load_source(custom_dir, crate::rules::catalog::RuleOrigin::Client);
     }
+    let (loaded_rule_jsons, rule_conflicts, mut compile_errors) = registry.finish();
+    rule_errors.append(&mut compile_errors);
     let rules_loaded = loaded_rule_jsons.len();
     record_phase(
         &phase_label(
@@ -1480,11 +1484,12 @@ pub fn run_scan(config: &ScanConfig) -> ScanReport {
             {
                 return false;
             }
-            if !config.disabled_rules.is_empty() {
-                let id = r.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                if config.disabled_rules.iter().any(|d| d == id) {
-                    return false;
-                }
+            // A name disables the rule in every language, `language/name`
+            // in that language only (`RuleId::is_selected_by`).
+            if let Some(id) = crate::rules::identity::RuleId::of(r)
+                && config.disabled_rules.iter().any(|d| id.is_selected_by(d))
+            {
+                return false;
             }
             true
         })
@@ -1506,69 +1511,7 @@ pub fn run_scan(config: &ScanConfig) -> ScanReport {
     let t_phase_a = std::time::Instant::now();
     let parsed_results: Vec<Option<(usize, ParsedFile)>> = files
         .par_iter()
-        .map(|filepath| {
-            let language = SourceLanguage::from_path(filepath)?; // unknown extension/name: should not happen (discovery already filtered).
-            let source_bytes = std::fs::read(filepath).ok()?;
-            let source_text = String::from_utf8_lossy(&source_bytes).into_owned();
-            let all_lines = split_lines_with_terminators(&source_text);
-            let source_lines_plain: Vec<String> =
-                all_lines.iter().map(|(_, t)| t.clone()).collect();
-            let rel_path = filepath
-                .strip_prefix(&config.root)
-                .unwrap_or(filepath)
-                .to_string_lossy()
-                .replace('\\', "/");
-
-            let mut parser = TsParser::new();
-            let ts_lang: tree_sitter::Language = match language {
-                SourceLanguage::Python => tree_sitter_python::LANGUAGE.into(),
-                SourceLanguage::Java => tree_sitter_java::LANGUAGE.into(),
-                SourceLanguage::JavaScript => tree_sitter_javascript::LANGUAGE.into(),
-                SourceLanguage::TypeScript => ts_grammar_for(filepath),
-                SourceLanguage::Php => tree_sitter_php::LANGUAGE_PHP.into(),
-                SourceLanguage::CSharp => tree_sitter_c_sharp::LANGUAGE.into(),
-                SourceLanguage::Html => tree_sitter_html::LANGUAGE.into(),
-                SourceLanguage::Yaml => tree_sitter_yaml::LANGUAGE.into(),
-                // The only crate with no official org (ticket #69): older
-                // API, a `language()` function that already returns
-                // `tree_sitter::Language` — no `LanguageFn`/`.into()`
-                // like the 8 other grammars in this match.
-                SourceLanguage::Dockerfile => tree_sitter_dockerfile_updated::language(),
-            };
-            parser.set_language(&ts_lang).ok()?;
-            let tree = parser.parse(&source_text, None)?;
-
-            let loc = match language {
-                SourceLanguage::Python => count_python_loc(&source_bytes, &tree),
-                SourceLanguage::Java => count_java_loc(&source_bytes, &tree),
-                // `count_js_loc` operates purely on the "comment"
-                // kind-string, identical across JS/TS/PHP/C#/HTML/YAML/
-                // Dockerfile (verified empirically on the 4 new
-                // grammars, ticket #69: a single "comment" node, no
-                // line_comment/block_comment split like in Java) — no
-                // need for a dedicated per-language counter.
-                SourceLanguage::JavaScript
-                | SourceLanguage::TypeScript
-                | SourceLanguage::Php
-                | SourceLanguage::CSharp
-                | SourceLanguage::Html
-                | SourceLanguage::Yaml
-                | SourceLanguage::Dockerfile => count_js_loc(&source_bytes, &tree),
-            };
-            Some((
-                loc,
-                ParsedFile {
-                    rel_path,
-                    filepath: filepath.clone(),
-                    source_bytes,
-                    source_text,
-                    all_lines,
-                    source_lines_plain,
-                    tree,
-                    language,
-                },
-            ))
-        })
+        .map(|filepath| parse_file(&config.root, filepath))
         .collect();
 
     let loc_and_files: Vec<(usize, ParsedFile)> = parsed_results.into_iter().flatten().collect();
@@ -1599,719 +1542,62 @@ pub fn run_scan(config: &ScanConfig) -> ScanReport {
 
     let mut all_findings: Vec<ReportFinding> = Vec::new();
     let mut cache_stats: Vec<crate::scan::scan_cache::CacheStat> = Vec::new();
-
-    // Phase B — regex/file_contains, per file. A rule only applies to
-    // files of ITS declared language (`rule_json["language"]`), now
-    // that Python and Java coexist in the same loaded catalog.
-    //
-    // Parallelized per file (independent of each other —
-    // `dispatch_rule`/`suppressions.is_suppressed` are pure functions
-    // of the current file, no shared state during computation). The
-    // final order (file, then rule) is preserved identically by
-    // flattening results in `parsed_files` order, for a report
-    // strictly identical to the sequential version.
-    let t_phase_b = std::time::Instant::now();
-    // Pattern cache (`scan_cache`): a file keeps its raw findings when its
-    // bytes, the governance files around it and the loaded rules are those
-    // of the previous scan. Suppressions are applied after, on every scan.
-    use crate::scan::scan_cache::{CacheKey, PatternCache, PatternFileState, sha256_hex};
-    let pattern_key = CacheKey::current(&config.lang);
-    let rules_hash = sha256_hex(serde_json::to_string(&rule_jsons).unwrap_or_default().as_bytes());
-    let governance_names: Vec<String> = rule_jsons
-        .iter()
-        .filter_map(|r| r.get("file_contains")?.get("not_path_has_file")?.as_array())
-        .flatten()
-        .filter_map(|v| v.as_str().map(str::to_string))
-        .collect::<BTreeSet<String>>()
-        .into_iter()
-        .collect();
-    // This binary's own cache folder; the folders of older binaries
-    // beyond the most recent ones are removed once per scan, here.
-    let pattern_cache_path = config.cache_dir.as_ref().map(|d| {
-        let engine_dir = pattern_key.engine_dir(d);
-        crate::scan::scan_cache::prune_engine_dirs(d, &engine_dir);
-        PatternCache::path(&engine_dir)
-    });
-    let pattern_previous = pattern_cache_path
-        .as_ref()
-        .and_then(|p| PatternCache::load(p, &pattern_key, &rules_hash));
-    let per_file_raw: Vec<(PatternFileState, bool)> = parsed_files
-        .par_iter()
-        .map(|pf| {
-            let hash = sha256_hex(&pf.source_bytes);
-            let governance = crate::scan::engine::file_contains::governance_fingerprint(
-                &pf.filepath,
-                &governance_names,
-            );
-            if let Some(previous) = pattern_previous.as_ref().and_then(|c| c.files.get(&pf.rel_path))
-                && previous.hash == hash
-                && previous.governance == governance
-            {
-                return (previous.clone(), false);
-            }
-            let mut findings = Vec::new();
-            for (index, rule_json) in rule_jsons.iter().enumerate() {
-                if rule_json.get("language").and_then(|v| v.as_str())
-                    != Some(pf.language.rule_tag())
-                {
-                    continue;
-                }
-                let DispatchOutcome::Findings(found) =
-                    dispatch_rule(rule_json, &pf.filepath, &pf.all_lines, &pf.source_text)
-                else {
-                    continue; // Taint/Ast/Hook: handled elsewhere (Phase C) or out of scope.
-                };
-                findings.extend(found.into_iter().map(|f| (index, f)));
-            }
-            (
-                PatternFileState {
-                    hash,
-                    governance,
-                    findings,
-                },
-                true,
-            )
-        })
-        .collect();
-    let per_file_findings: Vec<Vec<ReportFinding>> = parsed_files
-        .par_iter()
-        .zip(per_file_raw.par_iter())
-        .map(|(pf, (state, _))| {
-            let mut out = Vec::new();
-            for (index, f) in &state.findings {
-                let rule_json = &rule_jsons[*index];
-                if suppressions.is_suppressed(&f.rule_id, &pf.rel_path, &f.code) {
-                    continue;
-                }
-                if is_inline_ignored(&f.code, &f.rule_id) {
-                    continue;
-                }
-                out.push(engine_finding_to_report(
-                    f,
-                    rule_json,
-                    &pf.rel_path,
-                    &pf.source_lines_plain,
-                    &config.lang,
-                ));
-            }
-            out
-        })
-        .collect();
-    if let Some(path) = &pattern_cache_path {
-        let mut cache = PatternCache::new(pattern_key, rules_hash);
-        let mut redone = 0;
-        for (pf, (state, recomputed)) in parsed_files.iter().zip(per_file_raw) {
-            redone += usize::from(recomputed);
-            cache.files.insert(pf.rel_path.clone(), state);
-        }
-        if pattern_previous.is_none() || redone > 0 {
-            let _ = cache.save(path);
-        }
-        cache_stats.push(crate::scan::scan_cache::CacheStat {
-            language: "patterns".to_string(),
-            files: parsed_files.len(),
-            dirty: redone,
-            analysed: redone,
-            total: parsed_files.len(),
+    // The cache of this scan, prepared once for every pass: this engine's
+    // folder, marked as used now, the folders of engines unused for the
+    // longest removed. `None` without a cache folder, or when it cannot be
+    // created: the scan then runs in full.
+    let scan_cache = config
+        .cache_dir
+        .as_deref()
+        .and_then(|base| {
+            // `config.root`: the symlink guard of `prepare` (a scanned
+            // project is untrusted and may plant a link under its cache path).
+            crate::scan::scan_cache::CacheContext::prepare(base, &config.lang, &config.root)
         });
-    }
-    for findings in per_file_findings {
-        all_findings.extend(findings);
-    }
-    record_phase(
-        &phase_label(config, "scan_phase_b", "phase B (regex/file_contains)"),
-        t_phase_b.elapsed(),
-    );
+    let mut passes = PassContext {
+        config,
+        suppressions: &suppressions,
+        cache: scan_cache.as_ref(),
+        findings: &mut all_findings,
+        cache_stats: &mut cache_stats,
+    };
 
-    // Phase C — multi-file taint, one batch per language. The call
-    // graph is built ONCE per language (structure independent of the
-    // rule: nodes = all functions, edges = all resolved calls); only
-    // the summary resolution (`resolve_summaries`) depends on the rule
-    // (sources/sinks specific to each taint rule).
-    //
-    // Global deduplication — key (file, rule_id, line, source_line).
-    // The file MUST be part of the key: without it, two distinct files
-    // sharing the same line number for the same rule_id (very common
-    // on a corpus of structurally similar files, e.g. OWASP
-    // BenchmarkJava — hundreds of nearly identical classes) silently
-    // cancel each other out, making real findings disappear. Bug found
-    // on 2026-08-25 while calibrating the Java taint engine on OWASP
-    // BenchmarkJava (recall 34% instead of the ~100% expected) —
-    // pre-existing on the Python side too (same `seen_taint` shared
-    // between the two blocks), fixed for both languages.
-    let mut seen_taint: HashSet<(String, String, usize, Option<usize>)> = HashSet::new();
+    // Phase B — the pattern rules, one file at a time (`patterns`).
+    let (label, elapsed) = patterns::run_pattern_pass(&parsed_files, &rule_jsons, &mut passes);
+    record_phase(&label, elapsed);
 
-    if taint_python_active {
-        // --- Python ---------------------------------------------------------
-        let t_phase_c_python = std::time::Instant::now();
-        let python_files: Vec<&ParsedFile> = parsed_files
-            .iter()
-            .filter(|pf| pf.language == SourceLanguage::Python)
-            .collect();
-        let py_file_inputs: Vec<FileInput> = python_files
-            .iter()
-            .map(|pf| FileInput {
-                filepath: pf.rel_path.clone(),
-                root: pf.tree.root_node(),
-                source: pf.source_bytes.as_slice(),
-            })
-            .collect();
-        let call_graph = CallGraph::build(&py_file_inputs);
-        let py_source_lines_by_file: BTreeMap<String, Vec<String>> = python_files
-            .iter()
-            .map(|pf| (pf.rel_path.clone(), pf.source_lines_plain.clone()))
-            .collect();
-
-        // Parallelized **per rule**, not per file — measured (2026-08-26,
-        // `sample`/dedicated timers on `Audit/sca`, 34k lines):
-        // `resolve_summaries` (function summary resolution over the WHOLE
-        // call graph, once per rule) largely dominates the cost of this
-        // phase — up to 6-7s per taint rule, ~25 rules, against only 8s
-        // total for `run_taint_rule` over the 73 cumulative files.
-        // Parallelizing per file (first version) therefore barely touched
-        // the real bottleneck. Each rule is independent (its own
-        // specs/summaries/results); the final merge
-        // (deduplication/suppression/`integrate_taint_finding`) remains
-        // strictly sequential, in the original order of rules THEN files,
-        // for a result identical to the purely sequential version.
-        let python_rule_jsons: Vec<&serde_json::Value> = rule_jsons
-            .iter()
-            .filter(|r| {
-                r.get("language").and_then(|v| v.as_str())
-                    == Some(SourceLanguage::Python.rule_tag())
-            })
-            .collect();
-        let per_rule_results = cached_taint_pass(
-            "python",
-            &python_files,
-            &python_rule_jsons,
-            config,
-            &|file| call_graph.dependency_fingerprint(file),
-            &|specs, reuse| {
-                call_graph.resolve_summaries_incremental(specs, Some(&py_source_lines_by_file), reuse)
-            },
-            &|file, changed| call_graph.consumes_changed(file, changed),
-            &|pf, node_specs, resolved| {
-                // File's own summaries take priority over resolved
-                // imports (mirrors `merged.update(summaries)` on the
-                // `dataflow_taint.py` side: local > import).
-                let mut summaries = resolved.extra.get(&pf.rel_path).cloned().unwrap_or_default();
-                if let Some(own_here) = resolved.own.get(&pf.rel_path) {
-                    summaries.extend(own_here.clone());
-                }
-                node_specs.summaries = summaries;
-                run_taint_rule(
-                    &pf.tree,
-                    &pf.source_bytes,
-                    node_specs,
-                    Some(&pf.source_lines_plain),
-                )
-            },
-            &mut cache_stats,
-        );
-
-        for (rule_json, maybe_per_file) in python_rule_jsons.iter().zip(per_rule_results) {
-            let Some(per_file) = maybe_per_file else {
-                continue;
-            };
-            for (pf, findings) in python_files.iter().zip(per_file) {
-                for f in findings {
-                    let key = (
-                        pf.rel_path.clone(),
-                        f.rule_id.clone(),
-                        f.line,
-                        f.source_line,
-                    );
-                    if !seen_taint.insert(key) {
-                        continue;
-                    }
-                    let code = line_text(&pf.all_lines, f.line);
-                    // Trimmed, as the report hashes it for its 🚫 button
-                    // (`ReportFinding.code`): an indented line never matched.
-                    if suppressions.is_suppressed(&f.rule_id, &pf.rel_path, code.trim()) {
-                        continue;
-                    }
-                    if is_inline_ignored(&code, &f.rule_id) {
-                        continue;
-                    }
-                    integrate_taint_finding(
-                        &mut all_findings,
-                        taint_finding_to_report(
-                            &f,
-                            rule_json,
-                            &pf.rel_path,
-                            &pf.source_lines_plain,
-                            &config.lang,
-                        ),
-                    );
-                }
-            }
+    // Phase C — the taint passes, one per language, in this order (the
+    // order of the findings in the report). What each language does is in
+    // its own file of `taint/`; selecting the files and rules, the cache
+    // and the merge into the report are shared (`taint::run_taint_pass`).
+    // `'f`: a pass borrows the parsed files (its call graph holds their
+    // trees) for as long as it lives.
+    type TaintPass<'f> = fn(
+        &'f [ParsedFile],
+        &[serde_json::Value],
+        &mut PassContext<'_>,
+        &mut taint::SeenTaint,
+    ) -> (String, std::time::Duration);
+    let taint_passes: [(bool, TaintPass<'_>); 5] = [
+        (taint_python_active, taint::run_taint_pass::<taint::PythonTaint>),
+        (taint_java_active, taint::run_taint_pass::<taint::JavaTaint>),
+        (taint_js_active, taint::run_taint_pass::<taint::JsTaint>),
+        (taint_php_active, taint::run_taint_pass::<taint::PhpTaint>),
+        (taint_csharp_active, taint::run_taint_pass::<taint::CSharpTaint>),
+    ];
+    let mut seen_taint = taint::SeenTaint::new();
+    for (active, pass) in taint_passes {
+        if active {
+            let (label, elapsed) = pass(&parsed_files, &rule_jsons, &mut passes, &mut seen_taint);
+            record_phase(&label, elapsed);
         }
-        record_phase(
-            &phase_label(config, "scan_phase_c_python", "phase C - Python (taint)"),
-            t_phase_c_python.elapsed(),
-        );
-    }
-
-    if taint_java_active {
-        // --- Java -------------------------------------------------------------
-        let t_phase_c_java = std::time::Instant::now();
-        let java_files: Vec<&ParsedFile> = parsed_files
-            .iter()
-            .filter(|pf| pf.language == SourceLanguage::Java)
-            .collect();
-        let java_file_inputs: Vec<FileInput> = java_files
-            .iter()
-            .map(|pf| FileInput {
-                filepath: pf.rel_path.clone(),
-                root: pf.tree.root_node(),
-                source: pf.source_bytes.as_slice(),
-            })
-            .collect();
-        let java_call_graph = JavaCallGraph::build(&java_file_inputs);
-        let java_source_lines_by_file: BTreeMap<String, Vec<String>> = java_files
-            .iter()
-            .map(|pf| (pf.rel_path.clone(), pf.source_lines_plain.clone()))
-            .collect();
-        // Round 5 (`scr.method()` resolution via declared type) —
-        // recomputed per file, independently of the call graph (same
-        // logical dict as `JavaCallGraph::build`, MUST stay in sync — see
-        // the doc comment of `collect_java_field_types`, same choice as
-        // `dataflow_taint_java.py` on the Python source side).
-        let java_type_map_by_file: BTreeMap<String, BTreeMap<String, String>> = java_files
-            .iter()
-            .map(|pf| {
-                let mut type_map = collect_java_field_types(pf.tree.root_node(), &pf.source_bytes);
-                type_map.extend(collect_java_local_types(
-                    pf.tree.root_node(),
-                    &pf.source_bytes,
-                ));
-                (pf.rel_path.clone(), type_map)
-            })
-            .collect();
-
-        // Parallelized **per rule**, not per file — same fix as the Python
-        // block above (found while diagnosing Python, never reapplied to
-        // Java until now: reported by the maintainer, 2026-08-26, while comparing a
-        // Java scan to Python — `resolve_summaries` (function summary
-        // resolution over the whole call graph, once per rule) dominates
-        // the cost, not per-file `run_taint_rule_java`).
-        let java_rule_jsons: Vec<&serde_json::Value> = rule_jsons
-            .iter()
-            .filter(|r| {
-                r.get("language").and_then(|v| v.as_str()) == Some(SourceLanguage::Java.rule_tag())
-            })
-            .collect();
-        let java_per_rule_results = cached_taint_pass(
-            "java",
-            &java_files,
-            &java_rule_jsons,
-            config,
-            &|file| java_call_graph.dependency_fingerprint(file),
-            &|specs, reuse| {
-                java_call_graph.resolve_summaries_incremental(specs, Some(&java_source_lines_by_file), reuse)
-            },
-            &|file, changed| java_call_graph.consumes_changed(file, changed),
-            &|pf, node_specs, resolved| {
-                let mut summaries = resolved.extra.get(&pf.rel_path).cloned().unwrap_or_default();
-                if let Some(own_here) = resolved.own.get(&pf.rel_path) {
-                    summaries.extend(own_here.clone());
-                }
-                node_specs.summaries = summaries;
-                node_specs.type_map = java_type_map_by_file
-                    .get(&pf.rel_path)
-                    .cloned()
-                    .unwrap_or_default();
-                run_taint_rule_java(
-                    pf.tree.root_node(),
-                    &pf.source_bytes,
-                    node_specs,
-                    Some(&pf.source_lines_plain),
-                )
-            },
-            &mut cache_stats,
-        );
-
-        for (rule_json, maybe_per_file) in java_rule_jsons.iter().zip(java_per_rule_results) {
-            let Some(per_file) = maybe_per_file else {
-                continue;
-            };
-            for (pf, findings) in java_files.iter().zip(per_file) {
-                for f in findings {
-                    let key = (
-                        pf.rel_path.clone(),
-                        f.rule_id.clone(),
-                        f.line,
-                        f.source_line,
-                    );
-                    if !seen_taint.insert(key) {
-                        continue;
-                    }
-                    let code = line_text(&pf.all_lines, f.line);
-                    // Trimmed, as the report hashes it for its 🚫 button
-                    // (`ReportFinding.code`): an indented line never matched.
-                    if suppressions.is_suppressed(&f.rule_id, &pf.rel_path, code.trim()) {
-                        continue;
-                    }
-                    if is_inline_ignored(&code, &f.rule_id) {
-                        continue;
-                    }
-                    integrate_taint_finding(
-                        &mut all_findings,
-                        taint_finding_to_report(
-                            &f,
-                            rule_json,
-                            &pf.rel_path,
-                            &pf.source_lines_plain,
-                            &config.lang,
-                        ),
-                    );
-                }
-            }
-        }
-        record_phase(
-            &phase_label(config, "scan_phase_c_java", "phase C - Java (taint)"),
-            t_phase_c_java.elapsed(),
-        );
-    }
-
-    // --- JavaScript / TypeScript ---------------------------------------------
-    // Interprocedural resolution wired up on 08/30 (`js_call_graph.rs`)
-    // — same pattern as Python/Java above (graph built once, summaries
-    // resolved per rule, `own`/`extra` merged per file, own taking
-    // priority). **New development, not a port**: the reference Python
-    // engine has no JS call graph at all (intra-file lexical fallback
-    // only, see the doc comment of `js_call_graph.rs`) — designed by analogy with
-    // Python/Java, with import resolution specific to JS/TS (relative
-    // path, not suffix or FQCN). Both languages share this same block
-    // — `run_taint_rule_js` works indifferently on a JS or TS tree
-    // (see the doc comment of `js_lowering.rs`).
-    if taint_js_active {
-        let t_phase_c_js = std::time::Instant::now();
-        let js_files: Vec<&ParsedFile> = parsed_files
-            .iter()
-            .filter(|pf| {
-                matches!(
-                    pf.language,
-                    SourceLanguage::JavaScript | SourceLanguage::TypeScript
-                )
-            })
-            .collect();
-        let js_file_inputs: Vec<FileInput> = js_files
-            .iter()
-            .map(|pf| FileInput {
-                filepath: pf.rel_path.clone(),
-                root: pf.tree.root_node(),
-                source: pf.source_bytes.as_slice(),
-            })
-            .collect();
-        let js_call_graph = JsCallGraph::build(&js_file_inputs);
-        let js_source_lines_by_file: BTreeMap<String, Vec<String>> = js_files
-            .iter()
-            .map(|pf| (pf.rel_path.clone(), pf.source_lines_plain.clone()))
-            .collect();
-
-        // Parallelized per rule, not per file — see the equivalent comment
-        // in the Python block above (`resolve_summaries` dominates the cost).
-        let js_rule_jsons: Vec<&serde_json::Value> = rule_jsons
-            .iter()
-            .filter(|r| {
-                r.get("language").and_then(|v| v.as_str())
-                    == Some(SourceLanguage::JavaScript.rule_tag())
-            })
-            .collect();
-        let js_per_rule_results = cached_taint_pass(
-            "javascript",
-            &js_files,
-            &js_rule_jsons,
-            config,
-            &|file| js_call_graph.dependency_fingerprint(file),
-            &|specs, reuse| js_call_graph.resolve_summaries_incremental(specs, Some(&js_source_lines_by_file), reuse),
-            &|file, changed| js_call_graph.consumes_changed(file, changed),
-            &|pf, node_specs, resolved| {
-                let mut summaries = resolved.extra.get(&pf.rel_path).cloned().unwrap_or_default();
-                if let Some(own_here) = resolved.own.get(&pf.rel_path) {
-                    summaries.extend(own_here.clone());
-                }
-                node_specs.summaries = summaries;
-                run_taint_rule_js(
-                    pf.tree.root_node(),
-                    &pf.source_bytes,
-                    node_specs,
-                    Some(&pf.source_lines_plain),
-                )
-            },
-            &mut cache_stats,
-        );
-
-        for (rule_json, maybe_per_file) in js_rule_jsons.iter().zip(js_per_rule_results) {
-            let Some(per_file) = maybe_per_file else {
-                continue;
-            };
-            for (pf, findings) in js_files.iter().zip(per_file) {
-                for f in findings {
-                    let key = (
-                        pf.rel_path.clone(),
-                        f.rule_id.clone(),
-                        f.line,
-                        f.source_line,
-                    );
-                    if !seen_taint.insert(key) {
-                        continue;
-                    }
-                    let code = line_text(&pf.all_lines, f.line);
-                    // Trimmed, as the report hashes it for its 🚫 button
-                    // (`ReportFinding.code`): an indented line never matched.
-                    if suppressions.is_suppressed(&f.rule_id, &pf.rel_path, code.trim()) {
-                        continue;
-                    }
-                    if is_inline_ignored(&code, &f.rule_id) {
-                        continue;
-                    }
-                    integrate_taint_finding(
-                        &mut all_findings,
-                        taint_finding_to_report(
-                            &f,
-                            rule_json,
-                            &pf.rel_path,
-                            &pf.source_lines_plain,
-                            &config.lang,
-                        ),
-                    );
-                }
-            }
-        }
-        record_phase(
-            &phase_label(config, "scan_phase_c_js", "phase C - JS/TS (taint)"),
-            t_phase_c_js.elapsed(),
-        );
-    }
-
-    // --- PHP --------------------------------------------------------------
-    // Interprocedural resolution wired up on 08/30 (`php_call_graph.rs`)
-    // — same pattern as Python/Java/JS above. **New development, not a
-    // port** (same situation as JS, see the doc comment of
-    // `php_call_graph.rs`): two mechanisms specific to PHP (star merge
-    // of `require`/`include`, global class-name index for static-scope
-    // calls — no scope/namespace notion tracked). Separate rule
-    // catalog (`rule_tag() == "php"`, not shared with JS).
-    if taint_php_active {
-        let t_phase_c_php = std::time::Instant::now();
-        let php_files: Vec<&ParsedFile> = parsed_files
-            .iter()
-            .filter(|pf| pf.language == SourceLanguage::Php)
-            .collect();
-        let php_file_inputs: Vec<FileInput> = php_files
-            .iter()
-            .map(|pf| FileInput {
-                filepath: pf.rel_path.clone(),
-                root: pf.tree.root_node(),
-                source: pf.source_bytes.as_slice(),
-            })
-            .collect();
-        let php_call_graph = PhpCallGraph::build(&php_file_inputs);
-        let php_source_lines_by_file: BTreeMap<String, Vec<String>> = php_files
-            .iter()
-            .map(|pf| (pf.rel_path.clone(), pf.source_lines_plain.clone()))
-            .collect();
-
-        // Parallelized per rule, not per file — see the equivalent comment
-        // in the Python block above (`resolve_summaries` dominates the cost).
-        let php_rule_jsons: Vec<&serde_json::Value> = rule_jsons
-            .iter()
-            .filter(|r| {
-                r.get("language").and_then(|v| v.as_str()) == Some(SourceLanguage::Php.rule_tag())
-            })
-            .collect();
-        let php_per_rule_results = cached_taint_pass(
-            "php",
-            &php_files,
-            &php_rule_jsons,
-            config,
-            &|file| php_call_graph.dependency_fingerprint(file),
-            &|specs, reuse| php_call_graph.resolve_summaries_incremental(specs, Some(&php_source_lines_by_file), reuse),
-            &|file, changed| php_call_graph.consumes_changed(file, changed),
-            &|pf, node_specs, resolved| {
-                let mut summaries = resolved.extra.get(&pf.rel_path).cloned().unwrap_or_default();
-                if let Some(own_here) = resolved.own.get(&pf.rel_path) {
-                    summaries.extend(own_here.clone());
-                }
-                node_specs.summaries = summaries;
-                run_taint_rule_php(
-                    pf.tree.root_node(),
-                    &pf.source_bytes,
-                    node_specs,
-                    Some(&pf.source_lines_plain),
-                )
-            },
-            &mut cache_stats,
-        );
-
-        for (rule_json, maybe_per_file) in php_rule_jsons.iter().zip(php_per_rule_results) {
-            let Some(per_file) = maybe_per_file else {
-                continue;
-            };
-            for (pf, findings) in php_files.iter().zip(per_file) {
-                for f in findings {
-                    let key = (
-                        pf.rel_path.clone(),
-                        f.rule_id.clone(),
-                        f.line,
-                        f.source_line,
-                    );
-                    if !seen_taint.insert(key) {
-                        continue;
-                    }
-                    let code = line_text(&pf.all_lines, f.line);
-                    // Trimmed, as the report hashes it for its 🚫 button
-                    // (`ReportFinding.code`): an indented line never matched.
-                    if suppressions.is_suppressed(&f.rule_id, &pf.rel_path, code.trim()) {
-                        continue;
-                    }
-                    if is_inline_ignored(&code, &f.rule_id) {
-                        continue;
-                    }
-                    integrate_taint_finding(
-                        &mut all_findings,
-                        taint_finding_to_report(
-                            &f,
-                            rule_json,
-                            &pf.rel_path,
-                            &pf.source_lines_plain,
-                            &config.lang,
-                        ),
-                    );
-                }
-            }
-        }
-        record_phase(
-            &phase_label(config, "scan_phase_c_php", "phase C - PHP (taint)"),
-            t_phase_c_php.elapsed(),
-        );
-    }
-
-    // --- C# (taint) ---------------------------------------------------------
-    // Ticket #79/spec #77. **Intra-file only** — no C# call graph (see
-    // the doc comment of `SourceLanguage::CSharp`): unlike the
-    // Python/Java/JS/PHP blocks above, `compute_csharp_file_summaries`
-    // is recomputed per (rule, file) directly on that single file — no
-    // cross-file `own`/`extra` merge (there is no `extra` here).
-    if taint_csharp_active {
-        let t_phase_c_csharp = std::time::Instant::now();
-        let csharp_files: Vec<&ParsedFile> = parsed_files
-            .iter()
-            .filter(|pf| pf.language == SourceLanguage::CSharp)
-            .collect();
-        let csharp_type_map_by_file: BTreeMap<String, BTreeMap<String, String>> = csharp_files
-            .iter()
-            .map(|pf| {
-                let mut type_map =
-                    collect_csharp_field_types(pf.tree.root_node(), &pf.source_bytes);
-                type_map.extend(collect_csharp_local_types(
-                    pf.tree.root_node(),
-                    &pf.source_bytes,
-                ));
-                (pf.rel_path.clone(), type_map)
-            })
-            .collect();
-
-        let csharp_rule_jsons: Vec<&serde_json::Value> = rule_jsons
-            .iter()
-            .filter(|r| {
-                r.get("language").and_then(|v| v.as_str())
-                    == Some(SourceLanguage::CSharp.rule_tag())
-            })
-            .collect();
-        // C# summaries are computed per file (no call graph across files):
-        // a file only depends on itself, so its fingerprint is empty and no
-        // summary is shared between files.
-        let csharp_per_rule_results = cached_taint_pass(
-            "csharp",
-            &csharp_files,
-            &csharp_rule_jsons,
-            config,
-            &|_| String::new(),
-            &|_, _| crate::scan::dataflow::call_graph::ResolvedSummaries::default(),
-            &|_, _| false,
-            &|pf, node_specs, _| {
-                // Back to the rule's own specs (no summaries, no types)
-                // before computing this file's summaries, as a fresh
-                // `base_specs` would be.
-                node_specs.summaries = Default::default();
-                node_specs.type_map = Default::default();
-                let summaries = compute_csharp_file_summaries(
-                    pf.tree.root_node(),
-                    node_specs,
-                    &pf.source_bytes,
-                    Some(&pf.source_lines_plain),
-                );
-                node_specs.summaries = summaries;
-                node_specs.type_map = csharp_type_map_by_file
-                    .get(&pf.rel_path)
-                    .cloned()
-                    .unwrap_or_default();
-                run_taint_rule_csharp(
-                    pf.tree.root_node(),
-                    &pf.source_bytes,
-                    node_specs,
-                    Some(&pf.source_lines_plain),
-                )
-            },
-            &mut cache_stats,
-        );
-
-        for (rule_json, maybe_per_file) in csharp_rule_jsons.iter().zip(csharp_per_rule_results) {
-            let Some(per_file) = maybe_per_file else {
-                continue;
-            };
-            for (pf, findings) in csharp_files.iter().zip(per_file) {
-                for f in findings {
-                    let key = (
-                        pf.rel_path.clone(),
-                        f.rule_id.clone(),
-                        f.line,
-                        f.source_line,
-                    );
-                    if !seen_taint.insert(key) {
-                        continue;
-                    }
-                    let code = line_text(&pf.all_lines, f.line);
-                    // Trimmed, as the report hashes it for its 🚫 button
-                    // (`ReportFinding.code`): an indented line never matched.
-                    if suppressions.is_suppressed(&f.rule_id, &pf.rel_path, code.trim()) {
-                        continue;
-                    }
-                    if is_inline_ignored(&code, &f.rule_id) {
-                        continue;
-                    }
-                    integrate_taint_finding(
-                        &mut all_findings,
-                        taint_finding_to_report(
-                            &f,
-                            rule_json,
-                            &pf.rel_path,
-                            &pf.source_lines_plain,
-                            &config.lang,
-                        ),
-                    );
-                }
-            }
-        }
-        record_phase(
-            &phase_label(config, "scan_phase_c_csharp", "phase C - C# (taint)"),
-            t_phase_c_csharp.elapsed(),
-        );
     }
 
     let _ = rule_category; // kept for future use (CLI category filtering)
 
-    let rule_catalog: BTreeMap<String, serde_json::Value> = rule_jsons
+    let rule_catalog: crate::rules::identity::RuleCatalog = rule_jsons
         .iter()
-        .filter_map(|r| {
-            r.get("id")
-                .and_then(|v| v.as_str())
-                .map(|id| (id.to_string(), r.clone()))
-        })
+        .filter_map(|r| Some((crate::rules::identity::RuleId::of(r)?, r.clone())))
         .collect();
 
     // --- Dependencies (opt-in, static detection only) --------------
@@ -2319,22 +1605,21 @@ pub fn run_scan(config: &ScanConfig) -> ScanReport {
     // phases below to be disabled, even if otherwise requested
     // (mirrors `runner.py::_compute_phase_total`/`run`).
     let mut dependency_stats = None;
-    let mut advisory_database = None;
+    let mut version_rules = None;
     if deps_phase_active {
         let t_deps = std::time::Instant::now();
-        // Root + every `paths.include` entry, like Python — see
-        // `dependencies::collect_dependencies` (fix 2026-11-04).
-        let all_deps =
-            crate::project::dependencies::collect_dependencies(&config.root, &config.include_paths);
+        let all_deps = declared_dependencies.take().unwrap_or_default();
         let unpinned: Vec<_> = all_deps.iter().filter(|d| d.version.is_none()).collect();
-        for dep in &unpinned {
-            all_findings.push(ReportFinding {
+        let unpinned_findings: Vec<ReportFinding> = unpinned
+            .iter()
+            .map(|dep| ReportFinding {
                 rule_key: "unpinned_dependency".to_string(),
+                rule_language: String::new(), // no catalog rule: a manifest check.
                 rule_name: "Unpinned dependency".to_string(),
                 category: "DEPENDENCIES".to_string(),
                 severity: "HIGH".to_string(),
                 risk: String::new(),
-                file: dep.file.to_string_lossy().to_string(),
+                file: project_relative_path(&config.root, &dep.file),
                 line: dep.line,
                 solution: None,
                 cwe: vec![],
@@ -2348,55 +1633,34 @@ pub fn run_scan(config: &ScanConfig) -> ScanReport {
                 benefit: String::new(),
                 committer: None,
                 rule_source: "json_builtin".to_string(),
-            });
-        }
-        let (vulnerable, status) = match config.advisories_file.as_deref() {
-            None => (Vec::new(), AdvisoryDatabaseStatus::Missing { path: None }),
-            Some(path) => match crate::project::advisory_file::read(path) {
-                Ok(Some(file)) => {
-                    let status = AdvisoryDatabaseStatus::Read {
-                        path: path.to_path_buf(),
-                        created: file.header.created.clone(),
-                        counts: file
-                            .header
-                            .ecosystems
-                            .iter()
-                            .map(|e| (e.name.clone(), e.advisories))
-                            .collect(),
-                    };
-                    (vulnerable_dependency_findings(&file, &all_deps), status)
-                }
-                Ok(None) => (
-                    Vec::new(),
-                    AdvisoryDatabaseStatus::Missing {
-                        path: Some(path.to_path_buf()),
-                    },
-                ),
-                Err(error) => (
-                    Vec::new(),
-                    AdvisoryDatabaseStatus::Unreadable {
-                        path: path.to_path_buf(),
-                        error,
-                    },
-                ),
-            },
-        };
-        advisory_database = Some(status);
-        let vulnerable_count = vulnerable.len();
-        all_findings.extend(vulnerable);
-        // Dependency findings name their file relative to the scanned root,
-        // like every other finding, and obey the report's 🚫 suppressions:
-        // they carried the absolute path of the tester's machine and could
-        // not be hidden (2026-11-14).
-        for f in all_findings.iter_mut().filter(|f| f.category == "DEPENDENCIES") {
-            if let Ok(rel) = Path::new(&f.file).strip_prefix(&config.root) {
-                f.file = rel.to_string_lossy().replace('\\', "/");
+            })
+            .collect();
+        let (vulnerable, status) = match read_version_rules(&config.rules_path) {
+            Ok(Some(file)) => {
+                let status = VersionRulesStatus::Read {
+                    pack: config.rules_path.clone(),
+                    created: file.header.created.clone(),
+                    counts: file
+                        .header
+                        .ecosystems
+                        .iter()
+                        .map(|e| (e.name.clone(), e.advisories))
+                        .collect(),
+                };
+                (vulnerable_dependency_findings(&file, &all_deps, &config.root), status)
             }
-        }
-        all_findings.retain(|f| {
-            f.category != "DEPENDENCIES"
-                || !suppressions.is_suppressed(&f.rule_key, &f.file, &f.code)
-        });
+            Ok(None) => (Vec::new(), VersionRulesStatus::Missing),
+            Err(error) => (Vec::new(), VersionRulesStatus::Unreadable { error }),
+        };
+        version_rules = Some(status);
+        let vulnerable_count = vulnerable.len();
+        // The report's 🚫 suppressions apply to dependency findings as to
+        // every other finding (they never did before 2026-11-14). The
+        // counts below stay those of what was detected.
+        let not_suppressed =
+            |f: &ReportFinding| !suppressions.is_suppressed(&f.rule_key, &f.file, &f.code);
+        all_findings.extend(unpinned_findings.into_iter().filter(not_suppressed));
+        all_findings.extend(vulnerable.into_iter().filter(not_suppressed));
         dependency_stats = Some(DependencyStats {
             total_scanned: all_deps.len(),
             unpinned: unpinned.len(),
@@ -2539,6 +1803,7 @@ pub fn run_scan(config: &ScanConfig) -> ScanReport {
         files_scanned: parsed_files.len(),
         total_loc,
         rule_errors,
+        rule_conflicts,
         rule_languages,
         undeclared_languages,
         rule_sources,
@@ -2547,7 +1812,7 @@ pub fn run_scan(config: &ScanConfig) -> ScanReport {
         rule_catalog,
         test_results,
         dependency_stats,
-        advisory_database,
+        version_rules,
         database_schema,
         database_stats,
         comparison,
@@ -2698,9 +1963,16 @@ mod tests {
         assert_eq!(history_disabled, None);
     }
 
+    /// Whether a rule named `name` is in the report's catalog, in any
+    /// language.
+    fn has_rule(report: &ScanReport, name: &str) -> bool {
+        report.rule_catalog.keys().any(|id| id.name == name)
+    }
+
     fn finding(rule_key: &str, category: &str, file: &str, line: usize) -> ReportFinding {
         ReportFinding {
             rule_key: rule_key.to_string(),
+            rule_language: "python".to_string(),
             rule_name: rule_key.to_string(),
             category: category.to_string(),
             severity: "HIGH".to_string(),
@@ -3313,6 +2585,47 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    /// `rules.disabled`: a name disables the rule in every language,
+    /// `language/name` in that language only.
+    #[test]
+    fn test_disabled_rule_by_name_or_by_identity() {
+        let root = temp_dir();
+        let rules_dir = root.join("rules");
+        std::fs::create_dir_all(&rules_dir).unwrap();
+        for language in ["python", "javascript"] {
+            write(
+                &rules_dir,
+                &format!("{language}/security/eval_usage.sca"),
+                &format!(
+                    "rule eval_usage\n  language  {language}\n  category  security\n  severity  HIGH\n  match\n    pattern  eval\\s*\\(\n    scope    line\n  end\nend\n"
+                ),
+            );
+        }
+        write(&root, "app.py", "x = eval(y)\n");
+        write(&root, "app.js", "const x = eval(y);\n");
+        let files_with_eval = |disabled: &str| {
+            let report = run_scan(&ScanConfig {
+                root: root.clone(),
+                rules_path: rules_dir.clone(),
+                exclude_patterns: vec!["rules/".to_string()],
+                disabled_rules: vec![disabled.to_string()],
+                ..ScanConfig::default()
+            });
+            let mut files: Vec<String> = report
+                .findings
+                .iter()
+                .filter(|f| f.rule_key == "eval_usage")
+                .map(|f| f.file.clone())
+                .collect();
+            files.sort();
+            files
+        };
+        assert_eq!(files_with_eval("other_rule"), ["app.js", "app.py"]);
+        assert_eq!(files_with_eval("javascript/eval_usage"), ["app.py"]);
+        assert_eq!(files_with_eval("eval_usage"), Vec::<String>::new());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     // === Additive custom rules (ticket #84/spec #82): loaded on top of
     // the real catalog. Their exclusion with `--rules <DIR>` is decided by
     // the CLI (`main.rs::resolve_custom_rules_dir`). ===
@@ -3411,7 +2724,7 @@ mod tests {
             ),
         ];
         let pack = root.join(pack_format::PACK_FILE_NAME);
-        std::fs::write(&pack, pack_format::write_pack("builtin", &catalog)).unwrap();
+        std::fs::write(&pack, pack_format::write_pack("builtin", &catalog, None)).unwrap();
         let custom = root.join("custom");
         write(&custom, "python/mine.sca", &rule("mine", "python"));
         write(&root, "src/app.py", "MARKER = PACKED\n");
@@ -3424,9 +2737,9 @@ mod tests {
         });
         std::fs::remove_dir_all(&root).ok();
 
-        let mut ids: Vec<String> = report.rule_catalog.keys().cloned().collect();
+        let mut ids: Vec<String> = report.rule_catalog.keys().map(|id| id.to_string()).collect();
         ids.sort();
-        assert_eq!(ids, ["mine", "py_packed"]);
+        assert_eq!(ids, ["python/mine", "python/py_packed"]);
         assert!(report.rule_errors.is_empty(), "{:?}", report.rule_errors);
         let sources = &report.rule_sources;
         assert_eq!(sources.len(), 2);
@@ -3484,8 +2797,8 @@ mod tests {
         let report = run_scan(&config);
         assert_eq!(report.rule_languages, vec!["python".to_string()]);
         assert!(report.undeclared_languages.is_empty());
-        assert!(report.rule_catalog.contains_key("py_marker"));
-        assert!(!report.rule_catalog.contains_key("java_marker"));
+        assert!(has_rule(&report, "py_marker"));
+        assert!(!has_rule(&report, "java_marker"));
         assert!(report.findings.iter().any(|f| f.rule_key == "py_marker"));
         std::fs::remove_dir_all(&root).ok();
     }
@@ -3515,9 +2828,9 @@ mod tests {
         let report = run_scan(&config);
         assert_eq!(report.rule_languages, vec!["python".to_string()]);
         assert_eq!(report.undeclared_languages, vec!["java".to_string()]);
-        assert!(report.rule_catalog.contains_key("py_marker"));
-        assert!(!report.rule_catalog.contains_key("java_marker"));
-        assert!(!report.rule_catalog.contains_key("java_flat"));
+        assert!(has_rule(&report, "py_marker"));
+        assert!(!has_rule(&report, "java_marker"));
+        assert!(!has_rule(&report, "java_flat"));
         assert!(report.findings.iter().all(|f| f.file != "src/App.java"));
         std::fs::remove_dir_all(&root).ok();
     }
@@ -3540,8 +2853,8 @@ mod tests {
             ..ScanConfig::default()
         };
         let report = run_scan(&config);
-        assert!(report.rule_catalog.contains_key("py_marker"));
-        assert!(!report.rule_catalog.contains_key("java_marker"));
+        assert!(has_rule(&report, "py_marker"));
+        assert!(!has_rule(&report, "java_marker"));
         let custom = report
             .findings
             .iter()

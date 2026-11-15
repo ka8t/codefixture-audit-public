@@ -20,6 +20,7 @@
 
 use std::path::{Path, PathBuf};
 
+use super::identity::RuleId;
 use super::pack_format::{self, PACK_FILE_NAME};
 
 pub use super::pack_format::RuleSource;
@@ -301,58 +302,181 @@ pub fn compile_catalog(files: &[RuleSource]) -> (Vec<serde_json::Value>, Vec<(Pa
     (rules, errors)
 }
 
-/// Compiles the rule files of a loaded source: each compiled rule gets
-/// its `"origin"` field, and a rule whose `language` is not in
-/// `languages` is dropped (a rule without `language` is kept). One error
-/// per invalid file, which never stops the others.
-pub fn compile_loaded_rules(
-    loaded: &LoadedRules,
-    languages: &[String],
-) -> (Vec<serde_json::Value>, Vec<(PathBuf, String)>) {
-    let targeted = |rule: &serde_json::Value| match rule.get("language").and_then(|v| v.as_str()) {
-        Some(language) => languages.iter().any(|l| l == language),
-        None => true,
-    };
-    let mut rules = Vec::new();
-    let mut errors = Vec::new();
-    for file in &loaded.files {
-        match crate::scan::parser::compile_sca_to_json(&file.content, &file.source_name) {
-            Ok(compiled) => {
-                for mut rule in compiled.into_iter().filter(targeted) {
-                    if let Some(obj) = rule.as_object_mut() {
-                        obj.insert("origin".to_string(), file.origin.as_str().into());
+/// The rules of a scan, each once under its identity ([`RuleId`]).
+///
+/// Sources are added in order: the catalog first, then the client's
+/// rules folder. A rule whose identity is already registered is not run
+/// twice:
+/// - a client rule replaces the catalog rule of the same identity, at the
+///   catalog rule's place: that is how a client adjusts a rule (another
+///   severity, a narrower pattern);
+/// - a second rule of the same identity in the same source is dropped,
+///   the first one kept: two files of one source defining one rule is a
+///   mistake of that source.
+///
+/// Either case is recorded as a [`RuleConflict`], which the scan reports.
+/// Before 2026-11-14 both rules ran: two findings on the same line, and
+/// the report's texts of one rule mixed with the other's.
+#[derive(Default)]
+pub struct RuleRegistry {
+    /// The compiled rules, in the order they will run.
+    rules: Vec<RegisteredRule>,
+    /// Position of each identity in `rules`.
+    index: std::collections::BTreeMap<RuleId, usize>,
+    conflicts: Vec<RuleConflict>,
+    errors: Vec<(PathBuf, String)>,
+}
+
+/// A rule of the registry, with what the conflict messages need.
+struct RegisteredRule {
+    json: serde_json::Value,
+    origin: RuleOrigin,
+    /// The file the rule comes from (`<language>/<category>/<rule>.sca`).
+    source_name: String,
+}
+
+/// Two rules of one identity met while loading: which file was kept,
+/// which one was left out, and why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuleConflict {
+    pub id: RuleId,
+    pub kind: RuleConflictKind,
+    /// The file whose rule runs.
+    pub kept: String,
+    /// The file whose rule does not run.
+    pub dropped: String,
+}
+
+/// Why a rule was left out of the registry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuleConflictKind {
+    /// A client rule replaced the catalog rule of the same identity.
+    ClientReplacesCatalog,
+    /// One source defined the same rule twice; the first one is kept.
+    DuplicateInSource,
+}
+
+impl RuleRegistry {
+    /// Compiles the rule files of a loaded source and registers its rules:
+    /// each compiled rule gets its `"origin"` field, and a rule whose
+    /// `language` is not in `languages` is dropped (a rule without
+    /// `language` is kept). One error per invalid file, which never stops
+    /// the others.
+    pub fn add_source(&mut self, loaded: &LoadedRules, languages: &[String]) {
+        let targeted = |rule: &serde_json::Value| match rule.get("language").and_then(|v| v.as_str())
+        {
+            Some(language) => languages.iter().any(|l| l == language),
+            None => true,
+        };
+        for file in &loaded.files {
+            match crate::scan::parser::compile_sca_to_json(&file.content, &file.source_name) {
+                Ok(compiled) => {
+                    for mut rule in compiled.into_iter().filter(targeted) {
+                        if let Some(obj) = rule.as_object_mut() {
+                            obj.insert("origin".to_string(), file.origin.as_str().into());
+                        }
+                        self.register(RegisteredRule {
+                            json: rule,
+                            origin: file.origin,
+                            source_name: file.source_name.clone(),
+                        });
                     }
-                    rules.push(rule);
                 }
+                Err(e) => self.errors.push((PathBuf::from(&file.source_name), e.to_string())),
             }
-            Err(e) => errors.push((PathBuf::from(&file.source_name), e.to_string())),
         }
     }
-    (rules, errors)
+
+    /// Adds one rule, applying the conflict rules of [`RuleRegistry`].
+    fn register(&mut self, rule: RegisteredRule) {
+        let Some(id) = RuleId::of(&rule.json) else {
+            return; // never produced by the compiler: a rule always has an id.
+        };
+        let Some(&position) = self.index.get(&id) else {
+            self.index.insert(id, self.rules.len());
+            self.rules.push(rule);
+            return;
+        };
+        let registered = &mut self.rules[position];
+        if registered.origin == RuleOrigin::Builtin && rule.origin == RuleOrigin::Client {
+            self.conflicts.push(RuleConflict {
+                id,
+                kind: RuleConflictKind::ClientReplacesCatalog,
+                kept: rule.source_name.clone(),
+                dropped: std::mem::replace(registered, rule).source_name,
+            });
+        } else {
+            self.conflicts.push(RuleConflict {
+                id,
+                kind: RuleConflictKind::DuplicateInSource,
+                kept: registered.source_name.clone(),
+                dropped: rule.source_name,
+            });
+        }
+    }
+
+    /// The registered rules in run order, the conflicts met, and the
+    /// files that failed to compile.
+    pub fn finish(self) -> (Vec<serde_json::Value>, Vec<RuleConflict>, Vec<(PathBuf, String)>) {
+        let rules = self.rules.into_iter().map(|r| r.json).collect();
+        (rules, self.conflicts, self.errors)
+    }
+}
+
+/// The identities defined by more than one rule of `files`, with the two
+/// files of each (first, then the one met again), in catalog order: what
+/// `rules pack` refuses to pack, since a scan would run only one of them.
+/// Files that do not compile are left to the compile check.
+pub fn duplicate_identities(files: &[RuleSource]) -> Vec<(RuleId, String, String)> {
+    let mut first_file: std::collections::BTreeMap<RuleId, &str> =
+        std::collections::BTreeMap::new();
+    let mut duplicates = Vec::new();
+    for (rel_path, content) in files {
+        let Ok(compiled) = crate::scan::parser::compile_sca_to_json(content, rel_path) else {
+            continue;
+        };
+        for rule in &compiled {
+            let Some(id) = RuleId::of(rule) else {
+                continue;
+            };
+            match first_file.get(&id) {
+                Some(first) => duplicates.push((id, first.to_string(), rel_path.clone())),
+                None => {
+                    first_file.insert(id, rel_path);
+                }
+            }
+        }
+    }
+    duplicates
 }
 
 /// Listing metadata of one catalog rule, for `sast-engine list-rules`.
 #[derive(Debug, Clone)]
 pub struct RuleListing {
-    /// Rule identifier (`rule <id>` in the `.sca` file).
+    /// Rule identity, written `language/name` (`RuleId`).
     pub id: String,
     /// Category = the rule's folder (`security`, `arch`, `ux`, `cicd`…),
     /// NOT the `category` field of the rule — same choice as
     /// `Audit/sca/cli.py::_build_rule_metadata` (`parts[1]` of the path
     /// relative to `rules/builtin`).
     pub category_dir: String,
+    /// Compiled `name` block (`{"en": …, "fr": …}`), `Null` if absent.
+    pub name: serde_json::Value,
     /// Compiled `risk` block (`{"en": …, "fr": …}`), `Null` if absent.
     pub risk: serde_json::Value,
 }
 
-/// One entry per distinct rule id of `files`, sorted by id — port of
-/// `_build_rule_metadata`. A rule id defined in several languages (e.g.
-/// `taint_xss` for Python, Java and C#) is listed once, like the Python
-/// dict keyed by id; the first file in catalog order wins (Python keeps
-/// the last one in `rglob` order, which is filesystem-dependent — a
-/// stable choice is preferred here).
+/// One entry per rule identity of `files` (language + name), sorted by
+/// identity — port of `_build_rule_metadata`.
+///
+/// Deliberate deviation from the Python source, which keys its dict by
+/// name: a name defined in several languages (`taint_xss` for Python,
+/// Java and C#) was listed once, with one language's risk text, and the
+/// announced count was lower than the catalog's (2026-11-14). Each
+/// language's rule is listed now. Two files of one identity (never in the
+/// catalog, which a test checks) keep the first in catalog order.
 pub fn rule_listing(files: &[RuleSource]) -> Vec<RuleListing> {
-    let mut by_id: std::collections::BTreeMap<String, RuleListing> =
+    let mut by_id: std::collections::BTreeMap<RuleId, RuleListing> =
         std::collections::BTreeMap::new();
     for (rel_path, content) in files {
         let category_dir = rel_path
@@ -364,12 +488,13 @@ pub fn rule_listing(files: &[RuleSource]) -> Vec<RuleListing> {
             continue;
         };
         for rule in compiled {
-            let Some(id) = rule.get("id").and_then(|v| v.as_str()) else {
+            let Some(id) = RuleId::of(&rule) else {
                 continue;
             };
-            by_id.entry(id.to_string()).or_insert_with(|| RuleListing {
+            by_id.entry(id.clone()).or_insert_with(|| RuleListing {
                 id: id.to_string(),
                 category_dir: category_dir.clone(),
+                name: rule.get("name").cloned().unwrap_or(serde_json::Value::Null),
                 risk: rule.get("risk").cloned().unwrap_or(serde_json::Value::Null),
             });
         }
@@ -403,6 +528,125 @@ mod tests {
 
     fn kept(loaded: &LoadedRules) -> Vec<String> {
         loaded.files.iter().map(|f| f.rel_path.clone()).collect()
+    }
+
+    /// The registry's result for `sources`, added in order.
+    fn registered(
+        sources: &[&LoadedRules],
+        languages: &[String],
+    ) -> (Vec<serde_json::Value>, Vec<RuleConflict>, Vec<(PathBuf, String)>) {
+        let mut registry = RuleRegistry::default();
+        for source in sources {
+            registry.add_source(source, languages);
+        }
+        registry.finish()
+    }
+
+    /// A loaded source made of `files` (`(path, content)`), without disk.
+    fn source(origin: RuleOrigin, files: &[(&str, String)]) -> LoadedRules {
+        LoadedRules {
+            path: PathBuf::new(),
+            kind: RuleSourceKind::Folder,
+            files: files
+                .iter()
+                .map(|(path, content)| LoadedRuleFile {
+                    rel_path: path.to_string(),
+                    source_name: path.to_string(),
+                    content: content.clone(),
+                    origin,
+                })
+                .collect(),
+            files_available: files.len(),
+            errors: Vec::new(),
+        }
+    }
+
+    /// `(identity, severity)` of each registered rule, in run order.
+    fn identities(rules: &[serde_json::Value]) -> Vec<(String, String)> {
+        rules
+            .iter()
+            .map(|r| {
+                (RuleId::of(r).unwrap().to_string(), r["severity"].as_str().unwrap_or("").to_string())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_duplicate_identities_names_both_files_and_ignores_other_languages() {
+        let files = vec![
+            ("python/security/a.sca".to_string(), rule_named("a", "python")),
+            ("java/security/a.sca".to_string(), rule_named("a", "java")),
+            ("python/security/a_again.sca".to_string(), rule_named("a", "python")),
+        ];
+        assert_eq!(
+            duplicate_identities(&files),
+            [(
+                RuleId::new("python", "a"),
+                "python/security/a.sca".to_string(),
+                "python/security/a_again.sca".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn test_registry_keeps_one_name_in_two_languages_as_two_rules() {
+        let catalog = source(
+            RuleOrigin::Builtin,
+            &[("python/security/a.sca", rule_named("a", "python")), ("java/security/a.sca", rule_named("a", "java"))],
+        );
+        let (rules, conflicts, _) = registered(&[&catalog], &langs(&["python", "java"]));
+        assert_eq!(
+            identities(&rules),
+            [("python/a".to_string(), "HIGH".to_string()), ("java/a".to_string(), "HIGH".to_string())]
+        );
+        assert!(conflicts.is_empty(), "{conflicts:?}");
+    }
+
+    #[test]
+    fn test_registry_lets_a_client_rule_replace_the_catalog_rule_in_place() {
+        let catalog = source(
+            RuleOrigin::Builtin,
+            &[("python/security/a.sca", rule_named("a", "python")), ("python/security/b.sca", rule_named("b", "python"))],
+        );
+        let client = source(
+            RuleOrigin::Client,
+            &[("python/security/a.sca", rule_named("a", "python").replace("HIGH", "LOW"))],
+        );
+        let (rules, conflicts, _) = registered(&[&catalog, &client], &langs(&["python"]));
+        // Same place as the catalog rule (run order kept), client's content.
+        assert_eq!(
+            identities(&rules),
+            [("python/a".to_string(), "LOW".to_string()), ("python/b".to_string(), "HIGH".to_string())]
+        );
+        assert_eq!(rules[0]["origin"], "client");
+        assert_eq!(
+            conflicts,
+            [RuleConflict {
+                id: RuleId::new("python", "a"),
+                kind: RuleConflictKind::ClientReplacesCatalog,
+                kept: "python/security/a.sca".to_string(),
+                dropped: "python/security/a.sca".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn test_registry_keeps_the_first_of_two_rules_of_one_source() {
+        let client = source(
+            RuleOrigin::Client,
+            &[
+                ("python/security/first.sca", rule_named("a", "python")),
+                ("python/security/second.sca", rule_named("a", "python").replace("HIGH", "LOW")),
+            ],
+        );
+        let (rules, conflicts, _) = registered(&[&client], &langs(&["python"]));
+        assert_eq!(identities(&rules), [("python/a".to_string(), "HIGH".to_string())]);
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(conflicts[0].kind, RuleConflictKind::DuplicateInSource);
+        assert_eq!(
+            (conflicts[0].kept.as_str(), conflicts[0].dropped.as_str()),
+            ("python/security/first.sca", "python/security/second.sca")
+        );
     }
 
 
@@ -451,7 +695,7 @@ mod tests {
         std::fs::write(dir.join("flat.sca"), rule_named("flat_java", "java")).unwrap();
 
         let loaded = load_rules(&dir, &langs(&["python"]), RuleOrigin::Builtin);
-        let (rules, errors) = compile_loaded_rules(&loaded, &langs(&["python"]));
+        let (rules, _, errors) = registered(&[&loaded], &langs(&["python"]));
         std::fs::remove_dir_all(&dir).ok();
 
         assert_eq!(loaded.kind, RuleSourceKind::Folder);
@@ -476,10 +720,10 @@ mod tests {
             ("java/security/j.sca".to_string(), rule_named("j", "java")),
         ];
         let pack = dir.join(PACK_FILE_NAME);
-        std::fs::write(&pack, pack_format::write_pack("builtin", &files)).unwrap();
+        std::fs::write(&pack, pack_format::write_pack("builtin", &files, None)).unwrap();
 
         let loaded = load_rules(&pack, &langs(&["python"]), RuleOrigin::Builtin);
-        let (rules, errors) = compile_loaded_rules(&loaded, &langs(&["python"]));
+        let (rules, _, errors) = registered(&[&loaded], &langs(&["python"]));
         let all = read_all_rule_sources(&pack).unwrap();
         std::fs::remove_dir_all(&dir).ok();
 
@@ -503,11 +747,11 @@ mod tests {
     fn test_load_rules_pack_errors_are_reported() {
         let dir = temp_dir("pack_errors");
         let files = vec![("python/r.sca".to_string(), RULE.to_string())];
-        let mut corrupt = pack_format::write_pack("builtin", &files);
+        let mut corrupt = pack_format::write_pack("builtin", &files, None);
         let last = corrupt.len() - 1;
         corrupt[last] ^= 0xFF;
         std::fs::write(dir.join("corrupt.scapack"), corrupt).unwrap();
-        let foreign = pack_format::write_pack_with_key("client", &files, &[9u8; 32]);
+        let foreign = pack_format::write_pack_with_key("client", &files, None, &[9u8; 32]);
         std::fs::write(dir.join("client.scapack"), foreign).unwrap();
         let python = langs(&["python"]);
 

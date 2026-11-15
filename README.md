@@ -13,7 +13,7 @@ Read this before you start: these are the cases where the engine may not behave 
 | **Tested on macOS only** | Windows and Linux have not been tested yet. The Windows commands are given but have never been run; please report any problem. |
 | **The first analysis takes two runs** | The first command asks 2 or 3 questions (press Enter to keep the defaults), writes `audit.config.json` in your project, then stops and asks you to run the same command again. The second run produces the report. |
 | **The demo rules give a thin report** | This repository ships 38 demonstration rules, a small part of the catalog. Without the full rule pack, most findings may come from a few rules (for example JavaScript written in HTML attributes). |
-| **Dependencies are checked only with `advisories.sadb`** | Without that file next to the engine, the dependencies of your project are not compared with published vulnerabilities, and the report does not list them as safe either. |
+| **The demo pack knows few published vulnerabilities** | Your dependencies are compared with the 21 well-known vulnerabilities this repository's pack carries (Log4Shell, Spring4Shell, lodash, lxml…). A dependency not reported may still be affected by another one. The full pack carries every published vulnerability of the five ecosystems. |
 | **First installation takes time** | Installing Rust and the first build take about 10 to 15 minutes. Later builds and analyses are much faster. |
 
 Details and workarounds: [Known limits](INSTALLATION.md#known-limits) in the guide.
@@ -35,7 +35,7 @@ Windows (PowerShell):
 ```
 
 - `--lang` sets the report language: `en`, `fr`, `es` or `de`.
-- If you received `advisories.sadb`, place it next to the engine: your dependencies are then also checked against published vulnerabilities (see [step 6](INSTALLATION.md#step-6-add-the-full-catalog-and-the-vulnerability-database-optional)).
+- When your project declares dependencies (`requirements.txt`, `package.json`, `pom.xml`, `composer.json`, `.csproj`…), their pinned versions are compared with the published vulnerabilities the rule pack carries, offline.
 - The first run on a project asks what to analyse and writes `audit.config.json`; run the same command again for the analysis.
 - The report is written into your project, under `audit-reports/`: the terminal prints its path on the `Report generated` line. Open it in a browser.
 
@@ -81,11 +81,11 @@ git pull
 cargo build --release
 ```
 
-With the full rule catalog, copy `rules.scapack` (and `advisories.sadb`) next to the engine again afterwards: see [step 11](INSTALLATION.md#step-11-update-the-engine).
+With the full rule catalog, copy `rules.scapack` next to the engine again afterwards: see [step 11](INSTALLATION.md#step-11-update-the-engine).
 
 ## Full rule catalog
 
-The sample covers a small part of what the engine detects. The full catalog has more than 700 rules and is available from [CodeFixture](https://codefixture.com), with its updates, as a rule pack that replaces the sample one: see [step 6](INSTALLATION.md#step-6-add-the-full-catalog-and-the-vulnerability-database-optional).
+The sample covers a small part of what the engine detects. The full catalog has more than 700 rules and is available from [CodeFixture](https://codefixture.com), with its updates, as a rule pack that replaces the sample one, with every published vulnerability of the five ecosystems: see [step 6](INSTALLATION.md#step-6-add-the-full-catalog-optional).
 
 ## License
 

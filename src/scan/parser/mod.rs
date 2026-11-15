@@ -20,7 +20,10 @@ use lexer::{DslLexer, DslSyntaxError, Line};
 use model::*;
 use std::collections::HashSet;
 
-const I18N_KEYWORDS: &[&str] = &["message", "risk", "solution", "benefit"];
+/// Translated text blocks of a rule (`en:`/`fr:`/`es:`/`de:` lines).
+/// `name` is the rule's display name: the rule file is its only source
+/// since 2026-11-14 (the report locales held a second, name-keyed copy).
+const I18N_KEYWORDS: &[&str] = &["name", "message", "risk", "solution", "benefit"];
 const PLAINTEXT_KEYWORDS: &[&str] = &["fix_before", "fix_after"];
 
 pub struct DslParser<'a> {
@@ -194,6 +197,7 @@ impl<'a> DslParser<'a> {
                 _ if I18N_KEYWORDS.contains(&kw.as_str()) => {
                     let block = self.parse_i18n_block()?;
                     match kw.as_str() {
+                        "name" => node.name = block,
                         "message" => node.message = block,
                         "risk" => node.risk = block,
                         "solution" => node.solution = block,
@@ -452,11 +456,25 @@ impl<'a> DslParser<'a> {
                     "Texte manquant après le code langue '{lang_code}'"
                 )));
             }
-            let text = tokens[1..]
-                .iter()
-                .map(|t| t.value.as_str())
-                .collect::<Vec<_>>()
-                .join(" ");
+            // The text as written after `<lang>:`, from the full line.
+            // Deliberate deviation from `parser.py::_parse_i18n_block`,
+            // which joins the lexer's tokens: the lexer strips quotes and
+            // merges spaces, so `str_replace(["\r", "\n"], '', $x)` reached
+            // the report as `str_replace(["\r", \n ],  , $x)` (2026-11-14;
+            // 1,948 text lines of the catalog hold quotes), and cuts at a
+            // `#` (`Line::full_content`).
+            // A text written as one quoted string (`en: "N+1 query"`) keeps
+            // the Python reading: the quotes delimit it.
+            let raw = &self.line().full_content;
+            let quoted = tokens.len() == 2 && tokens[1].kind == lexer::TokenType::String;
+            let text = match raw.strip_prefix(tokens[0].value.as_str()) {
+                Some(rest) if !quoted => rest.trim().to_string(),
+                _ => tokens[1..]
+                    .iter()
+                    .map(|t| t.value.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            };
             block.texts.insert(lang_code, text);
             self.advance();
         }
@@ -728,4 +746,60 @@ pub fn compile_sca_to_json(source: &str, filename: &str) -> PResult<Vec<serde_js
         results.push(compiler::compile_to_json(&rule));
     }
     Ok(results)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const RULE_WITH_NAME: &str = "rule base64_eval\n  language  python\n  category  security\n  severity  HIGH\n  match\n    pattern  eval\\s*\\(\n    scope    line\n  end\n  name\n    en: Obfuscated base64 code execution\n    fr: Exécution de code obfusqué en base64\n  end\n  risk\n    en: Hidden code runs.\n  end\nend\n";
+
+    #[test]
+    fn test_the_name_block_compiles_to_one_text_per_language() {
+        let rules = compile_sca_to_json(RULE_WITH_NAME, "python/security/base64_eval.sca").unwrap();
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0]["name"]["en"], "Obfuscated base64 code execution");
+        assert_eq!(rules[0]["name"]["fr"], "Exécution de code obfusqué en base64");
+        assert_eq!(rules[0]["risk"]["en"], "Hidden code runs.");
+    }
+
+    /// A translated text is kept as written: quotes and code included.
+    /// Rebuilt from the lexer's tokens, `str_replace(["\r", "\n"], '', $x)`
+    /// lost its quotes in the report (2026-11-14; same in the Python source).
+    #[test]
+    fn test_a_translated_text_keeps_its_quotes() {
+        let text = r#"Strip newlines with str_replace(["\r", "\n"], '', $input) before logging."#;
+        let rule = RULE_WITH_NAME.replace("en: Hidden code runs.", &format!("en: {text}"));
+        let rules = compile_sca_to_json(&rule, "python/security/base64_eval.sca").unwrap();
+        assert_eq!(rules[0]["risk"]["en"], text);
+    }
+
+    /// A `#` in a translated text is text: « Use #{} instead of ${} » was
+    /// cut to « Use » by the comment rule of the lexer (2026-11-14).
+    #[test]
+    fn test_a_translated_text_keeps_a_hash() {
+        let text = "Use #{} instead of ${} for parameter binding (see ticket #80).";
+        let rule = RULE_WITH_NAME.replace("en: Hidden code runs.", &format!("en: {text}"));
+        let rules = compile_sca_to_json(&rule, "java/security/mybatis.sca").unwrap();
+        assert_eq!(rules[0]["risk"]["en"], text);
+    }
+
+    /// A text written as one quoted string loses its delimiting quotes, as
+    /// in the Python source.
+    #[test]
+    fn test_a_quoted_text_loses_its_delimiting_quotes() {
+        let rule = RULE_WITH_NAME.replace("en: Hidden code runs.", r#"en: "N+1 query: database call inside loop""#);
+        let rules = compile_sca_to_json(&rule, "python/arch/n_plus_one.sca").unwrap();
+        assert_eq!(rules[0]["risk"]["en"], "N+1 query: database call inside loop");
+    }
+
+    #[test]
+    fn test_a_rule_without_name_block_has_no_name_field() {
+        let without = RULE_WITH_NAME.replace(
+            "  name\n    en: Obfuscated base64 code execution\n    fr: Exécution de code obfusqué en base64\n  end\n",
+            "",
+        );
+        let rules = compile_sca_to_json(&without, "python/security/base64_eval.sca").unwrap();
+        assert!(rules[0].get("name").is_none());
+    }
 }

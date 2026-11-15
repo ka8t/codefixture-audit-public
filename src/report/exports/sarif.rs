@@ -32,7 +32,15 @@ use serde::{Deserialize, Serialize};
 /// via a separate catalog.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ReportFinding {
+    /// The rule's name, as users see and write it (suppressions, history).
     pub rule_key: String,
+    /// The rule's language (`language` of the rule): with `rule_key`, the
+    /// rule's identity (`rules::identity::RuleId`), which tells apart the
+    /// rules sharing a name across languages. Empty for the findings of no
+    /// catalog rule (dependencies), and in a history file written before
+    /// 2026-11-14 (`#[serde(default)]`).
+    #[serde(default)]
+    pub rule_language: String,
     pub rule_name: String,
     pub category: String,
     /// CRITICAL | HIGH | MEDIUM | LOW | INFO.
@@ -78,6 +86,14 @@ pub struct ReportFinding {
     /// (the client's own rules, custom rules folder), "advisory_db"
     /// (vulnerable dependency).
     pub rule_source: String,
+}
+
+impl ReportFinding {
+    /// The identity of the rule that produced the finding: the key of its
+    /// texts in the scan's `RuleCatalog`.
+    pub fn rule_id(&self) -> crate::rules::identity::RuleId {
+        crate::rules::identity::RuleId::new(&self.rule_language, &self.rule_key)
+    }
 }
 
 /// Source → sink flow of a taint finding, for `codeFlows` (standard
@@ -329,22 +345,28 @@ pub fn build_sarif_report(
     tool_version: &str,
     information_uri: &str,
 ) -> SarifReport {
-    let mut rules_index: std::collections::BTreeMap<String, usize> =
+    // One SARIF rule per rule identity (language + name), its id written
+    // `language/name` (`RuleId`'s notation): SARIF requires the ids of
+    // `tool.driver.rules` to be unique, and the Python and JavaScript
+    // `base64_eval` are two rules with two descriptions. Indexed by name
+    // until 2026-11-14, which gave a JavaScript result the Python rule.
+    let mut rules_index: std::collections::BTreeMap<crate::rules::identity::RuleId, usize> =
         std::collections::BTreeMap::new();
     let mut rules_list: Vec<SarifRule> = Vec::new();
 
     for f in findings {
-        if rules_index.contains_key(&f.rule_key) {
+        let rule_id = f.rule_id();
+        if rules_index.contains_key(&rule_id) {
             continue;
         }
-        rules_index.insert(f.rule_key.clone(), rules_list.len());
+        rules_index.insert(rule_id.clone(), rules_list.len());
         let mut tags = vec![f.category.to_lowercase()];
         tags.extend(f.cwe.iter().cloned());
         if let Some(owasp) = &f.owasp {
             tags.push(owasp.clone());
         }
         rules_list.push(SarifRule {
-            id: f.rule_key.clone(),
+            id: rule_id.to_string(),
             name: f.rule_name.clone(),
             short_description: SarifText {
                 text: f.rule_name.clone(),
@@ -365,14 +387,15 @@ pub fn build_sarif_report(
     let results: Vec<SarifResult> = findings
         .iter()
         .map(|f| {
-            let rule_index = *rules_index.get(&f.rule_key).unwrap_or(&0);
+            let rule_id = f.rule_id();
+            let rule_index = *rules_index.get(&rule_id).unwrap_or(&0);
             let message_text = if f.risk.is_empty() {
                 f.rule_name.clone()
             } else {
                 f.risk.clone()
             };
             SarifResult {
-                rule_id: f.rule_key.clone(),
+                rule_id: rule_id.to_string(),
                 rule_index,
                 level: severity_to_sarif_level(&f.severity),
                 message: SarifText { text: message_text },
@@ -417,6 +440,7 @@ mod tests {
     fn finding(rule_key: &str, file: &str, line: usize) -> ReportFinding {
         ReportFinding {
             rule_key: rule_key.to_string(),
+            rule_language: "python".to_string(),
             rule_name: "Test Rule".to_string(),
             category: "Injection".to_string(),
             severity: "HIGH".to_string(),
@@ -461,8 +485,23 @@ mod tests {
         let report = build_sarif_report(&[f], "sast-engine", "1.0", "https://codefixture.com");
         assert_eq!(report.runs[0].tool.driver.rules.len(), 1);
         assert_eq!(report.runs[0].results.len(), 1);
-        assert_eq!(report.runs[0].results[0].rule_id, "sql_injection");
+        assert_eq!(report.runs[0].results[0].rule_id, "python/sql_injection");
         assert_eq!(report.runs[0].results[0].rule_index, 0);
+    }
+
+    #[test]
+    fn test_one_name_in_two_languages_gives_two_sarif_rules() {
+        let python = finding("base64_eval", "app.py", 2);
+        let mut javascript = finding("base64_eval", "app.js", 1);
+        javascript.rule_language = "javascript".to_string();
+        javascript.risk = "JavaScript risk".to_string();
+        let report = build_sarif_report(&[python, javascript], "sast-engine", "1.0", "https://codefixture.com");
+        let rules = &report.runs[0].tool.driver.rules;
+        let ids: Vec<&str> = rules.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, ["python/base64_eval", "javascript/base64_eval"]);
+        let js_result = &report.runs[0].results[1];
+        assert_eq!(js_result.rule_id, "javascript/base64_eval");
+        assert_eq!(rules[js_result.rule_index].full_description.text, "JavaScript risk");
     }
 
     #[test]
@@ -602,7 +641,7 @@ mod tests {
         let report = build_sarif_report(&[f], "sast-engine", "1.0", "https://codefixture.com");
         let json = serde_json::to_string(&report)
             .expect("le rapport SARIF doit être sérialisable en JSON");
-        assert!(json.contains("\"ruleId\":\"xss\""));
+        assert!(json.contains("\"ruleId\":\"python/xss\""));
         assert!(json.contains("\"$schema\""));
     }
 

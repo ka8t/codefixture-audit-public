@@ -424,42 +424,35 @@ fn with_default_excludes(project_excludes: Vec<String>) -> Vec<String> {
     merged
 }
 
-/// The line naming the advisory database of a `--with-deps` scan
-/// (ADR-0042), and whether it is a warning: the database read with its
-/// date and advisories per ecosystem, or why the dependencies were not
-/// checked (no file, unusable file).
-fn advisory_database_line(
-    status: &sast_engine::scan::orchestrator::AdvisoryDatabaseStatus,
+/// The line naming the version rules the dependencies were checked
+/// against (ADR-0042, ADR-0043), and whether it is a warning: the pack
+/// read with the date of its data and its advisories per ecosystem, or
+/// why the dependencies were not compared with published vulnerabilities.
+fn version_rules_line(
+    status: &sast_engine::scan::orchestrator::VersionRulesStatus,
     say: impl Fn(&str) -> String,
 ) -> (bool, String) {
-    use sast_engine::scan::orchestrator::AdvisoryDatabaseStatus;
+    use sast_engine::scan::orchestrator::VersionRulesStatus;
     match status {
-        AdvisoryDatabaseStatus::Read {
-            path,
+        VersionRulesStatus::Read {
+            pack,
             created,
             counts,
         } => {
+            let total: usize = counts.iter().map(|(_, n)| n).sum();
             let counts: Vec<String> = counts.iter().map(|(name, n)| format!("{name} {n}")).collect();
             (
                 false,
-                say("scan_advisories_read")
-                    .replace("{path}", &path.display().to_string())
+                say("scan_version_rules_read")
+                    .replace("{total}", &total.to_string())
+                    .replace("{path}", &pack.display().to_string())
                     .replace("{date}", created)
                     .replace("{counts}", &counts.join(", ")),
             )
         }
-        AdvisoryDatabaseStatus::Missing { path } => (
-            true,
-            say("scan_advisories_missing").replace(
-                "{path}",
-                &path
-                    .as_ref()
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_else(|| sast_engine::project::advisory_file::FILE_NAME.to_string()),
-            ),
-        ),
-        AdvisoryDatabaseStatus::Unreadable { error, .. } => {
-            (true, say("scan_advisories_unreadable").replace("{error}", error))
+        VersionRulesStatus::Missing => (true, say("scan_version_rules_missing")),
+        VersionRulesStatus::Unreadable { error } => {
+            (true, say("scan_version_rules_unreadable").replace("{error}", error))
         }
     }
 }
@@ -627,30 +620,31 @@ mod tests {
         }
     }
 
-    /// ADR-0042: the database read is named with its date and counts;
-    /// a missing or unusable one is a warning saying the dependencies
-    /// were not checked.
+    /// ADR-0043: the version rules read are named with their pack, the
+    /// date of their data and their counts; a pack without them, or
+    /// unreadable ones, is a warning saying the dependencies were not
+    /// checked.
     #[test]
-    fn test_advisory_database_line_names_database_or_says_not_checked() {
-        use sast_engine::scan::orchestrator::AdvisoryDatabaseStatus;
+    fn test_version_rules_line_names_the_pack_or_says_not_checked() {
+        use sast_engine::scan::orchestrator::VersionRulesStatus;
         let en = sast_engine::i18n::load_script_locale("en");
         let say = |k: &str| sast_engine::i18n::t(&en, k);
-        let (warning, line) = advisory_database_line(
-            &AdvisoryDatabaseStatus::Read {
-                path: PathBuf::from("/x/advisories.sadb"),
+        let (warning, line) = version_rules_line(
+            &VersionRulesStatus::Read {
+                pack: PathBuf::from("/x/rules.scapack"),
                 created: "2026-11-11T00:00:00Z".into(),
                 counts: vec![("PyPI".into(), 12), ("npm".into(), 30)],
             },
             say,
         );
         assert!(!warning);
-        assert!(line.contains("/x/advisories.sadb") && line.contains("2026-11-11") && line.contains("PyPI 12, npm 30"), "{line}");
-        let (warning, line) = advisory_database_line(&AdvisoryDatabaseStatus::Missing { path: Some(PathBuf::from("/x/a.sadb")) }, say);
-        assert!(warning && line.contains("/x/a.sadb") && line.contains("not checked"), "{line}");
-        let (warning, line) = advisory_database_line(
-            &AdvisoryDatabaseStatus::Unreadable { path: PathBuf::from("/x/a.sadb"), error: "bad magic".into() },
-            say,
+        assert!(
+            line.contains("/x/rules.scapack") && line.contains("2026-11-11") && line.contains("PyPI 12, npm 30") && line.contains("42"),
+            "{line}"
         );
+        let (warning, line) = version_rules_line(&VersionRulesStatus::Missing, say);
+        assert!(warning && line.contains("not checked") && !line.contains("sadb"), "{line}");
+        let (warning, line) = version_rules_line(&VersionRulesStatus::Unreadable { error: "bad magic".into() }, say);
         assert!(warning && line.contains("bad magic") && line.contains("not checked"), "{line}");
     }
 
@@ -950,8 +944,8 @@ fn rerun_command(args: impl Iterator<Item = String>) -> String {
 }
 
 /// Options of `scan` kept for the private binary only (2026-11-14): the
-/// shared binary offers a short list, checks the dependencies as soon as
-/// `advisories.sadb` sits next to it and reads the project's
+/// shared binary offers a short list, checks the dependencies whenever
+/// its rule pack carries version rules (ADR-0043) and reads the project's
 /// `.sca-suppress.json` by itself; these options then take their default.
 #[derive(clap::Args, Debug)]
 struct ScanExtraArgs {
@@ -980,9 +974,10 @@ struct ScanExtraArgs {
     /// Explicit test command (otherwise auto-detected).
     #[arg(long)]
     test_command: Option<String>,
-    /// Detects unpinned dependencies, and dependencies whose exact
-    /// version has a published vulnerability according to the offline
-    /// advisory database (see `--advisories`).
+    /// Runs the dependencies phase even with a rule pack (or folder)
+    /// without version rules: unpinned dependencies are reported, and the
+    /// scan says the versions were not checked. A pack carrying version
+    /// rules runs the phase without this option (ADR-0043).
     #[arg(long)]
     with_deps: bool,
     /// PostgreSQL host — enables the DB schema audit if present.
@@ -1011,16 +1006,8 @@ struct ScanExtraArgs {
     /// "HIGH,CRITICAL"). Accepted values: CRITICAL/HIGH/MEDIUM/LOW/INFO.
     #[arg(long)]
     severity: Option<String>,
-    /// Offline advisory database file of published vulnerabilities,
-    /// read by `--with-deps` (ADR-0042) — default: `advisories.sadb`
-    /// next to the executable. Missing: no vulnerability matching, and
-    /// the scan says so; the rest of `--with-deps` is unchanged. The
-    /// scan itself never uses the network.
-    #[arg(long)]
-    advisories: Option<PathBuf>,
     /// `brand.json` runtime customization file (ticket #87/spec
-    /// #83) — default: `brand.json` next to the executable
-    /// (like `advisories` above).
+    /// #83) — default: `brand.json` next to the executable.
     /// Absent or invalid: strictly unchanged behavior ("CodeFixture"
     /// defaults).
     #[arg(long)]
@@ -1056,7 +1043,6 @@ impl Default for ScanExtraArgs {
             data_dir: None,
             disable_rule: Vec::new(),
             severity: None,
-            advisories: None,
             brand_file: None,
             sbom: false,
             metrics_output: None,
@@ -1240,19 +1226,16 @@ const LIST_RULES_CATEGORIES: [(&str, &str, bool); 8] = [
     ("cicd", "⚙️", false),
 ];
 
-/// Display name of a rule in `list-rules`: the `rules.<id>.name` entry
-/// of the report locale, otherwise the rule's own `risk` text in `lang`
-/// (fallback `en`) truncated to 60 characters, otherwise the id — same
-/// fallback chain as `list_rules` on the Python side.
-fn rule_display_name(
-    rule: &sast_engine::rules::catalog::RuleListing,
-    report_locale: &serde_json::Value,
-    lang: &str,
-) -> String {
-    if let Some(name) = report_locale
-        .get("rules")
-        .and_then(|r| r.get(&rule.id))
-        .and_then(|r| r.get("name"))
+/// Display name of a rule in `list-rules`: the rule's own `name` block in
+/// `lang` (fallback `en`), otherwise its `risk` text truncated to 60
+/// characters, otherwise the id — the fallback chain of `list_rules` on
+/// the Python side, except that the name now comes from the rule file
+/// (the report locale's name-keyed copy was removed on 2026-11-14).
+fn rule_display_name(rule: &sast_engine::rules::catalog::RuleListing, lang: &str) -> String {
+    if let Some(name) = rule
+        .name
+        .get(lang)
+        .or_else(|| rule.name.get("en"))
         .and_then(|n| n.as_str())
         .filter(|n| !n.is_empty())
     {
@@ -1344,7 +1327,7 @@ fn run_list_rules_command(lang: &str, rules: Option<PathBuf>) -> ExitCode {
                 out,
                 "   {:<40} {}",
                 rule.id,
-                rule_display_name(rule, &report_locale, lang)
+                rule_display_name(rule, lang)
             );
         }
         let _ = writeln!(out);
@@ -1436,7 +1419,6 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
         data_dir,
         disable_rule,
         severity,
-        advisories,
         brand_file,
         sbom,
         metrics_output,
@@ -1688,21 +1670,9 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
     // Custom rules are read by the private build only (ADR-0041): the
     // shared binary scans with the delivered pack alone.
     let custom_rules_dir: Option<PathBuf> = None;
-    // Default: `advisories.sadb` next to the executable, where
-    // `sast-advisories update` writes it when both binaries share a
-    // directory, and where it is placed by hand with the full pack
-    // (ADR-0042). A missing file only disables vulnerability matching, and
-    // the scan says so.
-    let advisories = advisories.or_else(sast_engine::project::advisory_file::default_path);
-    // Dependencies are checked as soon as the database is there (the maintainer,
-    // 2026-11-14): a tester who received `advisories.sadb` and placed it
-    // next to the engine gets the check without any option. Without the
-    // file, nothing changes: no check, unless `--with-deps` asks for it
-    // and the scan then says the database is missing.
-    let with_deps = with_deps || advisories.as_ref().is_some_and(|p| p.is_file());
 
-    // Default: next to the executable (ticket #87/spec #83, like
-    // `advisories` above). `load_brand_file`
+    // Default: next to the executable (ticket #87/spec #83).
+    // `load_brand_file`
     // returns `None` on any anomaly (missing file, unreadable,
     // invalid JSON) — safe, silent fallback to `Brand::default()`
     // (all the "CodeFixture" defaults), never a blocking error.
@@ -1797,7 +1767,6 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
             Some(print_phase_progress)
         },
         custom_rules_dir,
-        advisories_file: advisories,
         script_locale: Some(script_locale.clone()),
         brand_prefix: effective_prefix(&brand),
         // Every file is discovered, so undeclared languages are named.
@@ -1819,6 +1788,26 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
                 .replace("{path}", &rule_path.display().to_string())
                 .replace("{error}", &err.to_string()),
         );
+    }
+    // Rules of one identity met twice (`RuleRegistry`): a client rule
+    // replacing the catalog's is wanted, so it is information; a rule
+    // defined twice in one source is a mistake, so it is a warning.
+    for conflict in &report.rule_conflicts {
+        use sast_engine::rules::catalog::RuleConflictKind;
+        let key = match conflict.kind {
+            RuleConflictKind::ClientReplacesCatalog => "scan_rule_replaced",
+            RuleConflictKind::DuplicateInSource => "scan_rule_duplicate",
+        };
+        let message = sast_engine::i18n::t(&script_locale, key)
+            .replace("{rule}", &conflict.id.to_string())
+            .replace("{kept}", &conflict.kept)
+            .replace("{dropped}", &conflict.dropped);
+        match conflict.kind {
+            RuleConflictKind::ClientReplacesCatalog => {
+                emit_progress(quiet, &format!("[sast-engine] {message}"))
+            }
+            RuleConflictKind::DuplicateInSource => emit_warning(&message),
+        }
     }
     // ADR-0040: where the rules came from and how many were kept, then the
     // languages found in the project but left out of `languages`, whose
@@ -1863,11 +1852,12 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
                 .replace("{languages}", &report.undeclared_languages.join(", "))
         ));
     }
-    // ADR-0042: every `--with-deps` scan names the advisory database it
-    // read, even with `--quiet`; without one it says the dependencies were
-    // not checked, so that no vulnerable dependency reads as "none".
-    if let Some(status) = &report.advisory_database {
-        let (warning, line) = advisory_database_line(status, |key| {
+    // ADR-0042, ADR-0043: every scan whose dependencies phase ran names
+    // the version rules it read, even with `--quiet`; without them it says
+    // the dependencies were not checked, so that no vulnerable dependency
+    // reads as "none".
+    if let Some(status) = &report.version_rules {
+        let (warning, line) = version_rules_line(status, |key| {
             sast_engine::i18n::t(&script_locale, key)
         });
         if warning {
@@ -1940,7 +1930,8 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
                 only_category: config.only_category.clone(),
                 disabled_rules: config.disabled_rules.clone(),
                 with_tests: config.with_tests,
-                with_deps: config.with_deps,
+                // The phase ran: asked for, or a pack with version rules.
+                with_deps: report.version_rules.is_some(),
                 database_configured: config.database.is_some(),
                 severity_levels: config.severity_levels.clone(),
                 report_lang: ctx.report_lang.clone(),

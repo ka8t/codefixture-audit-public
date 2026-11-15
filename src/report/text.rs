@@ -6,12 +6,37 @@
 use fancy_regex::Regex;
 use serde_json::Value;
 
+/// The display name of a compiled rule in `lang`: its `name` block (the
+/// rule file is the only source of its texts), in English when `lang` is
+/// missing, or the rule's identifier when it has no name at all (a client
+/// rule may have none). Not escaped.
+pub fn rule_display_name(rule: &Value, lang: &str) -> String {
+    let name = crate::scan::orchestrator::extract_i18n_block(rule, "name", lang);
+    if !name.is_empty() {
+        return name;
+    }
+    rule.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string()
+}
+
 /// Escapes special HTML characters — port of `_escape`.
+///
+/// **Deliberate deviation from the Python `_escape` (security fix,
+/// 2026-11-15):** the single quote `'` is escaped too, which Python does
+/// not do. A scanned project is untrusted and controls its file and
+/// directory names, which end up in the report. The heatmap renders a path
+/// inside a single-quoted JavaScript string of an inline handler
+/// (`heatmap-item.html`: `onclick="navigateToFile('{{filepath}}')"`); a
+/// path containing `'` escaped only against `<>&"` closed that string and
+/// injected script that ran when the auditor clicked the file (confirmed by
+/// proof of concept). `&#39;` is a numeric entity understood everywhere and
+/// is harmless in text or double-quoted attributes. `&` stays first so an
+/// escaped character is never re-escaped.
 pub fn escape(text: &str) -> String {
     text.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+        .replace('\'', "&#39;")
 }
 
 /// Context lines around a detected line (1-indexed), returned as
@@ -286,8 +311,17 @@ mod tests {
     fn test_escape_all_special_chars() {
         assert_eq!(
             escape(r#"<a href="x">&'"#),
-            "&lt;a href=&quot;x&quot;&gt;&amp;'"
+            "&lt;a href=&quot;x&quot;&gt;&amp;&#39;"
         );
+    }
+
+    /// Security regression (2026-11-15): the single quote must be escaped,
+    /// so a value put inside a single-quoted JS string (the heatmap's
+    /// `onclick`) cannot break out of it. See `escape`'s doc comment.
+    #[test]
+    fn test_escape_single_quote() {
+        assert_eq!(escape("a'); alert(1); ('"), "a&#39;); alert(1); (&#39;");
+        assert!(!escape("x'y").contains('\''), "no bare single quote survives");
     }
 
     #[test]

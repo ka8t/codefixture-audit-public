@@ -68,46 +68,11 @@ pub fn t(data: &Value, key: &str) -> String {
     }
 }
 
-/// Translations for a rule (name/risk/solution/benefit) — port of `_rule`.
-#[derive(Debug, Clone, Default)]
-pub struct RuleI18n {
-    pub key: String,
-    pub name: String,
-    pub risk: String,
-    pub solution: String,
-    pub benefit: String,
-}
-
-pub fn rule_i18n(report_locale: &Value, rule_key: &str) -> RuleI18n {
-    let path = format!("rules.{rule_key}");
-    let field = |map: &serde_json::Map<String, Value>, k: &str| -> String {
-        map.get(k)
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string()
-    };
-    match get_nested(report_locale, &path) {
-        Some(Value::Object(map)) => RuleI18n {
-            key: rule_key.to_string(),
-            name: {
-                let n = field(map, "name");
-                if n.is_empty() {
-                    rule_key.to_string()
-                } else {
-                    n
-                }
-            },
-            risk: field(map, "risk"),
-            solution: field(map, "solution"),
-            benefit: field(map, "benefit"),
-        },
-        _ => RuleI18n {
-            key: rule_key.to_string(),
-            name: rule_key.to_string(),
-            ..Default::default()
-        },
-    }
-}
+// The rule texts (name, risk, solution, benefit) are read from the rule
+// itself (`report::text::rule_display_name`, `extract_i18n_block`). The
+// report locales held a second copy keyed by name (`rule_i18n`, port of
+// `_rule`): 525 of its texts had drifted from the rules, and a name shared
+// by two languages could only hold one of them. Removed on 2026-11-14.
 
 #[cfg(test)]
 mod tests {
@@ -148,20 +113,13 @@ mod tests {
         assert_eq!(t(&en, "this.key.does.not.exist"), "this.key.does.not.exist");
     }
 
+    /// The rule texts live in the rule files only: a `rules` section in a
+    /// report locale would be a second copy, keyed by name, bound to drift.
     #[test]
-    fn test_rule_i18n_known_rule() {
-        let en = load_report_locale("en");
-        let r = rule_i18n(&en, "sql_injection_fstring");
-        assert_ne!(r.name, "sql_injection_fstring");
-        assert!(!r.risk.is_empty());
-    }
-
-    #[test]
-    fn test_rule_i18n_unknown_rule_falls_back_to_key() {
-        let en = load_report_locale("en");
-        let r = rule_i18n(&en, "totally_unknown_rule_xyz");
-        assert_eq!(r.name, "totally_unknown_rule_xyz");
-        assert_eq!(r.risk, "");
+    fn test_report_locales_hold_no_copy_of_the_rule_texts() {
+        for lang in ["en", "fr", "es", "de"] {
+            assert!(load_report_locale(lang).get("rules").is_none(), "{lang}");
+        }
     }
 
     #[test]
@@ -185,10 +143,10 @@ mod tests {
             "scan_invalid_path",
             "scan_invalid_severities",
             "scan_unsupported_config_sections",
-            // ADR-0042: advisory database named or "not checked".
-            "scan_advisories_read",
-            "scan_advisories_missing",
-            "scan_advisories_unreadable",
+            // ADR-0042, ADR-0043: version rules named or "not checked".
+            "scan_version_rules_read",
+            "scan_version_rules_missing",
+            "scan_version_rules_unreadable",
             // Ticket #124, then 2026-11-12: interactive creation of
             // audit.config.json (`project::config_wizard`).
             "config_prompt_languages",

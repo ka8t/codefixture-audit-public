@@ -33,18 +33,42 @@ pub struct CompiledFileContainsRule {
     pub file_contains: FileContainsCondition,
 }
 
+/// Where the scanned file is, in the two forms the conditions need.
+///
+/// The two paths answer different questions, so they travel together and
+/// each condition names the one it reads:
+/// - `relative` (to the project root, `/` separators) says *what* the file
+///   is inside the project: `path_contains` reads it;
+/// - `absolute` says *where* it is on disk: `not_path_has_file` walks up
+///   the real directories from it.
+#[derive(Debug, Clone, Copy)]
+pub struct FileLocation<'a> {
+    /// Path on disk, used for the governance-file walk.
+    pub absolute: &'a Path,
+    /// Path from the project root, `/`-separated, used for `path_contains`.
+    pub relative: &'a str,
+}
+
 fn is_match(re: &Regex, text: &str) -> bool {
     re.is_match(text).unwrap_or(false)
 }
 
 /// Checks whether a file's content satisfies the `file_contains`
-/// conditions. `filepath`, when supplied, is used for `path_contains` and
-/// `not_path_has_file` (the latter does real disk I/O, as
-/// on the Python side).
+/// conditions. `location`, when supplied, is used for `path_contains`
+/// (against the project-relative path) and `not_path_has_file` (real disk
+/// I/O from the absolute path, as on the Python side).
+///
+/// Deliberate deviation from `file_check.py::matches`: Python documents
+/// "the relative path must contain the segment" but is handed the path as
+/// collected, which is absolute when the scan target is. A project stored
+/// under a folder named `vendor` or `external` then matched the
+/// third-party-code rule on every file, and moving the project changed the
+/// results. Here `path_contains` only ever sees the path inside the
+/// project, which is what the rules mean.
 pub fn matches(
     fc: &FileContainsCondition,
     content: &str,
-    filepath: Option<&Path>,
+    location: Option<FileLocation<'_>>,
     line_count: usize,
 ) -> bool {
     for pat in &fc.has {
@@ -63,21 +87,23 @@ pub fn matches(
     }
 
     if !fc.path_contains.is_empty()
-        && let Some(fp) = filepath
+        && let Some(loc) = location
     {
-        let fp_lower = fp.to_string_lossy().to_lowercase().replace('\\', "/");
+        // Backslashes still normalised: a caller on Windows may hand a
+        // relative path built with native separators.
+        let relative_lower = loc.relative.to_lowercase().replace('\\', "/");
         if !fc
             .path_contains
             .iter()
-            .any(|seg| fp_lower.contains(&seg.to_lowercase()))
+            .any(|seg| relative_lower.contains(&seg.to_lowercase()))
         {
             return false;
         }
     }
 
     if !fc.not_path_has_file.is_empty()
-        && let Some(fp) = filepath
-        && governance_file_found(fp, &fc.not_path_has_file)
+        && let Some(loc) = location
+        && governance_file_found(loc.absolute, &fc.not_path_has_file)
     {
         return false; // governance file present → no finding
     }
@@ -129,16 +155,11 @@ fn governance_file_found(filepath: &Path, check_files: &[String]) -> bool {
 /// the conditions are met — mirrors `execute()` (file_check.py).
 pub fn execute_file_contains_rule(
     rule: &CompiledFileContainsRule,
-    filepath: &Path,
+    location: FileLocation<'_>,
     content: &str,
     all_lines: &[(usize, String)],
 ) -> Option<Finding> {
-    if !matches(
-        &rule.file_contains,
-        content,
-        Some(filepath),
-        all_lines.len(),
-    ) {
+    if !matches(&rule.file_contains, content, Some(location), all_lines.len()) {
         return None;
     }
 
@@ -197,17 +218,55 @@ mod tests {
         assert!(matches(&fc, "x", None, 11));
     }
 
+    /// Location whose absolute and relative paths are the same string —
+    /// enough for the conditions that don't touch the disk.
+    fn at(path: &str) -> Option<FileLocation<'_>> {
+        Some(FileLocation { absolute: Path::new(path), relative: path })
+    }
+
     #[test]
     fn test_path_contains_case_insensitive_and_backslash_normalized() {
         let mut fc = empty_condition();
         fc.path_contains = vec!["Migrations".to_string()];
-        assert!(matches(
-            &fc,
-            "x",
-            Some(Path::new(r"src\migrations\0001.py")),
-            1
-        ));
-        assert!(!matches(&fc, "x", Some(Path::new("src/models/user.py")), 1));
+        assert!(matches(&fc, "x", at(r"src\migrations\0001.py"), 1));
+        assert!(!matches(&fc, "x", at("src/models/user.py"), 1));
+    }
+
+    #[test]
+    fn test_path_contains_ignores_the_folders_above_the_project() {
+        // The project itself lives under a folder named `external`: only
+        // the path inside the project counts, so its own code is not
+        // taken for third-party code.
+        let mut fc = empty_condition();
+        fc.path_contains = vec!["external/".to_string()];
+        let inside_own_code = FileLocation {
+            absolute: Path::new("/home/dev/external/shop/src/app.py"),
+            relative: "src/app.py",
+        };
+        assert!(!matches(&fc, "x", Some(inside_own_code), 1));
+
+        let inside_vendored_code = FileLocation {
+            absolute: Path::new("/home/dev/shop/external/lib/util.py"),
+            relative: "external/lib/util.py",
+        };
+        assert!(matches(&fc, "x", Some(inside_vendored_code), 1));
+    }
+
+    #[test]
+    fn test_not_path_has_file_walks_up_from_the_absolute_path() {
+        // The governance file sits next to the scanned file on disk; the
+        // relative path alone could not find it.
+        let dir = std::env::temp_dir().join(format!("fc_governance_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("governance.txt"), b"").unwrap();
+        let file = dir.join("deploy.yml");
+
+        let mut fc = empty_condition();
+        fc.not_path_has_file = vec!["governance.txt".to_string()];
+        let location = FileLocation { absolute: &file, relative: "deploy.yml" };
+        let blocked = !matches(&fc, "x", Some(location), 1);
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(blocked, "the governance file found on disk must suppress the finding");
     }
 
     #[test]
@@ -227,7 +286,8 @@ mod tests {
         // they're never looked up on disk, never found → no blocking.
         let dir = std::env::temp_dir();
         let fake_file = dir.join("some_scanned_file.py");
-        assert!(matches(&fc, "x", Some(&fake_file), 1));
+        let location = FileLocation { absolute: &fake_file, relative: "some_scanned_file.py" };
+        assert!(matches(&fc, "x", Some(location), 1));
     }
 
     #[test]
@@ -249,7 +309,7 @@ mod tests {
         ];
         let finding = execute_file_contains_rule(
             &rule,
-            Path::new("app.js"),
+            at("app.js").unwrap(),
             "const app = express();",
             &all_lines,
         )
@@ -273,7 +333,7 @@ mod tests {
         };
         let all_lines = vec![(1, "hello".to_string())];
         assert!(
-            execute_file_contains_rule(&rule, Path::new("f.py"), "hello", &all_lines).is_none()
+            execute_file_contains_rule(&rule, at("f.py").unwrap(), "hello", &all_lines).is_none()
         );
     }
 }

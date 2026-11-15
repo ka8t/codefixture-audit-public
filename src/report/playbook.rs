@@ -229,7 +229,13 @@ mod tests {
         assert!(html.contains("Repérez tous les éléments &lt;th&gt;"), "{html}");
         assert!(html.contains("Ajoutez scope="), "{html}");
         assert!(html.contains("Rend les tableaux lisibles"), "{html}");
-        assert!(html.contains("lecteur d&#x27;écran") || html.contains("lecteur d'écran"), "{html}");
+        // `escape` encodes `'` as `&#39;` since the 2026-11-15 security fix.
+        assert!(
+            html.contains("lecteur d&#39;écran")
+                || html.contains("lecteur d&#x27;écran")
+                || html.contains("lecteur d'écran"),
+            "{html}"
+        );
         for english in ["Find all", "Test with a screen reader", "Run the audit"] {
             assert!(!html.contains(english), "{english}: {html}");
         }

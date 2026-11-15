@@ -43,7 +43,14 @@ pub struct Line {
     pub number: usize,
     pub indent: usize,
     pub tokens: Vec<Token>,
+    /// The line without indentation and without its trailing `# comment`.
     pub raw_content: String,
+    /// The line without indentation, comment included: what a translated
+    /// text line (`fr: …`) holds. A `#` in prose is text, not a comment:
+    /// cut at `#`, « Use #{} instead of ${} » reached the report as
+    /// « Use » (2026-11-14). Read by `parse_i18n_block` only, so patterns
+    /// keep their comment handling.
+    pub full_content: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -150,6 +157,7 @@ impl<'a> DslLexer<'a> {
                         indent: stripped.len() - content.len(),
                         tokens: vec![Token::simple(TokenType::Word, "end", i, 0)],
                         raw_content: "end".to_string(),
+                        full_content: "end".to_string(),
                     });
                     continue;
                 }
@@ -160,6 +168,7 @@ impl<'a> DslLexer<'a> {
                     indent,
                     tokens: vec![Token::simple(TokenType::Word, first_word, i, 0)],
                     raw_content: content.to_string(),
+                    full_content: content.to_string(),
                 });
                 continue;
             }
@@ -187,6 +196,7 @@ impl<'a> DslLexer<'a> {
                     indent,
                     tokens,
                     raw_content: content.to_string(),
+                    full_content: raw.trim().to_string(),
                 });
                 if single_plaintext_kw {
                     in_plaintext = true;

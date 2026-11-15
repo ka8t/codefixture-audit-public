@@ -1,10 +1,14 @@
-//! The advisory database file, `advisories.sadb` (ADR-0042, ticket #177).
+//! The advisory container (ADR-0042, ticket #177; role changed by
+//! ADR-0043): the layout of the editor's database `advisories.sadb` and
+//! of the version rules section of a rule pack.
 //!
-//! `tools/sast-advisories` writes it, the engine reads it during
-//! `scan --with-deps` (`advisories.rs`). Both go through this module, so
-//! the layout is written down once. The engine side only reads; the
-//! writer lives here because it is the same layout, and it opens no
-//! network connection.
+//! `tools/sast-advisories` writes the editor's database at the root of
+//! the private repository. It is never delivered: `build.rs` and
+//! `rules pack` copy it, or the demo selection written from it, into the
+//! version rules section of a pack (`rules/pack_format.rs`), and a scan
+//! reads that section (`advisories.rs`). Every side goes through this
+//! module, so the layout is written down once. The writer lives here
+//! because it is the same layout, and it opens no network connection.
 //!
 //! Layout, all integers little-endian:
 //!
@@ -42,12 +46,37 @@ pub const MAGIC: &[u8; 4] = b"SADB";
 /// than misreading the file.
 pub const FORMAT_VERSION: u32 = 1;
 
-/// File name next to the executables: `sast-advisories update` writes
-/// it there, `scan --with-deps` reads it there.
+/// File name of the editor's database (ADR-0043): `sast-advisories`
+/// writes it in its current folder by default, the root of the private
+/// repository, where `build.rs` reads it. The engine never looks for it.
 pub const FILE_NAME: &str = "advisories.sadb";
 
 /// Longest header accepted when reading, against a corrupted length.
 const MAX_HEADER_BYTES: u32 = 1 << 20;
+
+/// Largest decompressed size accepted for one ecosystem's gzip member, a
+/// bound against a decompression bomb (a corrupted or hostile file whose
+/// few bytes expand without limit, exhausting memory). 1 GiB is far above
+/// any real OSV ecosystem export (the whole database is ~85 MB compressed
+/// for five ecosystems) yet stops an unbounded expansion. A member over
+/// the bound is reported as an error, like a length that points outside
+/// the file. Same intent as [`MAX_HEADER_BYTES`].
+const MAX_ECOSYSTEM_BYTES: u64 = 1 << 30;
+
+/// Decompresses `member` (one gzip member), refusing anything larger than
+/// `cap` bytes once decompressed. Reads one byte past `cap` so that an
+/// over-the-cap stream is detected rather than silently truncated.
+fn decompress_capped(member: &[u8], cap: u64) -> Result<Vec<u8>, String> {
+    let mut out = Vec::new();
+    GzDecoder::new(member)
+        .take(cap + 1)
+        .read_to_end(&mut out)
+        .map_err(|e| e.to_string())?;
+    if out.len() as u64 > cap {
+        return Err(format!("decompressed data exceeds {cap} bytes"));
+    }
+    Ok(out)
+}
 
 /// The clear JSON header.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -108,11 +137,8 @@ impl DatabaseFile {
                 self.path.display()
             )));
         };
-        let mut out = Vec::new();
         Some(
-            GzDecoder::new(member)
-                .read_to_end(&mut out)
-                .map(|_| out)
+            decompress_capped(member, MAX_ECOSYSTEM_BYTES)
                 .map_err(|e| format!("{}: {ecosystem}: {e}", self.path.display())),
         )
     }
@@ -140,10 +166,7 @@ pub fn encode(source: &str, ecosystems: &[EcosystemPayload]) -> std::io::Result<
         });
         body.extend_from_slice(&member);
     }
-    let created = entries
-        .iter()
-        .map(|e| e.last_modified.as_str())
-        .max()
+    let created = newest_date(entries.iter().map(|e| e.last_modified.as_str()))
         .unwrap_or("")
         .to_string();
     let header = Header {
@@ -160,6 +183,17 @@ pub fn encode(source: &str, ecosystems: &[EcosystemPayload]) -> std::io::Result<
     out.extend_from_slice(&header_json);
     out.extend_from_slice(&body);
     Ok(out)
+}
+
+/// The latest of `dates` (OSV `modified` timestamps, RFC 3339), as
+/// written. Compared as instants, not as text (2026-11-15): as text,
+/// `2026-11-07T10:00:00.5Z` sorts before `2026-11-07T10:00:00Z` (`.` <
+/// `Z`) although it is later, so the header could show an ecosystem's
+/// older date. A date that does not parse ranks below every valid one,
+/// and among such dates the text order decides, so the result never
+/// depends on the order of the ecosystems.
+fn newest_date<'a>(dates: impl Iterator<Item = &'a str>) -> Option<&'a str> {
+    dates.max_by_key(|d| (chrono::DateTime::parse_from_rfc3339(d).ok(), *d))
 }
 
 /// Writes the database to `path` through a temporary file renamed over
@@ -208,13 +242,6 @@ pub fn read(path: &Path) -> Result<Option<DatabaseFile>, String> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(format!("{}: {e}", path.display())),
     }
-}
-
-/// The database next to the running executable.
-pub fn default_path() -> Option<PathBuf> {
-    std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(|dir| dir.join(FILE_NAME)))
 }
 
 #[cfg(test)]
@@ -278,6 +305,34 @@ mod tests {
         assert!(db.ecosystem_json("PyPI").unwrap().is_err());
         let dir = std::env::temp_dir().join(format!("sadb-missing-{}", std::process::id()));
         assert!(read(&dir.join(FILE_NAME)).unwrap().is_none());
+    }
+
+    /// Security regression (2026-11-15): one gzip member is bounded when
+    /// decompressed, against a decompression bomb. A member whose content
+    /// exceeds the cap is an error, not an unbounded allocation; within the
+    /// cap it reads back exactly.
+    #[test]
+    fn test_decompress_capped_rejects_oversized_member() {
+        // A gzip member of 2000 bytes of easily compressible data.
+        let plain = vec![b'a'; 2000];
+        let mut enc = flate2::GzBuilder::new().write(Vec::new(), Compression::best());
+        enc.write_all(&plain).unwrap();
+        let member = enc.finish().unwrap();
+        assert!(member.len() < 100, "a bomb-like ratio: tiny compressed");
+        // Under a tiny cap: refused rather than expanded.
+        let err = decompress_capped(&member, 100).unwrap_err();
+        assert!(err.contains("exceeds"), "{err}");
+        // Under a generous cap: read back exactly.
+        assert_eq!(decompress_capped(&member, 1 << 20).unwrap(), plain);
+    }
+
+    #[test]
+    fn test_created_is_the_latest_instant_not_the_largest_text() {
+        let a = [payload("PyPI", 1, "2026-11-07T10:00:00Z"), payload("npm", 1, "2026-11-07T10:00:00.5Z")];
+        let db = decode(Path::new("x.sadb"), encode("OSV", &a).unwrap()).unwrap();
+        assert_eq!(db.header.created, "2026-11-07T10:00:00.5Z");
+        assert_eq!(newest_date(["garbage", "2026-01-01T00:00:00+02:00"].into_iter()), Some("2026-01-01T00:00:00+02:00"));
+        assert_eq!(newest_date(std::iter::empty()), None);
     }
 
     #[test]

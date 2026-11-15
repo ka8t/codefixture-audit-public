@@ -12,9 +12,11 @@ use std::collections::BTreeMap;
 
 use serde_json::Value;
 
-use crate::i18n::{rule_i18n, t};
+use crate::i18n::t;
 use crate::report::exports::sarif::ReportFinding;
-use crate::report::text::escape;
+use crate::report::text::{escape, rule_display_name};
+use crate::scan::orchestrator::extract_i18n_block;
+use crate::rules::identity::{RuleCatalog, RuleId};
 
 const CATEGORY_ORDER: [(&str, &str, &str); 5] = [
     ("SECURITY", "security", "🔒"),
@@ -29,7 +31,7 @@ const CATEGORY_ORDER: [(&str, &str, &str); 5] = [
 /// AND `fix_after` non-empty) among its findings, matching Python.
 pub fn render_category_examples_html(
     findings: &[ReportFinding],
-    rule_catalog: &BTreeMap<String, Value>,
+    rule_catalog: &RuleCatalog,
     report_locale: &Value,
 ) -> String {
     let detected_label = t(report_locale, "category_example_detected");
@@ -39,13 +41,16 @@ pub fn render_category_examples_html(
 
     let mut blocks = String::new();
     for (cat_key, i18n_key, icon) in CATEGORY_ORDER {
-        let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
-        let mut example_by_rule: BTreeMap<&str, &ReportFinding> = BTreeMap::new();
+        // By rule identity: a name shared by two languages is two rules,
+        // each with its own example.
+        let mut counts: BTreeMap<RuleId, usize> = BTreeMap::new();
+        let mut example_by_rule: BTreeMap<RuleId, &ReportFinding> = BTreeMap::new();
         for f in findings.iter().filter(|f| f.category == cat_key) {
             if f.rule_key.is_empty() {
                 continue;
             }
-            let Some(rule) = rule_catalog.get(&f.rule_key) else {
+            let rule_id = f.rule_id();
+            let Some(rule) = rule_catalog.get(&rule_id) else {
                 continue;
             };
             let has_before = rule
@@ -59,18 +64,21 @@ pub fn render_category_examples_html(
             if !has_before || !has_after {
                 continue;
             }
-            *counts.entry(f.rule_key.as_str()).or_insert(0) += 1;
-            example_by_rule.entry(f.rule_key.as_str()).or_insert(f);
+            *counts.entry(rule_id.clone()).or_insert(0) += 1;
+            example_by_rule.entry(rule_id).or_insert(f);
         }
 
-        let Some((&top_rule_key, &count)) = counts.iter().max_by_key(|(_, c)| **c) else {
+        let Some((top_rule, &count)) = counts.iter().max_by_key(|(_, c)| **c) else {
             continue;
         };
-        let finding = example_by_rule[top_rule_key];
-        let rule = &rule_catalog[top_rule_key];
-        let rule_i18n_data = rule_i18n(report_locale, top_rule_key);
+        let finding = example_by_rule[top_rule];
+        let rule = &rule_catalog[top_rule];
+        // Name and solution read from the rule itself, the only source of
+        // its texts (the report locales held a stale copy, keyed by name).
+        let lang = t(report_locale, "locale_code");
+        let rule_name = rule_display_name(rule, &lang);
+        let solution = &extract_i18n_block(rule, "solution", &lang);
         let cat_title = t(report_locale, &format!("category_titles.{i18n_key}"));
-        let solution = &rule_i18n_data.solution;
         let bridge_html = if !solution.is_empty() {
             format!(
                 r#"<p class="category-example-bridge">{}</p>"#,
@@ -94,7 +102,7 @@ pub fn render_category_examples_html(
             </div>
             "#,
             escape(&cat_title),
-            escape(&rule_i18n_data.name),
+            escape(&rule_name),
             occurrences_tpl.replace("{count}", &count.to_string()),
             escape(&finding.file),
             finding.line,
@@ -136,6 +144,7 @@ mod tests {
     ) -> ReportFinding {
         ReportFinding {
             rule_key: rule_key.to_string(),
+            rule_language: "python".to_string(),
             rule_name: "Rule".to_string(),
             category: category.to_string(),
             severity: "HIGH".to_string(),
@@ -160,7 +169,7 @@ mod tests {
     #[test]
     fn test_no_findings_returns_empty() {
         let en = load_report_locale("en");
-        let out = render_category_examples_html(&[], &BTreeMap::new(), &en);
+        let out = render_category_examples_html(&[], &RuleCatalog::new(), &en);
         assert_eq!(out, "");
     }
 
@@ -168,7 +177,7 @@ mod tests {
     fn test_findings_without_fix_before_after_excluded() {
         let en = load_report_locale("en");
         let mut catalog = BTreeMap::new();
-        catalog.insert("no_fix_rule".to_string(), json!({"name": "No fix"}));
+        catalog.insert(RuleId::new("python", "no_fix_rule"), json!({"name": "No fix"}));
         let findings = vec![finding("SECURITY", "no_fix_rule", "a.py", 1, "eval(x)")];
         let out = render_category_examples_html(&findings, &catalog, &en);
         assert_eq!(out, "");
@@ -179,11 +188,11 @@ mod tests {
         let en = load_report_locale("en");
         let mut catalog = BTreeMap::new();
         catalog.insert(
-            "rule_a".to_string(),
+            RuleId::new("python", "rule_a"),
             json!({"fix_before": "eval(x)", "fix_after": "ast.literal_eval(x)"}),
         );
         catalog.insert(
-            "rule_b".to_string(),
+            RuleId::new("python", "rule_b"),
             json!({"fix_before": "b_before", "fix_after": "b_after"}),
         );
         let findings = vec![
@@ -203,7 +212,7 @@ mod tests {
         let en = load_report_locale("en");
         let mut catalog = BTreeMap::new();
         catalog.insert(
-            "dep_rule".to_string(),
+            RuleId::new("python", "dep_rule"),
             json!({"fix_before": "x", "fix_after": "y"}),
         );
         let findings = vec![finding(
@@ -222,7 +231,7 @@ mod tests {
         let en = load_report_locale("en");
         let mut catalog = BTreeMap::new();
         catalog.insert(
-            "xss_rule".to_string(),
+            RuleId::new("python", "xss_rule"),
             json!({"fix_before": "<b>", "fix_after": "<script>evil()</script>"}),
         );
         let findings = vec![finding(

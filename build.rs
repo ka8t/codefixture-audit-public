@@ -9,6 +9,12 @@
 //!   the public demo key (`pack_format`). The demo rules are also
 //!   written apart as `rules-demo.scapack` (ticket #153): what the shared
 //!   repository receives. The full pack is handed out by hand.
+//! - Version rules (ADR-0043): the full pack carries the editor's advisory
+//!   database `advisories.sadb`, at the repository root (written by
+//!   `sast-advisories update`, never committed); the demo pack carries
+//!   the committed selection `rules/advisories/demo.sadb`. Both files are
+//!   copied into the pack as they are. Without them, the pack has no
+//!   version rules and the build says so.
 //! - In the shared repository there is no `.sca` file: the demo pack
 //!   `rules/rules.scapack`, written by `scripts/export_public_repo.sh`, is
 //!   copied as it is.
@@ -93,7 +99,8 @@ fn export_build_version(manifest_dir: &str) {
 ///
 /// Source: the `.sca` files of `rules/builtin` when there are any, else
 /// the committed `rules/rules.scapack`. With `.sca` files it also writes
-/// `rules-demo.scapack`, the demo rules only (ticket #153). Neither is a build error: the
+/// `rules-demo.scapack`, the demo rules only (ticket #153), and adds the
+/// version rules of each pack when their file exists (ADR-0043). Neither is a build error: the
 /// binary then stops at the first scan and names the missing pack. The
 /// pack is deterministic (`pack_format::write_pack`), so a build with
 /// unchanged rules rewrites the same bytes.
@@ -105,6 +112,11 @@ fn write_catalog_pack(manifest_dir: &str, out_dir: &str) {
     // edited rule file reruns this script.
     println!("cargo:rerun-if-changed={}", builtin.display());
     println!("cargo:rerun-if-changed={}", committed.display());
+    let full_versions = Path::new(manifest_dir).join(pack_format::FULL_VERSION_RULES_FILE);
+    let demo_versions = rules.join(pack_format::DEMO_VERSION_RULES_FILE);
+    // Watched even while absent: creating the file reruns the script.
+    println!("cargo:rerun-if-changed={}", full_versions.display());
+    println!("cargo:rerun-if-changed={}", demo_versions.display());
 
     let profile_dir = Path::new(out_dir)
         .ancestors()
@@ -118,7 +130,8 @@ fn write_catalog_pack(manifest_dir: &str, out_dir: &str) {
     // copy, so the folder never holds a demo pack its rules did not give.
     let demo_dest = profile_dir.join(pack_format::DEMO_PACK_FILE_NAME);
     if !files.is_empty() {
-        let pack = pack_format::write_pack("builtin", &files);
+        let full_rules = version_rules(&full_versions, "full");
+        let pack = pack_format::write_pack("builtin", &files, full_rules.as_deref());
         fs::write(&dest, pack).expect("writing rules.scapack next to the binary");
         let demo = pack_format::demo_sources(&files);
         if demo.is_empty() {
@@ -128,7 +141,8 @@ fn write_catalog_pack(manifest_dir: &str, out_dir: &str) {
                 builtin.display()
             );
         } else {
-            let pack = pack_format::write_pack(pack_format::DEMO_PACK_NAME, &demo);
+            let demo_rules = version_rules(&demo_versions, "demo");
+            let pack = pack_format::write_pack(pack_format::DEMO_PACK_NAME, &demo, demo_rules.as_deref());
             fs::write(&demo_dest, pack).expect("writing rules-demo.scapack next to the binary");
         }
         return;
@@ -142,5 +156,22 @@ fn write_catalog_pack(manifest_dir: &str, out_dir: &str) {
             builtin.display(),
             committed.display()
         );
+    }
+}
+
+/// The version rules file `path` for the `which` pack, or `None` with a
+/// build warning when it is missing: the pack is still written, without
+/// version rules, and its scans then say that the dependencies were not
+/// checked against published vulnerabilities (ADR-0043).
+fn version_rules(path: &Path, which: &str) -> Option<Vec<u8>> {
+    match fs::read(path) {
+        Ok(bytes) => Some(bytes),
+        Err(_) => {
+            println!(
+                "cargo:warning=no version rules for the {which} pack: {} is missing (ADR-0043)",
+                path.display()
+            );
+            None
+        }
     }
 }

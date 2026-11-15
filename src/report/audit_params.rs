@@ -390,7 +390,7 @@ mod tests {
         project_description: &str,
         project_uuid: &str,
         project_path: &str,
-        rule_catalog: &'a BTreeMap<String, Value>,
+        rule_catalog: &'a crate::rules::identity::RuleCatalog,
     ) -> ReportContext<'a> {
         ReportContext {
             project_name: project_name.to_string(),

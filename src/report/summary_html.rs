@@ -300,6 +300,7 @@ mod tests {
     fn finding(rule_key: &str, rule_name: &str, severity: &str, confidence: i64) -> ReportFinding {
         ReportFinding {
             rule_key: rule_key.to_string(),
+            rule_language: "python".to_string(),
             rule_name: rule_name.to_string(),
             category: "SECURITY".to_string(),
             severity: severity.to_string(),
@@ -419,5 +420,27 @@ mod tests {
         assert!(html.contains("views.py"));
         assert!(html.contains("src/app/"));
         assert!(html.contains("2 High"));
+    }
+
+    /// Security regression (2026-11-15): the heatmap renders a file path
+    /// inside a single-quoted JS string of an inline `onclick`. A path
+    /// controlled by the scanned project must not break out of that string.
+    /// `escape` now encodes `'` as `&#39;`, so no bare quote reaches the
+    /// handler. Before the fix, `('b.py` appeared verbatim in the output.
+    #[test]
+    fn test_render_heatmap_escapes_single_quote_in_path() {
+        let en = load_report_locale("en");
+        let top_files = vec![TopFile {
+            file: "src/a'); alert(1); ('b.py".to_string(),
+            score: 3,
+            severities: BTreeMap::new(),
+        }];
+        let html = render_heatmap(&top_files, &en);
+        assert!(html.contains("navigateToFile("), "the inline handler is present");
+        assert!(
+            !html.contains("('b.py"),
+            "a bare single quote must not survive inside the JS string"
+        );
+        assert!(html.contains("&#39;"), "the quote is HTML-encoded");
     }
 }

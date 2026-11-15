@@ -168,6 +168,9 @@ pub struct RuleNode {
     pub sinks: Vec<SinkSpec>,
     pub sanitizers: Vec<SanitizerSpec>,
     pub passthroughs: Vec<PassthroughSpec>,
+    /// Display name, per language (`name` block): what the report and
+    /// `list-rules` show instead of the identifier.
+    pub name: I18nBlock,
     pub message: I18nBlock,
     pub risk: I18nBlock,
     pub solution: I18nBlock,
@@ -195,6 +198,7 @@ impl RuleNode {
             sinks: Vec::new(),
             sanitizers: Vec::new(),
             passthroughs: Vec::new(),
+            name: I18nBlock::default(),
             message: I18nBlock::default(),
             risk: I18nBlock::default(),
             solution: I18nBlock::default(),

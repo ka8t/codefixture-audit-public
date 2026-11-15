@@ -12,7 +12,8 @@ use crate::project::suppress::line_hash;
 use crate::report::exports::sarif::{ReportFinding, TaintFlow};
 use crate::report::playbook::render_playbook_inline;
 use crate::report::report_assets::load_template;
-use crate::report::text::{escape, is_dependency, lang_label, linkify_acronyms};
+use crate::report::text::{escape, is_dependency, lang_label, linkify_acronyms, rule_display_name};
+use crate::rules::identity::{RuleCatalog, RuleId};
 
 /// Icon + i18n key (`category_titles.<key>`) for the 8 fixed
 /// categories — mirrors `self.categories`/`cat_i18n_map`
@@ -49,14 +50,16 @@ pub(crate) fn category_title(report_locale: &Value, category: &str) -> String {
 
 /// Generates a before/after block (`fix_before`/`fix_after`) from the
 /// compiled DSL rule — port of `_generate_fix_suggestion`.
-/// `rule_catalog`: rule id → compiled JSON (same objects as
-/// `rule_jsons` in `orchestrator.rs`).
+/// `rule_catalog`: rule identity → compiled JSON (same objects as
+/// `rule_jsons` in `orchestrator.rs`); `rule` is the identity of the
+/// findings' rule, so a name shared by two languages shows the example of
+/// the right one.
 pub fn generate_fix_suggestion(
-    rule_catalog: &BTreeMap<String, Value>,
-    rule_key: &str,
+    rule_catalog: &RuleCatalog,
+    rule_id: &RuleId,
     report_locale: &Value,
 ) -> String {
-    let Some(rule) = rule_catalog.get(rule_key) else {
+    let Some(rule) = rule_catalog.get(rule_id) else {
         return String::new();
     };
     let before = rule
@@ -67,7 +70,8 @@ pub fn generate_fix_suggestion(
     if before.is_empty() && after.is_empty() {
         return String::new();
     }
-    let rule_name = crate::i18n::rule_i18n(report_locale, rule_key).name;
+    // Escaped: the name is text of a rule file, a client's included.
+    let rule_name = escape(&rule_display_name(rule, &t(report_locale, "locale_code")));
     let lbl = t(report_locale, "taint_fix_title");
     format!(
         r#"<details class="taint-fix"><summary>🔧 {lbl} — {rule_name}</summary><div class="fix-before"><strong>❌ {}</strong><pre><code>{}</code></pre></div><div class="fix-after"><strong>✅ {}</strong><pre><code>{}</code></pre></div></details>"#,
@@ -88,11 +92,11 @@ pub fn generate_fix_suggestion(
 /// no CSP anywhere in the file). Rendered once per rule group (same
 /// contract as `generate_fix_suggestion`), not per finding instance.
 fn render_file_check_explanation(
-    rule_catalog: &BTreeMap<String, Value>,
-    rule_key: &str,
+    rule_catalog: &RuleCatalog,
+    rule_id: &RuleId,
     report_locale: &Value,
 ) -> String {
-    let Some(rule) = rule_catalog.get(rule_key) else {
+    let Some(rule) = rule_catalog.get(rule_id) else {
         return String::new();
     };
     let Some(fc) = rule.get("file_contains") else {
@@ -393,20 +397,23 @@ fn render_finding_item(f: &ReportFinding, severity: &str, report_locale: &Value)
     item
 }
 
-/// Groups a list of findings by rule name (first-encounter order),
-/// with the shared risk/solution/playbook/fix block rendered only
-/// once per group — port of `render_findings`.
+/// Groups a list of findings by rule (first-encounter order), with the
+/// shared risk/solution/playbook/fix block rendered only once per group —
+/// port of `render_findings`. A group is one rule identity (language +
+/// name, `RuleId`), not one name: the Python and JavaScript findings of
+/// `base64_eval` are two groups, each with its own rule's texts.
 fn render_findings(
     findings: &[&ReportFinding],
     severity: &str,
     report_locale: &Value,
-    rule_catalog: &BTreeMap<String, Value>,
+    rule_catalog: &RuleCatalog,
 ) -> String {
-    let mut order: Vec<&str> = Vec::new();
-    let mut by_rule: BTreeMap<&str, Vec<&ReportFinding>> = BTreeMap::new();
+    let mut order: Vec<RuleId> = Vec::new();
+    let mut by_rule: BTreeMap<RuleId, Vec<&ReportFinding>> = BTreeMap::new();
     for f in findings {
-        let entry = by_rule.entry(f.rule_name.as_str()).or_insert_with(|| {
-            order.push(f.rule_name.as_str());
+        let id = RuleId::new(&f.rule_language, &f.rule_name);
+        let entry = by_rule.entry(id.clone()).or_insert_with(|| {
+            order.push(id);
             Vec::new()
         });
         entry.push(f);
@@ -417,10 +424,11 @@ fn render_findings(
     let rule_group_tpl = load_template("findings-rule-group.html");
 
     let mut html = String::new();
-    for rule_name in order {
-        let rule_findings = &by_rule[rule_name];
+    for group in order {
+        let rule_findings = &by_rule[&group];
         let first = rule_findings[0];
         let rk = &first.rule_key;
+        let rule_id = first.rule_id();
 
         let mut shared_html = String::new();
         // The rule's own risk text, the one written for the reader (issue
@@ -429,7 +437,7 @@ fn render_findings(
         // a report showed it instead of the explanation (2026-11-14).
         let lang = t(report_locale, "locale_code");
         let risk_text = rule_catalog
-            .get(rk.as_str())
+            .get(&rule_id)
             .map(|rule| crate::scan::orchestrator::extract_i18n_block(rule, "risk", &lang))
             .filter(|r| !r.is_empty())
             .unwrap_or_else(|| first.risk.clone());
@@ -450,7 +458,7 @@ fn render_findings(
         if !rk.is_empty() {
             shared_html.push_str(&render_file_check_explanation(
                 rule_catalog,
-                rk,
+                &rule_id,
                 report_locale,
             ));
             shared_html.push_str(&render_playbook_inline(
@@ -459,7 +467,7 @@ fn render_findings(
                 first.solution.as_deref(),
                 &first.benefit,
             ));
-            shared_html.push_str(&generate_fix_suggestion(rule_catalog, rk, report_locale));
+            shared_html.push_str(&generate_fix_suggestion(rule_catalog, &rule_id, report_locale));
         }
 
         let items_html: String = rule_findings
@@ -468,7 +476,7 @@ fn render_findings(
             .collect();
 
         let group = rule_group_tpl
-            .replace("{{rule_name}}", &escape(rule_name))
+            .replace("{{rule_name}}", &escape(&first.rule_name))
             .replace("{{count}}", &rule_findings.len().to_string())
             .replace("{{content}}", &(shared_html + &items_html));
         html.push_str(&group);
@@ -493,7 +501,7 @@ fn render_by_category(
     findings: &[&ReportFinding],
     severity: &str,
     report_locale: &Value,
-    rule_catalog: &BTreeMap<String, Value>,
+    rule_catalog: &RuleCatalog,
 ) -> Option<String> {
     if findings.is_empty() {
         return None;
@@ -527,7 +535,7 @@ pub fn render_severity_section(
     severity: &str,
     findings: &[&ReportFinding],
     report_locale: &Value,
-    rule_catalog: &BTreeMap<String, Value>,
+    rule_catalog: &RuleCatalog,
 ) -> String {
     let severity_meta = |sev: &str| -> (&'static str, &'static str, String) {
         match sev {
@@ -610,6 +618,7 @@ mod tests {
     fn finding(category: &str, rule_key: &str, rule_name: &str, file: &str) -> ReportFinding {
         ReportFinding {
             rule_key: rule_key.to_string(),
+            rule_language: "python".to_string(),
             rule_name: rule_name.to_string(),
             category: category.to_string(),
             severity: "HIGH".to_string(),
@@ -657,8 +666,11 @@ mod tests {
         assert!(html.contains("Votre code — app/auth/router.py:91"), "{html}");
         assert!(html.contains("Ligne détectée (L91)"), "{html}");
         assert!(html.contains("Correction proposée"), "{html}");
+        // Single quotes are HTML-encoded (`&#39;`) since the 2026-11-15
+        // security fix in `report::text::escape` (closing a JS-string
+        // breakout in the heatmap's inline handler).
         assert!(
-            html.contains(r#"logger.error(&quot;Error for '%s': %s&quot;, username, e)"#),
+            html.contains(r#"logger.error(&quot;Error for &#39;%s&#39;: %s&quot;, username, e)"#),
             "{html}"
         );
 
@@ -753,8 +765,9 @@ mod tests {
         use serde_json::json;
         let en = load_report_locale("en");
         let mut catalog = BTreeMap::new();
+        let rule = RuleId::new("python", "missing_csp_header");
         catalog.insert(
-            "missing_csp_header".to_string(),
+            rule.clone(),
             json!({
                 "id": "missing_csp_header",
                 "file_contains": {
@@ -763,7 +776,7 @@ mod tests {
                 },
             }),
         );
-        let html = render_file_check_explanation(&catalog, "missing_csp_header", &en);
+        let html = render_file_check_explanation(&catalog, &rule, &en);
         assert!(html.contains("Why this was detected"));
         assert!(html.contains("whole-file check"));
         assert!(html.contains("Flask"));
@@ -776,15 +789,20 @@ mod tests {
         use serde_json::json;
         let en = load_report_locale("en");
         let mut catalog = BTreeMap::new();
-        catalog.insert("taint_sqli".to_string(), json!({"id": "taint_sqli"}));
-        let html = render_file_check_explanation(&catalog, "taint_sqli", &en);
+        let rule = RuleId::new("python", "taint_sqli");
+        catalog.insert(rule.clone(), json!({"id": "taint_sqli"}));
+        let html = render_file_check_explanation(&catalog, &rule, &en);
         assert!(html.is_empty());
     }
 
     #[test]
     fn test_render_file_check_explanation_empty_unknown_rule() {
         let en = load_report_locale("en");
-        let html = render_file_check_explanation(&BTreeMap::new(), "unknown_rule", &en);
+        let html = render_file_check_explanation(
+            &RuleCatalog::new(),
+            &RuleId::new("python", "unknown_rule"),
+            &en,
+        );
         assert!(html.is_empty());
     }
 
@@ -839,13 +857,13 @@ mod tests {
         let refs = [&f];
         let mut catalog = BTreeMap::new();
         catalog.insert(
-            "taint_sqli".to_string(),
+            RuleId::new("python", "taint_sqli"),
             serde_json::json!({"risk": {"en": "An attacker can read your data.", "fr": "Un attaquant peut lire vos données."}}),
         );
         let html = render_findings(&refs, "HIGH", &fr, &catalog);
         assert!(html.contains("Un attaquant peut lire vos données."), "{html}");
         assert!(!html.contains("données non fiables"), "{html}");
-        let html = render_findings(&refs, "HIGH", &fr, &BTreeMap::new());
+        let html = render_findings(&refs, "HIGH", &fr, &RuleCatalog::new());
         assert!(html.contains("données non fiables"), "fallback without the rule");
     }
 
@@ -897,21 +915,45 @@ mod tests {
     #[test]
     fn test_generate_fix_suggestion_empty_without_rule_data() {
         let en = load_report_locale("en");
-        let catalog = BTreeMap::new();
-        assert_eq!(generate_fix_suggestion(&catalog, "no_such_rule", &en), "");
+        let catalog = RuleCatalog::new();
+        let rule = RuleId::new("python", "no_such_rule");
+        assert_eq!(generate_fix_suggestion(&catalog, &rule, &en), "");
     }
 
     #[test]
     fn test_generate_fix_suggestion_with_fix_before_after() {
         let en = load_report_locale("en");
         let mut catalog = BTreeMap::new();
+        let rule = RuleId::new("python", "r1");
         catalog.insert(
-            "r1".to_string(),
+            rule.clone(),
             serde_json::json!({"fix_before": "eval(x)", "fix_after": "ast.literal_eval(x)"}),
         );
-        let html = generate_fix_suggestion(&catalog, "r1", &en);
+        let html = generate_fix_suggestion(&catalog, &rule, &en);
         assert!(html.contains("eval(x)"));
         assert!(html.contains("ast.literal_eval(x)"));
         assert!(html.contains("taint-fix"));
+    }
+
+    #[test]
+    fn test_one_name_in_two_languages_is_two_groups_with_their_own_example() {
+        let en = load_report_locale("en");
+        let python = finding("SECURITY", "base64_eval", "base64_eval", "app.py");
+        let mut javascript = finding("SECURITY", "base64_eval", "base64_eval", "app.js");
+        javascript.rule_language = "javascript".to_string();
+        let mut catalog = RuleCatalog::new();
+        catalog.insert(
+            RuleId::new("python", "base64_eval"),
+            serde_json::json!({"fix_before": "py_before", "fix_after": "py_after"}),
+        );
+        catalog.insert(
+            RuleId::new("javascript", "base64_eval"),
+            serde_json::json!({"fix_before": "js_before", "fix_after": "js_after"}),
+        );
+        let html = render_findings(&[&python, &javascript], "HIGH", &en, &catalog);
+        assert!(html.contains("py_after") && html.contains("js_after"), "{html}");
+        // The JavaScript group comes after the Python one and holds app.js.
+        let js_group = &html[html.find("js_after").unwrap()..];
+        assert!(js_group.contains("app.js") && !js_group.contains("app.py"), "{html}");
     }
 }

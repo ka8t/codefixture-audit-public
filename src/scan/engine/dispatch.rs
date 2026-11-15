@@ -3,12 +3,10 @@
 //! fields present in the compiled JSON, not from a single `mode` field.
 #![allow(dead_code)]
 
-use std::path::Path;
-
 use serde_json::Value;
 
 use super::Finding;
-use super::file_contains::{execute_file_contains_rule, matches as file_contains_matches};
+use super::file_contains::{FileLocation, execute_file_contains_rule, matches as file_contains_matches};
 use super::pattern::execute_regex_rule;
 use super::rule_loader::{compile_file_contains_rule_from_json, compile_regex_rule_from_json};
 
@@ -43,10 +41,12 @@ fn is_truthy(v: Option<&Value>) -> bool {
 
 /// Dispatches a JSON rule to the right executor. Mode inferred
 /// automatically from the fields present (`patterns`/`file_contains`/
-/// `hook`/`ast_patterns`/`mode`).
+/// `hook`/`ast_patterns`/`mode`). `location` carries both the
+/// project-relative and the on-disk path of the scanned file: the
+/// `file_contains` conditions read one or the other (see `FileLocation`).
 pub fn dispatch_rule(
     rule_json: &Value,
-    filepath: &Path,
+    location: FileLocation<'_>,
     all_lines: &[(usize, String)],
     content: &str,
 ) -> DispatchOutcome {
@@ -76,7 +76,7 @@ pub fn dispatch_rule(
         if !file_contains_matches(
             &compiled_fc.file_contains,
             content,
-            Some(filepath),
+            Some(location),
             all_lines.len(),
         ) {
             return DispatchOutcome::Findings(Vec::new());
@@ -98,7 +98,7 @@ pub fn dispatch_rule(
     // file_contains only (file-level finding).
     if has_fc {
         let findings = compile_file_contains_rule_from_json(rule_json)
-            .and_then(|r| execute_file_contains_rule(&r, filepath, content, all_lines))
+            .and_then(|r| execute_file_contains_rule(&r, location, content, all_lines))
             .into_iter()
             .collect();
         return DispatchOutcome::Findings(findings);
@@ -115,6 +115,11 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// The scanned file of these tests: `f.py` at the project root.
+    fn f_py() -> FileLocation<'static> {
+        FileLocation { absolute: std::path::Path::new("f.py"), relative: "f.py" }
+    }
+
     fn lines(text: &str) -> Vec<(usize, String)> {
         text.lines()
             .enumerate()
@@ -125,21 +130,21 @@ mod tests {
     #[test]
     fn test_dispatch_ast_mode_returns_ast_outcome() {
         let rule = json!({"id": "r", "mode": "ast", "ast_patterns": [{}]});
-        let out = dispatch_rule(&rule, Path::new("f.py"), &[], "");
+        let out = dispatch_rule(&rule, f_py(), &[], "");
         assert_eq!(out, DispatchOutcome::Ast);
     }
 
     #[test]
     fn test_dispatch_ast_patterns_present_without_mode() {
         let rule = json!({"id": "r", "ast_patterns": [{"pattern": "x"}]});
-        let out = dispatch_rule(&rule, Path::new("f.py"), &[], "");
+        let out = dispatch_rule(&rule, f_py(), &[], "");
         assert_eq!(out, DispatchOutcome::Ast);
     }
 
     #[test]
     fn test_dispatch_taint_mode_without_patterns_returns_taint() {
         let rule = json!({"id": "r", "mode": "taint", "sources": [{"pattern": "input"}], "sinks": [{"pattern": "eval"}]});
-        let out = dispatch_rule(&rule, Path::new("f.py"), &[], "");
+        let out = dispatch_rule(&rule, f_py(), &[], "");
         assert_eq!(out, DispatchOutcome::Taint);
     }
 
@@ -158,7 +163,7 @@ mod tests {
         });
         let out = dispatch_rule(
             &rule,
-            Path::new("f.py"),
+            f_py(),
             &lines("x = eval(y)\n"),
             "x = eval(y)\n",
         );
@@ -168,7 +173,7 @@ mod tests {
     #[test]
     fn test_dispatch_hook_returns_hook_outcome() {
         let rule = json!({"id": "r", "hook": "some_custom_hook"});
-        let out = dispatch_rule(&rule, Path::new("f.py"), &[], "");
+        let out = dispatch_rule(&rule, f_py(), &[], "");
         assert_eq!(out, DispatchOutcome::Hook);
     }
 
@@ -176,7 +181,7 @@ mod tests {
     fn test_dispatch_regex_only_produces_findings() {
         let rule = json!({"id": "eval_usage", "category": "Injection", "severity": "HIGH", "patterns": [{"pattern": r"eval\(", "match": "line"}]});
         let content = "x = eval(y)\n";
-        let out = dispatch_rule(&rule, Path::new("f.py"), &lines(content), content);
+        let out = dispatch_rule(&rule, f_py(), &lines(content), content);
         match out {
             DispatchOutcome::Findings(f) => assert_eq!(f.len(), 1),
             other => panic!("attendu Findings, eu {other:?}"),
@@ -190,7 +195,7 @@ mod tests {
             "file_contains": {"has": [], "not_has": ["forbidden_word"], "scope": "file"},
         });
         let content = "safe content\n";
-        let out = dispatch_rule(&rule, Path::new("f.py"), &lines(content), content);
+        let out = dispatch_rule(&rule, f_py(), &lines(content), content);
         match out {
             DispatchOutcome::Findings(f) => assert_eq!(f.len(), 1),
             other => panic!("attendu Findings, eu {other:?}"),
@@ -205,7 +210,7 @@ mod tests {
             "file_contains": {"has": ["must_be_present_marker"], "not_has": [], "scope": "file"},
         });
         let content = "x = eval(y)\n"; // doesn't contain the required marker
-        let out = dispatch_rule(&rule, Path::new("f.py"), &lines(content), content);
+        let out = dispatch_rule(&rule, f_py(), &lines(content), content);
         match out {
             DispatchOutcome::Findings(f) => assert!(
                 f.is_empty(),
@@ -223,7 +228,7 @@ mod tests {
             "file_contains": {"has": ["must_be_present_marker"], "not_has": [], "scope": "file"},
         });
         let content = "must_be_present_marker\nx = eval(y)\n";
-        let out = dispatch_rule(&rule, Path::new("f.py"), &lines(content), content);
+        let out = dispatch_rule(&rule, f_py(), &lines(content), content);
         match out {
             DispatchOutcome::Findings(f) => assert_eq!(f.len(), 1),
             other => panic!("attendu Findings, eu {other:?}"),
@@ -233,7 +238,7 @@ mod tests {
     #[test]
     fn test_dispatch_neither_patterns_nor_fc_returns_empty_findings() {
         let rule = json!({"id": "r"});
-        let out = dispatch_rule(&rule, Path::new("f.py"), &[], "");
+        let out = dispatch_rule(&rule, f_py(), &[], "");
         assert_eq!(out, DispatchOutcome::Findings(Vec::new()));
     }
 }

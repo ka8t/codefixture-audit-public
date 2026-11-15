@@ -9,7 +9,7 @@ This guide takes you, step by step, from nothing installed to a complete analysi
 | [3](#step-3-download-the-repository) | Download the repository | 1 min |
 | [4](#step-4-build-the-engine) | Build the engine | 3–10 min the first time |
 | [5](#step-5-check-the-build) | Check the build | 1 min |
-| [6](#step-6-add-the-full-catalog-and-the-vulnerability-database-optional) | Add the full catalog and the vulnerability database (optional) | 2 min |
+| [6](#step-6-add-the-full-catalog-optional) | Add the full catalog (optional) | 2 min |
 | [7](#step-7-describe-your-project-first-run) | Describe your project (first run) | 2 min, once per project |
 | [8](#step-8-run-the-analysis) | Run the analysis | seconds to a few minutes |
 | [9](#step-9-read-the-report) | Read the report | — |
@@ -27,7 +27,7 @@ These are the cases where the engine may not behave as you expect, with what to 
 - **Tested on macOS only.** Every step of this guide was run on macOS. Windows (part of steps 2 to 11) and Linux have not been tested: the commands are given, but you may be the first to run them. If a step fails, note the command and the full message it printed, and send them to CodeFixture.
 - **The first analysis takes two runs.** The first time you analyse a project, the engine asks what to analyse (step 7), writes `audit.config.json`, and stops without a report. This is expected: run the same command again. In a script or a CI job there are no questions and the first run produces the report.
 - **The demo rules give a thin report.** The 38 demonstration rules of this repository cover a small part of what the engine detects. On a real project their findings may come mostly from a few rules, such as JavaScript written in HTML attributes (`onclick=…`). The full rule pack (step 6) gives the complete report.
-- **Dependencies are checked only with `advisories.sadb`.** Without that file next to the engine (step 6), your dependencies are not compared with published vulnerabilities. The report then simply has no dependency findings: it does not mean your dependencies are safe. The file also ages: ask for a new one from time to time.
+- **The demo pack knows few published vulnerabilities.** Your dependencies are compared with the published vulnerabilities the rule pack carries: 21 well-known ones in this repository's pack (Log4Shell, Spring4Shell, lodash, lxml…). A dependency the report does not name may still be affected by another one. The full pack (step 6) carries every published vulnerability of the five ecosystems, as of the day it was built: ask for a new one from time to time.
 - **Some findings have no automatic fix.** When the engine cannot rewrite your line safely, the report says so and gives the solution in words, with a generic example. Fixing the line is then up to you.
 - **A finding can be a false positive.** If a finding is wrong (the value is already checked, or cannot come from a user), hide it with 🚫 (step 10) and report it: it helps improve the rules.
 - **First installation takes time.** Installing Rust and the first build take about 10 to 15 minutes (steps 2 and 4). Later builds and analyses are much faster; a re-run on an unchanged project takes a few seconds thanks to the cache.
@@ -108,23 +108,18 @@ Windows:
 
 Every command below is run from the `sast-engine-public` folder, with the engine's full path.
 
-## Step 6: add the full catalog and the vulnerability database (optional)
+## Step 6: add the full catalog (optional)
 
-With the 38 demonstration rules, the analysis works at once but covers a small part of what the engine detects. A client of [CodeFixture](https://codefixture.com) receives two files:
+With the 38 demonstration rules, the analysis works at once but covers a small part of what the engine detects. A client of [CodeFixture](https://codefixture.com) receives one file, `rules.scapack`: the full catalog, more than 700 rules, and every published vulnerability (CVE, GHSA) of the five ecosystems, against which your dependencies are checked.
 
-| File | What it adds |
-|---|---|
-| `rules.scapack` | the full catalog, more than 700 rules |
-| `advisories.sadb` | the database of published vulnerabilities (CVE, GHSA), for checking your dependencies |
-
-Keep them in a folder of their own, outside `sast-engine-public`, so that updates (step 11) never meet a modified file. Then copy them next to the engine.
+Keep it in a folder of its own, outside `sast-engine-public`, so that updates (step 11) never meet a modified file. Then copy it next to the engine.
 
 macOS:
 
 ```bash
 mkdir -p ~/sast-engine-rules
-cp ~/Downloads/rules.scapack ~/Downloads/advisories.sadb ~/sast-engine-rules/
-cp ~/sast-engine-rules/rules.scapack ~/sast-engine-rules/advisories.sadb target/release/
+cp ~/Downloads/rules.scapack ~/sast-engine-rules/
+cp ~/sast-engine-rules/rules.scapack target/release/
 ./target/release/sast-engine list-rules | head -1
 ```
 
@@ -132,12 +127,12 @@ Windows:
 
 ```powershell
 mkdir ~\sast-engine-rules
-copy ~\Downloads\rules.scapack, ~\Downloads\advisories.sadb ~\sast-engine-rules\
-copy ~\sast-engine-rules\rules.scapack, ~\sast-engine-rules\advisories.sadb target\release\
+copy ~\Downloads\rules.scapack ~\sast-engine-rules\
+copy ~\sast-engine-rules\rules.scapack target\release\
 .\target\release\sast-engine.exe list-rules | Select-Object -First 1
 ```
 
-`list-rules` must now print more than 600 rules. Each build (steps 4 and 11) puts the demonstration pack back next to the engine: copy the full pack again after every build. Instead of copying the rules, you can also add `--rules ~/sast-engine-rules/rules.scapack` to each analysis; `advisories.sadb` must sit next to the engine.
+`list-rules` must now print more than 600 rules. Each build (steps 4 and 11) puts the demonstration pack back next to the engine: copy the full pack again after every build. Instead of copying the rules, you can also add `--rules ~/sast-engine-rules/rules.scapack` to each analysis.
 
 ## Step 7: describe your project (first run)
 
@@ -191,7 +186,7 @@ cd ~\sast-engine-public
 For a report in French, Spanish or German, replace `--lang en` with `--lang fr`, `--lang es` or `--lang de`.
 
 - `--lang` sets the language of the report: `en`, `fr`, `es` or `de`.
-- The versions pinned in your dependency files (`requirements.txt`, `package-lock.json`, `pom.xml`, `composer.lock`…) are compared with published vulnerabilities as soon as `advisories.sadb` sits next to the engine (step 6); the output names the database it read. Without that file, the dependencies are not checked.
+- When your project declares dependencies (`requirements.txt`, `package.json`, `pom.xml`, `composer.json`…), their pinned versions are compared with the published vulnerabilities the rule pack carries, offline; the output names the pack, the date of its data and its counts. A range such as `>=2.0` names no installed version and is not compared.
 
 The terminal first shows what was loaded, then the progress and a summary:
 
@@ -263,7 +258,7 @@ git pull
 cargo build --release
 ```
 
-`git pull` downloads only the new commits; `cargo build --release` rebuilds the engine, faster than the first time. Check with `--version`: the commit count must have grown. With the full catalog, copy `rules.scapack` and `advisories.sadb` next to the engine again (step 6). Ask CodeFixture for a new `advisories.sadb` from time to time: published vulnerabilities keep coming.
+`git pull` downloads only the new commits; `cargo build --release` rebuilds the engine, faster than the first time. Check with `--version`: the commit count must have grown. With the full catalog, copy `rules.scapack` next to the engine again (step 6). Ask CodeFixture for a new pack from time to time: published vulnerabilities keep coming, and the pack knows those of the day it was built.
 
 If `git pull` refuses because of local changes, `git stash` sets them aside and `git pull` then works (`git stash pop` brings them back). To match GitHub exactly and drop your local edits for good: `git fetch origin` then `git reset --hard origin/main`.
 
@@ -281,7 +276,7 @@ After the analysis, one line names each folder skipped this way and why. To anal
 
 ### Moving the engine
 
-The engine and `rules.scapack` (plus `advisories.sadb` if you have it) are all an analysis needs: copy them together to another folder and run the engine from anywhere. Without the pack beside it, the engine stops and names the file it looked for.
+The engine and `rules.scapack` are all an analysis needs: copy them together to another folder and run the engine from anywhere. Without the pack beside it, the engine stops and names the file it looked for.
 
 ### When something goes wrong
 
@@ -290,7 +285,7 @@ The engine and `rules.scapack` (plus `advisories.sadb` if you have it) are all a
 | `cargo: command not found` | close and reopen the terminal (step 2); on Windows, restart the session |
 | `linker 'link.exe' not found` (Windows) | the C++ build tools are missing: run the third `winget` line of step 2 |
 | the engine stops and names a missing `rules.scapack` | run `cargo build --release` again, or copy the pack next to the engine (step 6) |
-| dependencies are never checked | `advisories.sadb` is not next to the engine: step 6 |
+| dependencies are never checked | the project declares none in a file the engine reads (`requirements.txt`, `package.json`, `pom.xml`, `composer.json`, `.csproj`…), or `--quick` was given |
 | a language of your project is never checked | add it to `languages` in `audit.config.json` (step 7) |
 | `git pull` refuses | see the end of step 11 |
 

@@ -135,6 +135,7 @@ mod tests {
     fn finding(severity: &str, file: &str) -> ReportFinding {
         ReportFinding {
             rule_key: "r".to_string(),
+            rule_language: "python".to_string(),
             rule_name: "Rule".to_string(),
             category: "SECURITY".to_string(),
             severity: severity.to_string(),

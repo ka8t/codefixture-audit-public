@@ -1,0 +1,345 @@
+//! Phase B of the scan: the pattern pass.
+//!
+//! Runs every rule that reads one file at a time: regular expressions
+//! (`match`), file conditions (`requires`: content present or absent,
+//! folder, governance file nearby) and both combined. A rule only applies
+//! to the files of its own language (`language` of the rule). The taint
+//! rules are left to phase C (`taint`).
+//!
+//! Each file is independent of the others, so the pass runs in parallel
+//! per file; the findings keep the file then rule order, so the report is
+//! the one of a sequential run.
+//!
+//! The pass reuses the pattern cache of the previous scan (`scan_cache`,
+//! issue #183): a file keeps its findings when its bytes, the governance
+//! files around it and the loaded rules are those of the previous scan.
+//! The user's suppressions are applied after the cache, on every scan, so
+//! that suppressing a finding never needs the file to change.
+//!
+//! Before 2026-11-14 this pass was written inline in `run_scan`, where it
+//! could only be tested through a whole scan; the cache it uses had no
+//! test of its own.
+
+use std::collections::BTreeSet;
+
+use rayon::prelude::*;
+
+use super::{PassContext, ParsedFile, engine_finding_to_report, phase_label};
+use crate::project::suppress::{Suppressions, is_inline_ignored};
+use crate::report::exports::sarif::ReportFinding;
+use crate::scan::engine::Finding;
+use crate::scan::engine::dispatch::{DispatchOutcome, dispatch_rule};
+use crate::scan::engine::file_contains::governance_fingerprint;
+use crate::scan::scan_cache::{CacheStat, PatternCache, PatternFileState, sha256_hex};
+
+/// Name of the pattern pass in the cache statistics.
+const CACHE_STAT_NAME: &str = "patterns";
+
+/// Runs the pattern pass over the parsed files and adds its findings to
+/// `context.findings`. Returns the phase label, already translated, and
+/// the time the pass took, for the scan's phase timings.
+pub(super) fn run_pattern_pass(
+    parsed_files: &[ParsedFile],
+    rule_jsons: &[serde_json::Value],
+    context: &mut PassContext<'_>,
+) -> (String, std::time::Duration) {
+    let started = std::time::Instant::now();
+    let rules_hash = sha256_hex(serde_json::to_string(rule_jsons).unwrap_or_default().as_bytes());
+    let governance = governance_names(rule_jsons);
+    let cache_path = context.cache.map(|c| PatternCache::path(&c.dir));
+    let previous = context
+        .cache
+        .zip(cache_path.as_ref())
+        .and_then(|(c, p)| PatternCache::load(p, &c.key, &rules_hash));
+
+    let runs: Vec<FileRun> = parsed_files
+        .par_iter()
+        .map(|pf| run_file(pf, rule_jsons, &governance, previous.as_ref()))
+        .collect();
+    let (config, suppressions) = (context.config, context.suppressions);
+    let reportable: Vec<Vec<ReportFinding>> = parsed_files
+        .par_iter()
+        .zip(runs.par_iter())
+        .map(|(pf, run)| reportable_findings(pf, &run.state, rule_jsons, suppressions, &config.lang))
+        .collect();
+
+    if let Some((cache_context, path)) = context.cache.zip(cache_path.as_ref()) {
+        let mut next = PatternCache::new(cache_context.key.clone(), rules_hash);
+        let mut redone = 0;
+        for (pf, run) in parsed_files.iter().zip(runs) {
+            redone += usize::from(run.redone);
+            next.files.insert(pf.rel_path.clone(), run.state);
+        }
+        // Nothing redone: the cache on disk is already this one. A cache
+        // that cannot be written only costs the next scan its speed.
+        if previous.is_none() || redone > 0 {
+            let _ = next.save(path);
+        }
+        context.cache_stats.push(CacheStat {
+            language: CACHE_STAT_NAME.to_string(),
+            files: parsed_files.len(),
+            dirty: redone,
+            analysed: redone,
+            total: parsed_files.len(),
+        });
+    }
+    for findings in reportable {
+        context.findings.extend(findings);
+    }
+    (
+        phase_label(context.config, "scan_phase_b", "phase B (regex/file_contains)"),
+        started.elapsed(),
+    )
+}
+
+/// The governance file names any loaded rule looks for
+/// (`not_path_has_file`), sorted and without duplicates: whether they
+/// exist around a file is part of the file's cache key.
+fn governance_names(rule_jsons: &[serde_json::Value]) -> Vec<String> {
+    rule_jsons
+        .iter()
+        .filter_map(|r| r.get("file_contains")?.get("not_path_has_file")?.as_array())
+        .flatten()
+        .filter_map(|v| v.as_str().map(str::to_string))
+        .collect::<BTreeSet<String>>()
+        .into_iter()
+        .collect()
+}
+
+/// The pass's result for one file: its cache entry, and whether the rules
+/// ran on it (`redone`) or its entry came from the previous scan.
+struct FileRun {
+    state: PatternFileState,
+    redone: bool,
+}
+
+/// One file's findings before suppressions: those of the previous scan
+/// when its bytes and its governance files are unchanged, otherwise those
+/// of running the rules again.
+fn run_file(
+    pf: &ParsedFile,
+    rule_jsons: &[serde_json::Value],
+    governance: &[String],
+    previous: Option<&PatternCache>,
+) -> FileRun {
+    let hash = sha256_hex(&pf.source_bytes);
+    let governance = governance_fingerprint(&pf.filepath, governance);
+    if let Some(prior) = previous.and_then(|c| c.files.get(&pf.rel_path))
+        && prior.hash == hash
+        && prior.governance == governance
+    {
+        return FileRun { state: prior.clone(), redone: false };
+    }
+    FileRun {
+        state: PatternFileState { hash, governance, findings: rules_on_file(pf, rule_jsons) },
+        redone: true,
+    }
+}
+
+/// Runs the rules of the file's language on it, in rule order. Each
+/// finding carries the index of its rule in `rule_jsons`.
+fn rules_on_file(pf: &ParsedFile, rule_jsons: &[serde_json::Value]) -> Vec<(usize, Finding)> {
+    let mut findings = Vec::new();
+    for (index, rule_json) in rule_jsons.iter().enumerate() {
+        if rule_json.get("language").and_then(|v| v.as_str()) != Some(pf.language.rule_tag()) {
+            continue;
+        }
+        let DispatchOutcome::Findings(found) =
+            dispatch_rule(rule_json, pf.location(), &pf.all_lines, &pf.source_text)
+        else {
+            continue; // Taint/Ast/Hook: handled elsewhere (phase C) or out of scope.
+        };
+        findings.extend(found.into_iter().map(|f| (index, f)));
+    }
+    findings
+}
+
+/// The findings of one file that go into the report: those the user did
+/// not suppress (`.sca-suppress.json`) nor ignore inline (`# sca-ignore`
+/// on the line), as report findings.
+fn reportable_findings(
+    pf: &ParsedFile,
+    state: &PatternFileState,
+    rule_jsons: &[serde_json::Value],
+    suppressions: &Suppressions,
+    lang: &str,
+) -> Vec<ReportFinding> {
+    state
+        .findings
+        .iter()
+        .filter(|(_, f)| !suppressions.is_suppressed(&f.rule_id, &pf.rel_path, &f.code))
+        .filter(|(_, f)| !is_inline_ignored(&f.code, &f.rule_id))
+        .map(|(index, f)| {
+            engine_finding_to_report(f, &rule_jsons[*index], &pf.rel_path, &pf.source_lines_plain, lang)
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scan::orchestrator::{ScanConfig, parse_file};
+    use crate::scan::scan_cache::CacheContext;
+    use serde_json::json;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    /// A fresh project folder, with its cache folder inside.
+    fn project() -> PathBuf {
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!("patterns_pass_{}_{n}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// A line rule: `pattern` on every line of the files of `language`.
+    fn line_rule(id: &str, language: &str, pattern: &str) -> serde_json::Value {
+        json!({
+            "id": id, "language": language, "category": "security", "severity": "HIGH",
+            "patterns": [{"pattern": pattern, "match": "line"}],
+        })
+    }
+
+    /// A file rule that fires on every file of a `third_party/` folder
+    /// unless a `LICENSE` file sits next to it.
+    fn third_party_rule() -> serde_json::Value {
+        json!({
+            "id": "unreviewed_third_party", "language": "python", "category": "maintenance",
+            "severity": "LOW",
+            "file_contains": {"path_contains": ["third_party/"], "not_path_has_file": ["LICENSE"]},
+        })
+    }
+
+    /// What one pass run produced: the findings as `file:line:rule`, and
+    /// how many files it redid (`None` without cache).
+    struct PassRun {
+        findings: Vec<String>,
+        redone: Option<usize>,
+    }
+
+    /// Parses the files of `root` (as phase A does) and runs the pass.
+    fn run(root: &Path, files: &[&str], rules: &[serde_json::Value], suppress: &str, cached: bool) -> PassRun {
+        let parsed: Vec<_> = files
+            .iter()
+            .map(|f| parse_file(root, &root.join(f)).expect("parsable fixture").1)
+            .collect();
+        let config = ScanConfig { root: root.to_path_buf(), ..ScanConfig::default() };
+        let suppressions = Suppressions::load_from_json(suppress);
+        let cache = cached.then(|| CacheContext::prepare(&root.join("cache"), "en", root).unwrap());
+        let mut findings = Vec::new();
+        let mut cache_stats = Vec::new();
+        let mut context = PassContext {
+            config: &config,
+            suppressions: &suppressions,
+            cache: cache.as_ref(),
+            findings: &mut findings,
+            cache_stats: &mut cache_stats,
+        };
+        run_pattern_pass(&parsed, rules, &mut context);
+        PassRun {
+            findings: findings.iter().map(|f| format!("{}:{}:{}", f.file, f.line, f.rule_key)).collect(),
+            redone: cache_stats.iter().find(|s| s.language == CACHE_STAT_NAME).map(|s| s.analysed),
+        }
+    }
+
+    const NO_SUPPRESSION: &str = r#"{"suppressions": []}"#;
+
+    fn write(root: &Path, file: &str, content: &str) {
+        let path = root.join(file);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, content).unwrap();
+    }
+
+    #[test]
+    fn test_a_rule_only_applies_to_the_files_of_its_language() {
+        let root = project();
+        write(&root, "app.py", "eval(x)\n");
+        write(&root, "App.java", "class App { void m() { eval(x); } }\n");
+        let rules = [line_rule("py_eval", "python", r"eval\("), line_rule("java_eval", "java", r"eval\(")];
+        let run = run(&root, &["app.py", "App.java"], &rules, NO_SUPPRESSION, false);
+        assert_eq!(run.findings, ["app.py:1:py_eval", "App.java:1:java_eval"]);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn test_unchanged_files_are_reused_and_a_changed_file_is_redone() {
+        let root = project();
+        write(&root, "a.py", "eval(x)\n");
+        write(&root, "b.py", "print(x)\n");
+        let rules = [line_rule("py_eval", "python", r"eval\(")];
+        let files = ["a.py", "b.py"];
+
+        let first = run(&root, &files, &rules, NO_SUPPRESSION, true);
+        assert_eq!((first.findings.as_slice(), first.redone), (&["a.py:1:py_eval".to_string()][..], Some(2)));
+
+        let again = run(&root, &files, &rules, NO_SUPPRESSION, true);
+        assert_eq!((again.findings, again.redone), (first.findings.clone(), Some(0)), "nothing changed: all reused");
+
+        write(&root, "b.py", "print(x)\neval(y)\n");
+        let changed = run(&root, &files, &rules, NO_SUPPRESSION, true);
+        assert_eq!(changed.redone, Some(1), "only b.py redone");
+        assert_eq!(changed.findings, ["a.py:1:py_eval", "b.py:2:py_eval"]);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn test_a_governance_file_appearing_redoes_the_file_it_covers() {
+        // The file itself does not change: only the LICENSE next to it.
+        let root = project();
+        write(&root, "third_party/lib/util.py", "def helper():\n    return 2\n");
+        let rules = [third_party_rule()];
+        let files = ["third_party/lib/util.py"];
+
+        let before = run(&root, &files, &rules, NO_SUPPRESSION, true);
+        assert_eq!(before.findings, ["third_party/lib/util.py:1:unreviewed_third_party"]);
+
+        write(&root, "third_party/lib/LICENSE", "MIT\n");
+        let after = run(&root, &files, &rules, NO_SUPPRESSION, true);
+        assert_eq!((after.findings.len(), after.redone), (0, Some(1)), "the cached finding must not survive");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn test_changing_the_rules_redoes_every_file() {
+        let root = project();
+        write(&root, "a.py", "eval(x)\nexec(y)\n");
+        write(&root, "b.py", "exec(z)\n");
+        let files = ["a.py", "b.py"];
+        run(&root, &files, &[line_rule("py_eval", "python", r"eval\(")], NO_SUPPRESSION, true);
+
+        let new_rules = [line_rule("py_exec", "python", r"exec\(")];
+        let after = run(&root, &files, &new_rules, NO_SUPPRESSION, true);
+        assert_eq!(after.redone, Some(2));
+        assert_eq!(after.findings, ["a.py:2:py_exec", "b.py:1:py_exec"]);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn test_a_suppression_added_later_hides_a_finding_taken_from_the_cache() {
+        let root = project();
+        write(&root, "a.py", "eval(x)\n");
+        let rules = [line_rule("py_eval", "python", r"eval\(")];
+        run(&root, &["a.py"], &rules, NO_SUPPRESSION, true);
+
+        let suppress = r#"{"suppressions": [{"rule_key": "py_eval", "file": "a.py", "code_hash": null}]}"#;
+        let after = run(&root, &["a.py"], &rules, suppress, true);
+        assert_eq!((after.findings.len(), after.redone), (0, Some(0)), "reused from the cache, then suppressed");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn test_an_unreadable_cache_gives_the_full_result() {
+        let root = project();
+        write(&root, "a.py", "eval(x)\n");
+        let rules = [line_rule("py_eval", "python", r"eval\(")];
+        let first = run(&root, &["a.py"], &rules, NO_SUPPRESSION, true);
+
+        let context = CacheContext::prepare(&root.join("cache"), "en", &root).unwrap();
+        std::fs::write(PatternCache::path(&context.dir), b"not a cache").unwrap();
+        let after = run(&root, &["a.py"], &rules, NO_SUPPRESSION, true);
+        assert_eq!((after.findings, after.redone), (first.findings, Some(1)));
+        std::fs::remove_dir_all(&root).ok();
+    }
+}

@@ -22,17 +22,20 @@ use crate::report::exports::sarif::ReportFinding;
 use crate::report::findings_html::{CATEGORIES, category_icon, category_title};
 use crate::report::report_assets::load_template;
 use crate::report::text::escape;
+use crate::rules::identity::{RuleCatalog, RuleId};
 use crate::scan::orchestrator::{extract_i18n_block, rule_category};
 
 /// Computes the good-practice messages per category.
 pub fn compute_successes(
     findings: &[ReportFinding],
-    rule_catalog: &BTreeMap<String, Value>,
+    rule_catalog: &RuleCatalog,
     test_results: Option<&TestResults>,
     report_locale: &Value,
     lang: &str,
 ) -> BTreeMap<&'static str, Vec<String>> {
-    let fired_keys: HashSet<&str> = findings.iter().map(|f| f.rule_key.as_str()).collect();
+    // By identity: the JavaScript rule of a name is a verified practice
+    // when no JavaScript finding came from it, whatever the Python one did.
+    let fired: HashSet<RuleId> = findings.iter().map(ReportFinding::rule_id).collect();
     let mut successes: BTreeMap<&'static str, Vec<String>> = BTreeMap::new();
     let mut seen: HashSet<(&'static str, String)> = HashSet::new();
 
@@ -60,7 +63,7 @@ pub fn compute_successes(
         if severity != "HIGH" && severity != "CRITICAL" {
             continue;
         }
-        if fired_keys.contains(rule_id.as_str()) {
+        if fired.contains(rule_id) {
             continue;
         }
         let cat_raw = {
@@ -151,6 +154,7 @@ mod tests {
     fn finding(rule_key: &str, category: &str, severity: &str) -> ReportFinding {
         ReportFinding {
             rule_key: rule_key.to_string(),
+            rule_language: "python".to_string(),
             rule_name: rule_key.to_string(),
             category: category.to_string(),
             severity: severity.to_string(),
@@ -186,7 +190,7 @@ mod tests {
         let en = load_report_locale("en");
         let mut catalog = BTreeMap::new();
         catalog.insert(
-            "sql_injection".to_string(),
+            RuleId::new("python", "sql_injection"),
             rule(
                 "sql_injection",
                 "SECURITY",
@@ -206,7 +210,7 @@ mod tests {
         let en = load_report_locale("en");
         let mut catalog = BTreeMap::new();
         catalog.insert(
-            "sql_injection".to_string(),
+            RuleId::new("python", "sql_injection"),
             rule(
                 "sql_injection",
                 "SECURITY",
@@ -224,7 +228,7 @@ mod tests {
         let en = load_report_locale("en");
         let mut catalog = BTreeMap::new();
         catalog.insert(
-            "weak_crypto".to_string(),
+            RuleId::new("python", "weak_crypto"),
             rule("weak_crypto", "SECURITY", "MEDIUM", "No weak crypto"),
         );
         let successes = compute_successes(&[], &catalog, None, &en, "en");
