@@ -1,11 +1,11 @@
 //! Offline matching of the audited project's dependencies against the
-//! advisory database written by `tools/sast-advisories` (ADR-0035).
+//! advisory database written by `tools/codefixture-audit-advisories` (ADR-0035).
 //!
-//! **No network here.** `tools/sast-advisories` downloads published
+//! **No network here.** `tools/codefixture-audit-advisories` downloads published
 //! vulnerabilities (OSV) on its own schedule; this module only reads the
 //! database file it writes (`advisories.sadb`, container in
 //! `advisory_file.rs`, per-ecosystem payload in
-//! `tools/sast-advisories/src/format.rs`). This keeps the 2026-08-25
+//! `tools/codefixture-audit-advisories/src/format.rs`). This keeps the 2026-08-25
 //! decision that the engine never queries a public database while it
 //! scans: what changed is that the database now comes to the engine.
 //!
@@ -28,7 +28,7 @@ use serde::Deserialize;
 use crate::project::dependencies::Dependency;
 
 /// File layout version this engine understands — must match
-/// `FORMAT_VERSION` in `tools/sast-advisories/src/format.rs`.
+/// `FORMAT_VERSION` in `tools/codefixture-audit-advisories/src/format.rs`.
 const FORMAT_VERSION: u32 = 1;
 
 #[derive(Debug, Deserialize)]
@@ -37,7 +37,7 @@ struct EcosystemFile {
     advisories: Vec<Advisory>,
 }
 
-/// One vulnerability as stored by `sast-advisories`.
+/// One vulnerability as stored by `codefixture-audit-advisories`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Advisory {
     pub id: String,

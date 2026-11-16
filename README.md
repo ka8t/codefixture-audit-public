@@ -1,4 +1,4 @@
-# sast-engine
+# codefixture-audit
 
 Security scanner for source code by [CodeFixture](https://codefixture.com). It analyzes Python, Java, JavaScript/TypeScript, PHP, C#, HTML, YAML and Dockerfile sources, including data-flow (taint) analysis, and writes an HTML report.
 
@@ -20,18 +20,18 @@ Details and workarounds: [Known limits](INSTALLATION.md#known-limits) in the gui
 
 ## Analyse a folder
 
-Once the engine is built (see below), run from the `sast-engine-public` folder, replacing the path with the folder of your code:
+Once the engine is built (see below), run from the `codefixture-audit-public` folder, replacing the path with the folder of your code:
 
 macOS:
 
 ```bash
-./target/release/sast-engine scan /path/to/your/project --lang en
+./target/release/codefixture-audit scan /path/to/your/project --lang en
 ```
 
 Windows (PowerShell):
 
 ```powershell
-.\target\release\sast-engine.exe scan C:\path\to\your\project --lang en
+.\target\release\codefixture-audit.exe scan C:\path\to\your\project --lang en
 ```
 
 - `--lang` sets the report language: `en`, `fr`, `es` or `de`.
@@ -48,10 +48,10 @@ xcode-select --install
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 # close and reopen the Terminal, then:
 cd ~
-git clone https://github.com/ka8t/sast-engine-public.git
-cd sast-engine-public
+git clone https://github.com/ka8t/codefixture-audit-public.git
+cd codefixture-audit-public
 cargo build --release
-./target/release/sast-engine scan /path/to/your/project --lang en
+./target/release/codefixture-audit scan /path/to/your/project --lang en
 ```
 
 Windows (PowerShell):
@@ -62,10 +62,10 @@ winget install Rustlang.Rustup
 winget install Microsoft.VisualStudio.2022.BuildTools --override "--wait --passive --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
 # close and reopen PowerShell, then:
 cd ~
-git clone https://github.com/ka8t/sast-engine-public.git
-cd sast-engine-public
+git clone https://github.com/ka8t/codefixture-audit-public.git
+cd codefixture-audit-public
 cargo build --release
-.\target\release\sast-engine.exe scan C:\path\to\your\project --lang en
+.\target\release\codefixture-audit.exe scan C:\path\to\your\project --lang en
 ```
 
 [`INSTALLATION.md`](INSTALLATION.md) takes you step by step from download to a full analysis of your own code: installing the tools, building the engine, describing your project, running the analysis, reading the report (your code, the proposed fix, the data-flow path) and analysing again after a fix.
@@ -74,7 +74,7 @@ The sample rules come compiled into one file, `rules/rules.scapack`: the engine 
 
 ## Already installed?
 
-From your `sast-engine-public` folder:
+From your `codefixture-audit-public` folder:
 
 ```bash
 git pull

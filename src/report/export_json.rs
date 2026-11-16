@@ -7,7 +7,7 @@
 //! here does not need to be byte-for-byte compatible with the Python
 //! export (`sca/comparison.py::_export_json`, which serializes the
 //! full `Finding` dataclass with fields absent on the Rust side) —
-//! this is a loop internal to AuditRust (a Rust scan reads back a
+//! this is a loop internal to codefixture-audit (a Rust scan reads back a
 //! baseline written by a previous Rust scan), not an interoperability
 //! bridge with Python. Fields kept to the strict minimum needed by
 //! `comparison::compare_with_baseline` and the DB schema history:
@@ -159,7 +159,7 @@ mod tests {
 
     fn tmp_dir(label: &str) -> PathBuf {
         let dir =
-            std::env::temp_dir().join(format!("auditrust-export-{label}-{}", std::process::id()));
+            std::env::temp_dir().join(format!("codefixture-audit-export-{label}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }

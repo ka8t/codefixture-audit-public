@@ -2,7 +2,7 @@
 //! of `_load_db_credentials`/`_extract_schema_psycopg2`
 //! (`Audit/sca/database.py`).
 //!
-//! **New capability for AuditRust**: this is the first module in the
+//! **New capability for codefixture-audit**: this is the first module in the
 //! port that opens a network connection — to the **audited
 //! project's** database (credentials supplied by the operator via `.env`),
 //! not to a third-party service. A distinct category from the "no
@@ -300,7 +300,7 @@ mod tests {
 
     #[test]
     fn test_load_db_credentials_full_success() {
-        let tmp = std::env::temp_dir().join(format!("auditrust-test-{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("codefixture-audit-test-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
         std::fs::write(tmp.join(".env"), "DB_PASSWORD=hunter2\n").unwrap();
         let config = DbConfig {

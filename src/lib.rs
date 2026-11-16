@@ -1,4 +1,4 @@
-//! Library crate of `sast-engine`: everything except the command line,
+//! Library crate of `codefixture-audit`: everything except the command line,
 //! which lives in `main.rs`. One module per stage of the product:
 //!
 //! - [`scan`]: finds the files, runs the rules and the taint analysis.
@@ -21,4 +21,4 @@ pub mod scan;
 /// with uncommitted changes, `+unknown` without git. Computed by
 /// `build.rs` (`build_version::format_build_version`). Shown by
 /// `--version`, first on every scan, and in every report and export.
-pub const BUILD_VERSION: &str = env!("SAST_BUILD_VERSION");
+pub const BUILD_VERSION: &str = env!("CODEFIXTURE_AUDIT_BUILD_VERSION");

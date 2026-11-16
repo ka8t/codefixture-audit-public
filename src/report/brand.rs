@@ -174,7 +174,7 @@ mod tests {
 
     fn temp_dir(label: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "sast-engine-test-brand-{label}-{}-{}",
+            "codefixture-audit-test-brand-{label}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

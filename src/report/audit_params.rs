@@ -1,13 +1,13 @@
 //! HTML "audit parameters" section — port of
 //! `_generate_audit_params_summary` (`Audit/sca/report.py`).
 //!
-//! **Assumed simplifications vs Python** (AuditRust has no
+//! **Assumed simplifications vs Python** (codefixture-audit has no
 //! JSON-file-based configuration system, only CLI flags —
 //! see `orchestrator::ScanConfig`):
 //!   - **Categories**: Python displays an enabled/weighted badge per
 //!     category, driven by `enabled_categories`/`category_weights`
 //!     (project config, no CLI equivalent on the Python side either).
-//!     AuditRust has no such notion — the badge simply reflects
+//!     codefixture-audit has no such notion — the badge simply reflects
 //!     `only_category` (a single "active" category if filtered,
 //!     all 5 otherwise), weight always displayed as `×1`.
 //!   - **Scanned extensions**: derived from a static table
@@ -15,7 +15,7 @@
 //!     from the detected languages — not from a configurable
 //!     `self._py_exts`/`_js_exts` as on the Python side.
 //!   - **CLI options**: only the options that ACTUALLY exist
-//!     in `sast-engine scan` are listed (`--quick`/
+//!     in `codefixture-audit scan` are listed (`--quick`/
 //!     `--only-category`/`--disable-rule`/`--severity`/`--with-tests`/
 //!     `--with-deps`/`--lang`) — not `--fail-on-high`/`--sarif`/
 //!     `--sbom`/`--debug` (Python), which have no Rust equivalent as

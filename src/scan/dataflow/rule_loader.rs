@@ -154,7 +154,7 @@ pub fn regex_to_dotted_patterns(regex_str: &str) -> Vec<String> {
     // (`::method`) are normalized to `.` — same semantic role as dot
     // access in Python/Java/JS (member resolution), but absent from
     // the Python source (the original `regex_to_dotted_patterns` only
-    // handles `\.` since Audit has no PHP AST engine). AuditRust
+    // handles `\.` since Audit has no PHP AST engine). codefixture-audit
     // addition, beyond Python parity — without it, NO PHP rule
     // targeting a method call (`sink \->query\s*\(`, the natural form
     // in real PHP syntax) derives a usable "dotted" pattern, and

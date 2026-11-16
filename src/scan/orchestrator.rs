@@ -595,7 +595,7 @@ fn vulnerable_dependency_findings(
         deps.iter().map(|d| d.ecosystem.clone()).collect();
     let (db, errors) = advisories::load(file, &ecosystems);
     for error in errors {
-        eprintln!("[sast-engine] version rules skipped: {error}");
+        eprintln!("[codefixture-audit] version rules skipped: {error}");
     }
     let rank = |s: &str| match s {
         "CRITICAL" => 4,

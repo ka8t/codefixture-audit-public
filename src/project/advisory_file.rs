@@ -2,7 +2,7 @@
 //! ADR-0043): the layout of the editor's database `advisories.sadb` and
 //! of the version rules section of a rule pack.
 //!
-//! `tools/sast-advisories` writes the editor's database at the root of
+//! `tools/codefixture-audit-advisories` writes the editor's database at the root of
 //! the private repository. It is never delivered: `build.rs` and
 //! `rules pack` copy it, or the demo selection written from it, into the
 //! version rules section of a pack (`rules/pack_format.rs`), and a scan
@@ -24,7 +24,7 @@
 //! format, creation date, source, and per ecosystem its advisory count,
 //! the newest OSV `modified` date and where its gzip member sits in the
 //! body. Each member holds the JSON of one ecosystem as
-//! `sast-advisories` writes it (`tools/sast-advisories/src/format.rs`);
+//! `codefixture-audit-advisories` writes it (`tools/codefixture-audit-advisories/src/format.rs`);
 //! this module does not look inside.
 //!
 //! **Deterministic**: the same ecosystems give the same bytes. The
@@ -46,7 +46,7 @@ pub const MAGIC: &[u8; 4] = b"SADB";
 /// than misreading the file.
 pub const FORMAT_VERSION: u32 = 1;
 
-/// File name of the editor's database (ADR-0043): `sast-advisories`
+/// File name of the editor's database (ADR-0043): `codefixture-audit-advisories`
 /// writes it in its current folder by default, the root of the private
 /// repository, where `build.rs` reads it. The engine never looks for it.
 pub const FILE_NAME: &str = "advisories.sadb";

@@ -65,12 +65,12 @@ pub const DEMO_PACK_NAME: &str = "demo";
 
 /// Version rules of the full catalog (ADR-0043): the editor's advisory
 /// database, at the root of the private repository, written by
-/// `sast-advisories update` and never committed nor delivered.
+/// `codefixture-audit-advisories update` and never committed nor delivered.
 pub const FULL_VERSION_RULES_FILE: &str = "advisories.sadb";
 
 /// Version rules of the demo pack (ADR-0043), relative to the rules
 /// folder: a small selection of well-known vulnerabilities, committed,
-/// written by `sast-advisories demo` from the editor's database.
+/// written by `codefixture-audit-advisories demo` from the editor's database.
 pub const DEMO_VERSION_RULES_FILE: &str = "advisories/demo.sadb";
 
 /// Magic bytes at the start of every pack, version included: a future
@@ -136,7 +136,7 @@ pub fn demo_key() -> [u8; 32] {
 /// header without revealing it.
 pub fn key_fingerprint(key: &[u8; 32]) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(b"sast-engine-key-fingerprint-v1");
+    hasher.update(b"codefixture-audit-key-fingerprint-v1");
     hasher.update(key);
     hasher.finalize()[..8]
         .iter()
@@ -199,7 +199,7 @@ pub fn write_pack_with_key(
 fn seal(header_bytes: &[u8], section: &[u8], plain: &[u8], key: &[u8; 32]) -> Vec<u8> {
     let aad = [header_bytes, section].concat();
     let mut hasher = Sha256::new();
-    hasher.update(b"sast-engine-pack-nonce-v2");
+    hasher.update(b"codefixture-audit-pack-nonce-v2");
     hasher.update((aad.len() as u64).to_le_bytes());
     hasher.update(&aad);
     hasher.update(plain);
@@ -355,7 +355,7 @@ pub fn open_version_rules(bytes: &[u8]) -> Result<Option<Vec<u8>>, String> {
 
 /// Every `.sca` file under `root`, as `(path relative to root with `/`
 /// separators, source)` pairs sorted by path. Used by `build.rs` to pack
-/// `rules/builtin` and by `sast-engine rules pack`. A missing `root` gives
+/// `rules/builtin` and by `codefixture-audit rules pack`. A missing `root` gives
 /// an empty list; an unreadable file is an error naming it.
 pub fn collect_sca_sources(root: &Path) -> Result<Vec<RuleSource>, String> {
     fn walk(root: &Path, dir: &Path, out: &mut Vec<RuleSource>) -> Result<(), String> {
@@ -412,7 +412,7 @@ pub fn is_demo_rule(source: &str) -> bool {
 
 /// The demo rules of a catalog (ticket #153): the only selection of what
 /// the shared repository receives, used by `build.rs` for
-/// `rules-demo.scapack` and by `sast-engine rules pack --demo` for the
+/// `rules-demo.scapack` and by `codefixture-audit rules pack --demo` for the
 /// export, so both give the same pack byte for byte.
 pub fn demo_sources(files: &[RuleSource]) -> Vec<RuleSource> {
     files

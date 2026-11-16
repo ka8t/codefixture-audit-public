@@ -1,5 +1,5 @@
 [package]
-name = "sast-engine"
+name = "codefixture-audit"
 version = "0.1.0"
 edition = "2024"
 

@@ -1,7 +1,7 @@
 //! Puts the rule catalog pack `rules.scapack` next to the compiled
 //! binary (ADR-0040): the engine reads its rules at run time from that
 //! file, so `cargo build`/`cargo run`/the CLI tests need it beside
-//! `target/<profile>/sast-engine`. No rule is embedded in the binary, and
+//! `target/<profile>/codefixture-audit`. No rule is embedded in the binary, and
 //! the binary and its pack can be moved anywhere together.
 //!
 //! - In the private repository, `rules/builtin` holds the full catalog as
@@ -11,7 +11,7 @@
 //!   repository receives. The full pack is handed out by hand.
 //! - Version rules (ADR-0043): the full pack carries the editor's advisory
 //!   database `advisories.sadb`, at the repository root (written by
-//!   `sast-advisories update`, never committed); the demo pack carries
+//!   `codefixture-audit-advisories update`, never committed); the demo pack carries
 //!   the committed selection `rules/advisories/demo.sadb`. Both files are
 //!   copied into the pack as they are. Without them, the pack has no
 //!   version rules and the build says so.
@@ -19,7 +19,7 @@
 //!   `rules/rules.scapack`, written by `scripts/export_public_repo.sh`, is
 //!   copied as it is.
 //!
-//! Also exports `SAST_BUILD_VERSION` (ticket #149).
+//! Also exports `CODEFIXTURE_AUDIT_BUILD_VERSION` (ticket #149).
 
 use std::env;
 use std::fs;
@@ -49,7 +49,7 @@ fn main() {
     export_build_version(&manifest_dir);
 }
 
-/// Exports `SAST_BUILD_VERSION` (ticket #149, `src/build_version.rs`):
+/// Exports `CODEFIXTURE_AUDIT_BUILD_VERSION` (ticket #149, `src/build_version.rs`):
 /// the package version, commit count and short hash from git, `-dirty`
 /// when tracked files differ from the commit. Any git failure (git not
 /// installed, no repository) gives `+unknown`, never a build error.
@@ -87,7 +87,7 @@ fn export_build_version(manifest_dir: &str) {
         hash.as_deref(),
         dirty,
     );
-    println!("cargo:rustc-env=SAST_BUILD_VERSION={version}");
+    println!("cargo:rustc-env=CODEFIXTURE_AUDIT_BUILD_VERSION={version}");
 }
 
 /// Writes `rules.scapack` in the directory of the compiled binary.

@@ -2,7 +2,7 @@
 //! `AuditRunner._generate_successes` (`Audit/sca/runner.py`), 3
 //! sources. Unlike Python (computed during the scan, with the report
 //! language already fixed at that point via `self.lang`), computed
-//! here at HTML render time — this is the only place where AuditRust
+//! here at HTML render time — this is the only place where codefixture-audit
 //! knows the report language (`ScanConfig`/`run_scan` are
 //! language-agnostic).
 //!

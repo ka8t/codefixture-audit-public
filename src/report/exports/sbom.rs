@@ -185,7 +185,7 @@ mod tests {
             dep("monolog/monolog", None, "Packagist"),
             dep("weird", Some("1"), "Cargo"),
         ];
-        let sbom = build_dependency_sbom(&deps, "p", "", "sast-engine", "0.1.0", "t");
+        let sbom = build_dependency_sbom(&deps, "p", "", "codefixture-audit", "0.1.0", "t");
         let purls: Vec<&str> = sbom.components.iter().map(|c| c.purl.as_str()).collect();
         assert_eq!(
             purls,
@@ -207,7 +207,7 @@ mod tests {
         let mut report = SbomReport::new(
             "mon-projet",
             "1.0",
-            "sast-engine",
+            "codefixture-audit",
             "0.1.0",
             "2026-08-24T12:00:00Z",
         );
@@ -232,7 +232,7 @@ mod tests {
 
     #[test]
     fn test_empty_report_has_zero_components() {
-        let report = SbomReport::new("p", "1.0", "sast-engine", "0.1.0", "2026-08-24T12:00:00Z");
+        let report = SbomReport::new("p", "1.0", "codefixture-audit", "0.1.0", "2026-08-24T12:00:00Z");
         assert!(report.components.is_empty());
     }
 

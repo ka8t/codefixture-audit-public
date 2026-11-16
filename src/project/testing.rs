@@ -8,12 +8,12 @@
 //! `ProcessPoolExecutor` parallelization, retries) — this isn't a
 //! client-facing feature, it's Audit's **internal** QA tooling
 //! that runs Audit against its own fixture corpus to validate the
-//! quality of its rules. On the AuditRust side,
+//! quality of its rules. On the codefixture-audit side,
 //! this same discipline already exists natively via `cargo test` and
 //! `tests/fixtures/sca/` (100% pass rate tracked as a gauge). Reimplementing
 //! this machinery as a feature of the distributed binary
 //! would duplicate this discipline with no clear benefit for an
-//! end user of `sast-engine scan` — to revisit only if
+//! end user of `codefixture-audit scan` — to revisit only if
 //! an explicit `--self-test` mode is requested.
 //!
 //! Runs arbitrary code from the audited project (its own test
@@ -366,7 +366,7 @@ mod tests {
 
     #[test]
     fn test_auto_detect_python_pytest_dir() {
-        let tmp = std::env::temp_dir().join(format!("auditrust-testdetect-{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("codefixture-audit-testdetect-{}", std::process::id()));
         std::fs::create_dir_all(tmp.join("tests")).unwrap();
         let cmd = auto_detect_test_command(&tmp, &["python".to_string()]);
         assert!(cmd.is_some());
@@ -377,7 +377,7 @@ mod tests {
     #[test]
     fn test_auto_detect_no_match_returns_none() {
         let tmp =
-            std::env::temp_dir().join(format!("auditrust-testdetect-empty-{}", std::process::id()));
+            std::env::temp_dir().join(format!("codefixture-audit-testdetect-empty-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
         let cmd = auto_detect_test_command(&tmp, &["python".to_string()]);
         assert!(cmd.is_none());

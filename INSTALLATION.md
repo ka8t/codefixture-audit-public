@@ -74,11 +74,11 @@ Each command prints a version number. If one says "command not found", reopen th
 
 ```bash
 cd ~
-git clone https://github.com/ka8t/sast-engine-public.git
-cd sast-engine-public
+git clone https://github.com/ka8t/codefixture-audit-public.git
+cd codefixture-audit-public
 ```
 
-`git clone` copies the repository into a new folder, `sast-engine-public`, in your home folder. Every following command runs from that folder.
+`git clone` copies the repository into a new folder, `codefixture-audit-public`, in your home folder. Every following command runs from that folder.
 
 ## Step 4: build the engine
 
@@ -86,53 +86,53 @@ cd sast-engine-public
 cargo build --release
 ```
 
-The first build downloads the Rust libraries the engine uses and compiles everything: 3 to 10 minutes depending on the machine. It ends with a `Finished` line. The engine is then `target/release/sast-engine` (`target\release\sast-engine.exe` on Windows), next to the rule pack `target/release/rules.scapack`.
+The first build downloads the Rust libraries the engine uses and compiles everything: 3 to 10 minutes depending on the machine. It ends with a `Finished` line. The engine is then `target/release/codefixture-audit` (`target\release\codefixture-audit.exe` on Windows), next to the rule pack `target/release/rules.scapack`.
 
 ## Step 5: check the build
 
 macOS:
 
 ```bash
-./target/release/sast-engine --version
-./target/release/sast-engine list-rules | head -1
+./target/release/codefixture-audit --version
+./target/release/codefixture-audit list-rules | head -1
 ```
 
 Windows:
 
 ```powershell
-.\target\release\sast-engine.exe --version
-.\target\release\sast-engine.exe list-rules | Select-Object -First 1
+.\target\release\codefixture-audit.exe --version
+.\target\release\codefixture-audit.exe list-rules | Select-Object -First 1
 ```
 
-`--version` prints the build, for example `sast-engine 0.1.0+42.c5be809`: the commit count and short commit hash say exactly which code you built. Every analysis prints it on its first line too. `list-rules` prints the number of rules on its first line: 26 for the demonstration rules this repository ships.
+`--version` prints the build, for example `codefixture-audit 0.1.0+42.c5be809`: the commit count and short commit hash say exactly which code you built. Every analysis prints it on its first line too. `list-rules` prints the number of rules on its first line: 26 for the demonstration rules this repository ships.
 
-Every command below is run from the `sast-engine-public` folder, with the engine's full path.
+Every command below is run from the `codefixture-audit-public` folder, with the engine's full path.
 
 ## Step 6: add the full catalog (optional)
 
 With the 38 demonstration rules, the analysis works at once but covers a small part of what the engine detects. A client of [CodeFixture](https://codefixture.com) receives one file, `rules.scapack`: the full catalog, more than 700 rules, and every published vulnerability (CVE, GHSA) of the five ecosystems, against which your dependencies are checked.
 
-Keep it in a folder of its own, outside `sast-engine-public`, so that updates (step 11) never meet a modified file. Then copy it next to the engine.
+Keep it in a folder of its own, outside `codefixture-audit-public`, so that updates (step 11) never meet a modified file. Then copy it next to the engine.
 
 macOS:
 
 ```bash
-mkdir -p ~/sast-engine-rules
-cp ~/Downloads/rules.scapack ~/sast-engine-rules/
-cp ~/sast-engine-rules/rules.scapack target/release/
-./target/release/sast-engine list-rules | head -1
+mkdir -p ~/codefixture-audit-rules
+cp ~/Downloads/rules.scapack ~/codefixture-audit-rules/
+cp ~/codefixture-audit-rules/rules.scapack target/release/
+./target/release/codefixture-audit list-rules | head -1
 ```
 
 Windows:
 
 ```powershell
-mkdir ~\sast-engine-rules
-copy ~\Downloads\rules.scapack ~\sast-engine-rules\
-copy ~\sast-engine-rules\rules.scapack target\release\
-.\target\release\sast-engine.exe list-rules | Select-Object -First 1
+mkdir ~\codefixture-audit-rules
+copy ~\Downloads\rules.scapack ~\codefixture-audit-rules\
+copy ~\codefixture-audit-rules\rules.scapack target\release\
+.\target\release\codefixture-audit.exe list-rules | Select-Object -First 1
 ```
 
-`list-rules` must now print more than 600 rules. Each build (steps 4 and 11) puts the demonstration pack back next to the engine: copy the full pack again after every build. Instead of copying the rules, you can also add `--rules ~/sast-engine-rules/rules.scapack` to each analysis.
+`list-rules` must now print more than 600 rules. Each build (steps 4 and 11) puts the demonstration pack back next to the engine: copy the full pack again after every build. Instead of copying the rules, you can also add `--rules ~/codefixture-audit-rules/rules.scapack` to each analysis.
 
 ## Step 7: describe your project (first run)
 
@@ -141,15 +141,15 @@ The first time you analyse a project, the engine asks you what to analyse and wr
 macOS:
 
 ```bash
-cd ~/sast-engine-public
-./target/release/sast-engine scan /path/to/your/project --lang en
+cd ~/codefixture-audit-public
+./target/release/codefixture-audit scan /path/to/your/project --lang en
 ```
 
 Windows:
 
 ```powershell
-cd ~\sast-engine-public
-.\target\release\sast-engine.exe scan C:\path\to\your\project --lang en
+cd ~\codefixture-audit-public
+.\target\release\codefixture-audit.exe scan C:\path\to\your\project --lang en
 ```
 
 It asks whether to analyse the whole folder or some sub-folders, and which folders to exclude. It then shows the file with the languages it detected, and writes it once you confirm. Nothing is analysed during this step: run the same command again for the analysis (step 8).
@@ -172,15 +172,15 @@ For a complete analysis, in English:
 macOS:
 
 ```bash
-cd ~/sast-engine-public
-./target/release/sast-engine scan /path/to/your/project --lang en
+cd ~/codefixture-audit-public
+./target/release/codefixture-audit scan /path/to/your/project --lang en
 ```
 
 Windows:
 
 ```powershell
-cd ~\sast-engine-public
-.\target\release\sast-engine.exe scan C:\path\to\your\project --lang en
+cd ~\codefixture-audit-public
+.\target\release\codefixture-audit.exe scan C:\path\to\your\project --lang en
 ```
 
 For a report in French, Spanish or German, replace `--lang en` with `--lang fr`, `--lang es` or `--lang de`.
@@ -191,17 +191,17 @@ For a report in French, Spanish or German, replace `--lang en` with `--lang fr`,
 The terminal first shows what was loaded, then the progress and a summary:
 
 ```text
-[sast-engine] sast-engine 0.1.0+42.c5be809
-[sast-engine] Scope (audit.config.json): include src/; exclude 7 default patterns
-[sast-engine] Analysis in progress...
-[sast-engine] Rules: 166/708 rule file(s) kept for the project's languages, from the pack /…/target/release/rules.scapack
-[sast-engine] 166 rule(s) loaded for languages: dockerfile, python
+[codefixture-audit] codefixture-audit 0.1.0+42.c5be809
+[codefixture-audit] Scope (audit.config.json): include src/; exclude 7 default patterns
+[codefixture-audit] Analysis in progress...
+[codefixture-audit] Rules: 166/708 rule file(s) kept for the project's languages, from the pack /…/target/release/rules.scapack
+[codefixture-audit] 166 rule(s) loaded for languages: dockerfile, python
 …
-[sast-engine] Report generated : /path/to/your/project/audit-reports/SCA-REPORT-2026-11-14-09-47.html
-[sast-engine] 601 file(s) scanned, 101913 line(s) of code, 2960 finding(s)
+[codefixture-audit] Report generated : /path/to/your/project/audit-reports/SCA-REPORT-2026-11-14-09-47.html
+[codefixture-audit] 601 file(s) scanned, 101913 line(s) of code, 2960 finding(s)
 ```
 
-Options are added to the same command, for example `./target/release/sast-engine scan /path/to/your/project --lang en --no-cache`:
+Options are added to the same command, for example `./target/release/codefixture-audit scan /path/to/your/project --lang en --no-cache`:
 
 | Option | Effect |
 |---|---|
@@ -209,7 +209,7 @@ Options are added to the same command, for example `./target/release/sast-engine
 | `--no-cache` | analyses everything again (see step 10) |
 | `--format sarif` | writes a SARIF file instead of the HTML report, for an IDE or a code platform; it is printed to the terminal, redirect it with `> result.sarif` |
 | `--exclude 'tests/'` | skips more files (repeatable) |
-| `--only-category security` | analyses one category only (the list: `./target/release/sast-engine list-rules`) |
+| `--only-category security` | analyses one category only (the list: `./target/release/codefixture-audit list-rules`) |
 | `--quick` | skips the dependency check, for a faster run |
 | `--rules <file>` | uses another rule pack than the one next to the engine |
 
@@ -251,7 +251,7 @@ A suppression applies to that rule, file and line content: if the line changes, 
 
 ## Step 11: update the engine
 
-From the `sast-engine-public` folder:
+From the `codefixture-audit-public` folder:
 
 ```bash
 git pull

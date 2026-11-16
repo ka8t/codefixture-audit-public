@@ -84,7 +84,7 @@ pub struct ReportData<'f> {
     pub total_findings: usize,
     /// Always 0 for now: tracking "good practices" (`_add_success`,
     /// scattered across the `audit_*` methods of `runner.py`) is not
-    /// yet ported on the AuditRust side — a separate effort, not just
+    /// yet ported on the codefixture-audit side — a separate effort, not just
     /// `report.py`.
     pub total_successes: usize,
     pub total_business: usize,

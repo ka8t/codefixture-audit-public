@@ -6,7 +6,7 @@
 //! `--version` always printed `0.1.0`, which is never bumped between
 //! releases. The commit count grows with every commit without any manual
 //! step; the hash names the exact code. `build.rs` computes the parts with
-//! git and exports the result as `SAST_BUILD_VERSION`; this file is shared
+//! git and exports the result as `CODEFIXTURE_AUDIT_BUILD_VERSION`; this file is shared
 //! with it through `#[path]`, so the formatting is tested here.
 
 /// Formats the build version. `commits` and `hash` come from git; when

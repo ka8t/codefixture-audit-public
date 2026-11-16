@@ -10,7 +10,7 @@
 //!   files laid out by language (`<language>/<category>/<rule>.sca`), for
 //!   development and tests.
 //!
-//! The custom rules folder (`~/.sast-engine/custom-rules`) is a plain
+//! The custom rules folder (`~/.codefixture-audit/custom-rules`) is a plain
 //! folder read in addition, labelled as the client's own rules.
 //!
 //! A scan only keeps the rule files of its target languages
@@ -450,7 +450,7 @@ pub fn duplicate_identities(files: &[RuleSource]) -> Vec<(RuleId, String, String
     duplicates
 }
 
-/// Listing metadata of one catalog rule, for `sast-engine list-rules`.
+/// Listing metadata of one catalog rule, for `codefixture-audit list-rules`.
 #[derive(Debug, Clone)]
 pub struct RuleListing {
     /// Rule identity, written `language/name` (`RuleId`).

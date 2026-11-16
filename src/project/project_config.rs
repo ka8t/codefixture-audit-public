@@ -455,7 +455,7 @@ pub fn read_languages_config(root: &Path) -> Option<LanguagesConfig> {
 }
 
 /// Top-level sections deliberately not supported by
-/// AuditRust as of today — ticket #43/spec #27. CLOSED and
+/// codefixture-audit as of today — ticket #43/spec #27. CLOSED and
 /// exhaustive list (no heuristic detection of "unknown key", which
 /// would produce false positives on future legitimate keys): `rules`
 /// (ticket #40), `categories` (ticket #41), `thresholds` (ticket #42)

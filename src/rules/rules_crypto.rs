@@ -62,7 +62,7 @@ fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
 /// HKDF salt of the embedded catalog — key derived from a shared root
 /// secret, identical across every binary. Encryption only prevents
 /// trivial extraction via `strings`.
-pub const SALT_DEMO_UNIVERSAL: &[u8] = b"sast_engine_demo_universal_v1";
+pub const SALT_DEMO_UNIVERSAL: &[u8] = b"codefixture_audit_demo_universal_v1";
 
 /// Root secret for the "universal" key of the embedded rule catalog
 /// (ticket #65) — fixed, identical in every build of the binary.
@@ -85,7 +85,7 @@ pub const SALT_DEMO_UNIVERSAL: &[u8] = b"sast_engine_demo_universal_v1";
 /// attacker willing to spend a few dozen minutes. Never present this
 /// mechanism as stronger protection than that in a
 /// commercial/support context.
-pub(crate) const CATALOG_ROOT_SECRET: &[u8] = b"sast-engine-embedded-rules-catalog-root-v1";
+pub(crate) const CATALOG_ROOT_SECRET: &[u8] = b"codefixture-audit-embedded-rules-catalog-root-v1";
 
 /// HKDF `info` parameter (RFC 5869) — inherited as-is from Python
 /// (`derive_key` there literally references the AEAD algorithm used

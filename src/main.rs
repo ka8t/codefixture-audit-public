@@ -1,4 +1,4 @@
-//! CLI for `sast-engine` (Step 5.1/5.2, Decision #7 for exit codes).
+//! CLI for `codefixture-audit` (Step 5.1/5.2, Decision #7 for exit codes).
 //! Compatibility contract: `0` remains the only success code (any
 //! script that tests `$? != 0` keeps working identically); `1`/`2`/`4`
 //! refine the cause for scripts that want to distinguish it.
@@ -16,14 +16,14 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
-use sast_engine::report::brand::{
+use codefixture_audit::report::brand::{
     Brand, brand_style_block, effective_company_name, effective_prefix, effective_tool_name,
     effective_website_url, inject_brand_style, load_brand_file,
 };
-use sast_engine::report::compliance_html::HealthThresholds;
-use sast_engine::report::exports::sarif::build_sarif_report;
-use sast_engine::report::html::{ReportContext, generate_html};
-use sast_engine::scan::orchestrator::{ScanConfig, ScanReport, run_scan};
+use codefixture_audit::report::compliance_html::HealthThresholds;
+use codefixture_audit::report::exports::sarif::build_sarif_report;
+use codefixture_audit::report::html::{ReportContext, generate_html};
+use codefixture_audit::scan::orchestrator::{ScanConfig, ScanReport, run_scan};
 
 
 /// Exclusions applied to every scan — same list as
@@ -49,7 +49,7 @@ use sast_engine::scan::orchestrator::{ScanConfig, ScanReport, run_scan};
 ///
 /// The list lives in the library (`project_config::DEFAULT_SCAN_EXCLUDES`)
 /// so that every caller of `run_scan` skips the same folders.
-const DEFAULT_EXCLUDES: &[&str] = sast_engine::project::project_config::DEFAULT_SCAN_EXCLUDES;
+const DEFAULT_EXCLUDES: &[&str] = codefixture_audit::project::project_config::DEFAULT_SCAN_EXCLUDES;
 
 /// Default report directory, relative to the scanned folder (ticket
 /// #133, 2026-11-09). **Deliberate deviation from Python**, which writes
@@ -128,12 +128,12 @@ fn resolve_project_paths(
 ) -> (Vec<String>, Vec<String>, PathsOrigin) {
     // Prompt messages in the `--lang` language (ticket #124 — they were
     // hard-coded in French).
-    let say = |key: &str| sast_engine::i18n::t(script_locale, key);
+    let say = |key: &str| codefixture_audit::i18n::t(script_locale, key);
 
-    match sast_engine::project::project_config::load_config_json(root) {
+    match codefixture_audit::project::project_config::load_config_json(root) {
         Ok(Some(_)) => {
             let (include, exclude) =
-                sast_engine::project::project_config::read_paths_config(root).unwrap_or_default();
+                codefixture_audit::project::project_config::read_paths_config(root).unwrap_or_default();
             let include = if include.is_empty() {
                 vec![".".to_string()]
             } else {
@@ -147,7 +147,7 @@ fn resolve_project_paths(
         }
         Err(error) => {
             emit_warning(&format!(
-                "[sast-engine] {}",
+                "[codefixture-audit] {}",
                 say("config_invalid")
                     .replace(
                         "{path}",
@@ -266,14 +266,14 @@ fn resolve_rules_path(
 ) -> Result<PathBuf, ExitCode> {
     let fail = |key: &str, path: &Path| {
         emit_error(
-            &sast_engine::i18n::t(script_locale, key)
+            &codefixture_audit::i18n::t(script_locale, key)
                 .replace("{path}", &path.display().to_string()),
         );
         Err(ExitCode::from(2))
     };
     match rules {
         Some(path) if path.is_dir() && RULE_FOLDERS_ACCEPTED => {
-            if sast_engine::rules::catalog::has_rule_files(&path) {
+            if codefixture_audit::rules::catalog::has_rule_files(&path) {
                 Ok(path)
             } else {
                 fail("scan_no_rule_files", &path)
@@ -283,8 +283,8 @@ fn resolve_rules_path(
         Some(path) if path.is_file() => Ok(path),
         Some(path) => fail("scan_invalid_rules_dir", &path),
         None => {
-            let pack = sast_engine::rules::catalog::default_pack_path()
-                .unwrap_or_else(|| PathBuf::from(sast_engine::rules::pack_format::PACK_FILE_NAME));
+            let pack = codefixture_audit::rules::catalog::default_pack_path()
+                .unwrap_or_else(|| PathBuf::from(codefixture_audit::rules::pack_format::PACK_FILE_NAME));
             if pack.is_file() {
                 Ok(pack)
             } else {
@@ -299,10 +299,10 @@ fn resolve_rules_path(
 fn read_rules_or_exit(
     path: &Path,
     script_locale: &serde_json::Value,
-) -> Result<Vec<sast_engine::rules::catalog::RuleSource>, ExitCode> {
-    sast_engine::rules::catalog::read_all_rule_sources(path).map_err(|error| {
+) -> Result<Vec<codefixture_audit::rules::catalog::RuleSource>, ExitCode> {
+    codefixture_audit::rules::catalog::read_all_rule_sources(path).map_err(|error| {
         emit_error(
-            &sast_engine::i18n::t(script_locale, "rules_open_error")
+            &codefixture_audit::i18n::t(script_locale, "rules_open_error")
                 .replace("{path}", &path.display().to_string())
                 .replace("{error}", &error),
         );
@@ -317,10 +317,10 @@ fn read_rules_or_exit(
 /// supported language: the scan then reads the rules of the languages of
 /// the files it finds.
 fn declared_rule_languages(root: &Path, say: impl Fn(&str) -> String) -> Option<Vec<String>> {
-    let config = sast_engine::project::project_config::read_languages_config(root)?;
+    let config = codefixture_audit::project::project_config::read_languages_config(root)?;
     if !config.unknown.is_empty() {
         emit_warning(&format!(
-            "[sast-engine] {}",
+            "[codefixture-audit] {}",
             say("scan_languages_unknown").replace("{languages}", &config.unknown.join(", "))
         ));
     }
@@ -333,8 +333,8 @@ fn declared_rule_languages(root: &Path, say: impl Fn(&str) -> String) -> Option<
 /// pack or folder path; last, the number of rules kept and the languages
 /// they cover.
 fn rule_source_lines(report: &ScanReport, script_locale: &serde_json::Value) -> Vec<String> {
-    use sast_engine::rules::catalog::RuleSourceKind;
-    let say = |key: &str| sast_engine::i18n::t(script_locale, key);
+    use codefixture_audit::rules::catalog::RuleSourceKind;
+    let say = |key: &str| codefixture_audit::i18n::t(script_locale, key);
     let mut lines: Vec<String> = report
         .rule_sources
         .iter()
@@ -366,10 +366,10 @@ fn rule_source_lines(report: &ScanReport, script_locale: &serde_json::Value) -> 
 /// word.
 fn skipped_dirs_line(
     root: &Path,
-    skipped: &[sast_engine::scan::discovery::SkippedDir],
+    skipped: &[codefixture_audit::scan::discovery::SkippedDir],
     say: impl Fn(&str) -> String,
 ) -> Option<String> {
-    use sast_engine::scan::discovery::SkippedDirKind;
+    use codefixture_audit::scan::discovery::SkippedDirKind;
     if skipped.is_empty() {
         return None;
     }
@@ -429,10 +429,10 @@ fn with_default_excludes(project_excludes: Vec<String>) -> Vec<String> {
 /// read with the date of its data and its advisories per ecosystem, or
 /// why the dependencies were not compared with published vulnerabilities.
 fn version_rules_line(
-    status: &sast_engine::scan::orchestrator::VersionRulesStatus,
+    status: &codefixture_audit::scan::orchestrator::VersionRulesStatus,
     say: impl Fn(&str) -> String,
 ) -> (bool, String) {
-    use sast_engine::scan::orchestrator::VersionRulesStatus;
+    use codefixture_audit::scan::orchestrator::VersionRulesStatus;
     match status {
         VersionRulesStatus::Read {
             pack,
@@ -479,7 +479,7 @@ fn print_phase_progress(label: &str, elapsed: std::time::Duration) {
 /// `print_phase_progress` (kept separate so its format is testable
 /// without capturing stderr).
 fn phase_progress_line(label: &str, elapsed: std::time::Duration) -> String {
-    format!("[sast-engine]   {label} : {}", format_duration(elapsed))
+    format!("[codefixture-audit]   {label} : {}", format_duration(elapsed))
 }
 
 /// Human-readable duration for the console (ticket #135): `850 ms`
@@ -505,7 +505,7 @@ fn format_duration(d: std::time::Duration) -> String {
 }
 
 /// `scan --log-format json` (ticket #92): every console line becomes one
-/// JSON object instead of `[sast-engine] …` text. Process-wide because
+/// JSON object instead of `[codefixture-audit] …` text. Process-wide because
 /// the console helpers below are free functions called from everywhere
 /// (and from a plain `fn` callback, `print_phase_progress`); set once at
 /// the start of `run_scan_command`, before the first message.
@@ -521,7 +521,7 @@ enum LogLevel {
 
 /// Writes one single-line JSON log event to stderr: `timestamp` (UTC,
 /// RFC 3339, milliseconds), `level`, `message` (without the
-/// `[sast-engine]` text prefix), plus `duration_ms` for a finished
+/// `[codefixture-audit]` text prefix), plus `duration_ms` for a finished
 /// phase. Built with `serde_json`, so any message text is escaped.
 fn emit_json_line(level: LogLevel, message: &str, duration_ms: Option<serde_json::Value>) {
     let level = match level {
@@ -531,7 +531,7 @@ fn emit_json_line(level: LogLevel, message: &str, duration_ms: Option<serde_json
     };
     let message = message
         .trim()
-        .strip_prefix("[sast-engine]")
+        .strip_prefix("[codefixture-audit]")
         .unwrap_or(message.trim())
         .trim();
     let mut event = serde_json::json!({
@@ -593,12 +593,12 @@ mod tests {
 
     #[test]
     fn test_rerun_command_is_the_typed_command_ready_to_copy() {
-        let args = ["./target/release/sast-engine", "scan", "/Users/me/My Project", "--lang", "fr"]
+        let args = ["./target/release/codefixture-audit", "scan", "/Users/me/My Project", "--lang", "fr"]
             .iter()
             .map(|s| s.to_string());
         assert_eq!(
             rerun_command(args),
-            "./target/release/sast-engine scan '/Users/me/My Project' --lang fr"
+            "./target/release/codefixture-audit scan '/Users/me/My Project' --lang fr"
         );
     }
 
@@ -626,9 +626,9 @@ mod tests {
     /// checked.
     #[test]
     fn test_version_rules_line_names_the_pack_or_says_not_checked() {
-        use sast_engine::scan::orchestrator::VersionRulesStatus;
-        let en = sast_engine::i18n::load_script_locale("en");
-        let say = |k: &str| sast_engine::i18n::t(&en, k);
+        use codefixture_audit::scan::orchestrator::VersionRulesStatus;
+        let en = codefixture_audit::i18n::load_script_locale("en");
+        let say = |k: &str| codefixture_audit::i18n::t(&en, k);
         let (warning, line) = version_rules_line(
             &VersionRulesStatus::Read {
                 pack: PathBuf::from("/x/rules.scapack"),
@@ -679,9 +679,9 @@ mod tests {
     /// their reason, cut past `SCOPE_LIST_MAX`; nothing skipped, no line.
     #[test]
     fn test_skipped_dirs_line_names_folders_and_reasons() {
-        use sast_engine::scan::discovery::SkippedDirKind;
-        let locale = sast_engine::i18n::load_script_locale("en");
-        let say = |key: &str| sast_engine::i18n::t(&locale, key);
+        use codefixture_audit::scan::discovery::SkippedDirKind;
+        let locale = codefixture_audit::i18n::load_script_locale("en");
+        let say = |key: &str| codefixture_audit::i18n::t(&locale, key);
         let root = Path::new("/p");
         let skipped = vec![
             (root.join("docs"), SkippedDirKind::Documentation),
@@ -720,7 +720,7 @@ mod tests {
         std::fs::create_dir_all(&empty).unwrap();
         let pack = parent.join("rules.scapack");
         std::fs::write(&pack, b"any file: opened at scan time").unwrap();
-        let locale = sast_engine::i18n::load_script_locale("en");
+        let locale = codefixture_audit::i18n::load_script_locale("en");
 
         let folder = resolve_rules_path(Some(builtin_rules_dir()), &locale);
         let file = resolve_rules_path(Some(pack.clone()), &locale);
@@ -740,7 +740,7 @@ mod tests {
     fn test_phase_progress_line_and_print() {
         let elapsed = std::time::Duration::from_millis(1_250);
         let line = phase_progress_line("[2/4] phase A", elapsed);
-        assert_eq!(line, "[sast-engine]   [2/4] phase A : 1.2 s");
+        assert_eq!(line, "[codefixture-audit]   [2/4] phase A : 1.2 s");
         // Writes the same line to stderr; must not panic.
         print_phase_progress("[2/4] phase A", elapsed);
     }
@@ -768,7 +768,7 @@ mod tests {
     /// file, no file.
     #[test]
     fn test_resolve_project_paths_branches() {
-        let locale = sast_engine::i18n::load_script_locale("en");
+        let locale = codefixture_audit::i18n::load_script_locale("en");
         let root = std::env::temp_dir().join(format!("sast_resolve_{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
         let config = root.join("audit.config.json");
@@ -824,8 +824,8 @@ mod tests {
     /// built-in ones.
     #[test]
     fn test_scope_line_per_origin() {
-        let locale = sast_engine::i18n::load_script_locale("en");
-        let say = |key: &str| sast_engine::i18n::t(&locale, key);
+        let locale = codefixture_audit::i18n::load_script_locale("en");
+        let say = |key: &str| codefixture_audit::i18n::t(&locale, key);
         let root = Path::new("/work/app");
         let defaults = with_default_excludes(Vec::new());
         let count = DEFAULT_EXCLUDES.len();
@@ -915,8 +915,8 @@ mod tests {
 
 #[derive(Parser)]
 #[command(
-    name = "sast-engine",
-    version = sast_engine::BUILD_VERSION,
+    name = "codefixture-audit",
+    version = codefixture_audit::BUILD_VERSION,
     about = "SAST engine — Rust port of CodeFixture Audit"
 )]
 struct Cli {
@@ -949,7 +949,7 @@ fn rerun_command(args: impl Iterator<Item = String>) -> String {
 /// `.sca-suppress.json` by itself; these options then take their default.
 #[derive(clap::Args, Debug)]
 struct ScanExtraArgs {
-    /// Console log format: `text` (default, `[sast-engine] …` lines)
+    /// Console log format: `text` (default, `[codefixture-audit] …` lines)
     /// or `json` (one JSON object per line: `timestamp`, `level`,
     /// `message`, `duration_ms` for phases — ticket #92).
     #[arg(long, default_value = "text", value_parser = ["text", "json"])]
@@ -1142,18 +1142,18 @@ fn install_panic_hook(lang: &str) {
     use std::sync::atomic::{AtomicBool, Ordering};
     static REPORTED: AtomicBool = AtomicBool::new(false);
 
-    let locale = sast_engine::i18n::load_script_locale(lang);
+    let locale = codefixture_audit::i18n::load_script_locale(lang);
     let started = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let incident = format!("{started:x}-{:x}", std::process::id());
-    let log_path = std::env::temp_dir().join(format!("sast-engine-crash-{incident}.log"));
+    let log_path = std::env::temp_dir().join(format!("codefixture-audit-crash-{incident}.log"));
     std::panic::set_hook(Box::new(move |info| {
         let thread = std::thread::current();
         let entry = format!(
-            "sast-engine {}\nincident: {incident}\nthread: {}\n{info}\n\nbacktrace:\n{}\n\n",
-            sast_engine::BUILD_VERSION,
+            "codefixture-audit {}\nincident: {incident}\nthread: {}\n{info}\n\nbacktrace:\n{}\n\n",
+            codefixture_audit::BUILD_VERSION,
             thread.name().unwrap_or("<unnamed>"),
             std::backtrace::Backtrace::force_capture()
         );
@@ -1167,13 +1167,13 @@ fn install_panic_hook(lang: &str) {
             return;
         }
         let message = if written {
-            sast_engine::i18n::t(&locale, "internal_panic")
+            codefixture_audit::i18n::t(&locale, "internal_panic")
                 .replace("{log}", &log_path.display().to_string())
         } else {
-            sast_engine::i18n::t(&locale, "internal_panic_no_log")
+            codefixture_audit::i18n::t(&locale, "internal_panic_no_log")
         };
         emit_error(&format!(
-            "[sast-engine] {}",
+            "[codefixture-audit] {}",
             message.replace("{incident}", &incident)
         ));
     }));
@@ -1184,8 +1184,8 @@ fn dispatch(command: Command) -> ExitCode {
     // Debug builds only: lets the CLI tests exercise the panic hook on
     // the real binary. Compiled out of release builds.
     #[cfg(debug_assertions)]
-    if std::env::var_os("SAST_ENGINE_DEBUG_PANIC").is_some() {
-        panic!("SAST_ENGINE_DEBUG_PANIC set");
+    if std::env::var_os("CODEFIXTURE_AUDIT_DEBUG_PANIC").is_some() {
+        panic!("CODEFIXTURE_AUDIT_DEBUG_PANIC set");
     }
     match command {
         Command::Scan {
@@ -1231,7 +1231,7 @@ const LIST_RULES_CATEGORIES: [(&str, &str, bool); 8] = [
 /// characters, otherwise the id — the fallback chain of `list_rules` on
 /// the Python side, except that the name now comes from the rule file
 /// (the report locale's name-keyed copy was removed on 2026-11-14).
-fn rule_display_name(rule: &sast_engine::rules::catalog::RuleListing, lang: &str) -> String {
+fn rule_display_name(rule: &codefixture_audit::rules::catalog::RuleListing, lang: &str) -> String {
     if let Some(name) = rule
         .name
         .get(lang)
@@ -1256,7 +1256,7 @@ fn rule_display_name(rule: &sast_engine::rules::catalog::RuleListing, lang: &str
     }
 }
 
-/// `sast-engine list-rules` — port of `Audit/sca/cli.py::list_rules`
+/// `codefixture-audit list-rules` — port of `Audit/sca/cli.py::list_rules`
 /// on the whole catalog, every language: header with the total, then one block per
 /// category (translated title, rule count, `[disabled by default]` for
 /// the opt-in ones) listing `id` and display name. The "project
@@ -1264,9 +1264,9 @@ fn rule_display_name(rule: &sast_engine::rules::catalog::RuleListing, lang: &str
 /// per-project registry `Audit/projects/<slug>/`, classified out of
 /// scope (issue #23).
 fn run_list_rules_command(lang: &str, rules: Option<PathBuf>) -> ExitCode {
-    use sast_engine::rules::catalog;
-    let script_locale = sast_engine::i18n::load_script_locale(lang);
-    let report_locale = sast_engine::i18n::load_report_locale(lang);
+    use codefixture_audit::rules::catalog;
+    let script_locale = codefixture_audit::i18n::load_script_locale(lang);
+    let report_locale = codefixture_audit::i18n::load_report_locale(lang);
     let rules_path = match resolve_rules_path(rules, &script_locale) {
         Ok(path) => path,
         Err(code) => return code,
@@ -1276,14 +1276,14 @@ fn run_list_rules_command(lang: &str, rules: Option<PathBuf>) -> ExitCode {
         Err(code) => return code,
     };
     let listing = catalog::rule_listing(&sources);
-    let rules_label = sast_engine::i18n::t(&script_locale, "rules_count");
+    let rules_label = codefixture_audit::i18n::t(&script_locale, "rules_count");
     // `writeln!` with ignored errors rather than `println!`: the latter
     // panics on a closed pipe (`list-rules | head`).
     let mut out = std::io::stdout().lock();
     let _ = writeln!(
         out,
         "\n📋 {} ({} {rules_label}):\n",
-        sast_engine::i18n::t(&script_locale, "available_rules"),
+        codefixture_audit::i18n::t(&script_locale, "available_rules"),
         listing.len()
     );
     for (display_key, icon, enabled_by_default) in LIST_RULES_CATEGORIES {
@@ -1314,7 +1314,7 @@ fn run_list_rules_command(lang: &str, rules: Option<PathBuf>) -> ExitCode {
         } else {
             format!(
                 "  [{}]",
-                sast_engine::i18n::t(&script_locale, "disabled_by_default")
+                codefixture_audit::i18n::t(&script_locale, "disabled_by_default")
             )
         };
         let _ = writeln!(
@@ -1353,16 +1353,16 @@ fn write_sbom(
         .clone()
         .unwrap_or_else(|| config.root.join(DATAS_DIR));
     std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    let deps = sast_engine::project::dependencies::collect_dependencies(
+    let deps = codefixture_audit::project::dependencies::collect_dependencies(
         &config.root,
         &config.include_paths,
     );
-    let sbom = sast_engine::report::exports::sbom::build_dependency_sbom(
+    let sbom = codefixture_audit::report::exports::sbom::build_dependency_sbom(
         &deps,
         project_name,
         "",
         &effective_tool_name(brand),
-        sast_engine::BUILD_VERSION,
+        codefixture_audit::BUILD_VERSION,
         &now.to_rfc3339(),
     );
     let json = sbom
@@ -1430,10 +1430,10 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
     // this ticket, `scan`'s CLI messages (errors, progress) stayed in
     // French regardless of `--lang`, only the HTML report was
     // translated.
-    let script_locale = sast_engine::i18n::load_script_locale(&lang);
+    let script_locale = codefixture_audit::i18n::load_script_locale(&lang);
     if !path.is_dir() {
         emit_error(
-            &sast_engine::i18n::t(&script_locale, "scan_invalid_path")
+            &codefixture_audit::i18n::t(&script_locale, "scan_invalid_path")
                 .replace("{path}", &path.display().to_string()),
         );
         return ExitCode::from(2);
@@ -1447,14 +1447,14 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
     // scanned then, as before. Before the history folder is created, so
     // that nothing else is written into the project.
     if matches!(
-        sast_engine::project::project_config::load_config_json(&path),
+        codefixture_audit::project::project_config::load_config_json(&path),
         Ok(None)
     ) && !quiet
         && log_format != "json"
         && std::io::stdin().is_terminal()
     {
-        use sast_engine::project::config_wizard::{ConfigWizardOutcome, run_config_wizard};
-        let say = |key: &str| sast_engine::i18n::t(&script_locale, key);
+        use codefixture_audit::project::config_wizard::{ConfigWizardOutcome, run_config_wizard};
+        let say = |key: &str| codefixture_audit::i18n::t(&script_locale, key);
         let stdin = std::io::stdin();
         let mut reader = stdin.lock();
         let mut writer = std::io::stderr();
@@ -1471,12 +1471,12 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
             Ok(ConfigWizardOutcome::Declined) => ExitCode::from(1),
             Ok(ConfigWizardOutcome::InputClosed) => {
                 eprintln!();
-                emit_error(&format!("[sast-engine] {}", say("config_prompt_input_closed")));
+                emit_error(&format!("[codefixture-audit] {}", say("config_prompt_input_closed")));
                 ExitCode::from(2)
             }
             Err(error) => {
                 emit_error(&format!(
-                    "[sast-engine] {}",
+                    "[codefixture-audit] {}",
                     say("config_prompt_write_error").replace("{error}", &error.to_string())
                 ));
                 ExitCode::from(4)
@@ -1492,7 +1492,7 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
     };
     if format != "text" && format != "sarif" && format != "html" {
         emit_error(
-            &sast_engine::i18n::t(&script_locale, "scan_unknown_format")
+            &codefixture_audit::i18n::t(&script_locale, "scan_unknown_format")
                 .replace("{format}", &format),
         );
         return ExitCode::from(2);
@@ -1505,7 +1505,7 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
         .to_string();
 
     let database = if db_host.is_some() || db_name.is_some() || db_user.is_some() {
-        Some(sast_engine::project::database::live::DbConfig {
+        Some(codefixture_audit::project::database::live::DbConfig {
             host: db_host,
             port: db_port,
             database: db_name,
@@ -1539,7 +1539,7 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
                 // relies on case, not structure — don't copy this
                 // chaining as-is onto non-normalized user data.
                 emit_error(
-                    &sast_engine::i18n::t(&script_locale, "scan_invalid_severities")
+                    &codefixture_audit::i18n::t(&script_locale, "scan_invalid_severities")
                         .replace(
                             "{invalid}",
                             &invalid
@@ -1574,7 +1574,7 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
         && let Err(e) = std::fs::create_dir_all(dir)
     {
         emit_error(
-            &sast_engine::i18n::t(&script_locale, "scan_internal_error")
+            &codefixture_audit::i18n::t(&script_locale, "scan_internal_error")
                 .replace("{error}", &format!("{}: {e}", dir.display())),
         );
         return ExitCode::from(4);
@@ -1583,8 +1583,8 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
     // Ticket #149 — the exact build first, even with `--quiet`: one line,
     // and the first thing a bug report needs.
     emit_result(&format!(
-        "[sast-engine] sast-engine {}",
-        sast_engine::BUILD_VERSION
+        "[codefixture-audit] codefixture-audit {}",
+        codefixture_audit::BUILD_VERSION
     ));
 
     let (include_paths, base_excludes, paths_origin) =
@@ -1595,13 +1595,13 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
     emit_progress(
         quiet,
         &format!(
-            "[sast-engine] {}",
+            "[codefixture-audit] {}",
             scope_line(
                 &path,
                 paths_origin,
                 &include_paths,
                 &exclude_patterns,
-                |key| sast_engine::i18n::t(&script_locale, key),
+                |key| codefixture_audit::i18n::t(&script_locale, key),
             )
         ),
     );
@@ -1609,11 +1609,11 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
     // Ticket #140 — paths keys that are ignored, wholly or partly, so the
     // scope silently differs from what the file seems to say. One
     // grouped warning, never suppressed by `--quiet` (like #138 below).
-    let malformed_paths = sast_engine::project::project_config::malformed_paths_keys(&path);
+    let malformed_paths = codefixture_audit::project::project_config::malformed_paths_keys(&path);
     if !malformed_paths.is_empty() {
         emit_warning(&format!(
-            "[sast-engine] {}",
-            sast_engine::i18n::t(&script_locale, "scan_paths_config_malformed")
+            "[codefixture-audit] {}",
+            codefixture_audit::i18n::t(&script_locale, "scan_paths_config_malformed")
                 .replace("{keys}", &malformed_paths.join(", "))
         ));
     }
@@ -1623,15 +1623,15 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
     let missing_includes = missing_include_paths(&path, &include_paths);
     if !missing_includes.is_empty() {
         emit_warning(&format!(
-            "[sast-engine] {}",
-            sast_engine::i18n::t(&script_locale, "scan_include_paths_missing")
+            "[codefixture-audit] {}",
+            codefixture_audit::i18n::t(&script_locale, "scan_include_paths_missing")
                 .replace("{paths}", &missing_includes.join(", "))
         ));
     }
 
     // ADR-0038 — the rule languages declared by the project, if any.
     let target_languages =
-        declared_rule_languages(&path, |key| sast_engine::i18n::t(&script_locale, key));
+        declared_rule_languages(&path, |key| codefixture_audit::i18n::t(&script_locale, key));
 
     // Ticket #43/spec #27 — a single grouped warning (not one per
     // key), never suppressed by `--quiet`: it's actionable information
@@ -1639,11 +1639,11 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
     // (`report.rule_errors`), not a mere intermediate progress
     // message.
     let unsupported_sections =
-        sast_engine::project::project_config::unsupported_config_sections(&path);
+        codefixture_audit::project::project_config::unsupported_config_sections(&path);
     if !unsupported_sections.is_empty() {
         emit_warning(&format!(
-            "[sast-engine] {}",
-            sast_engine::i18n::t(&script_locale, "scan_unsupported_config_sections")
+            "[codefixture-audit] {}",
+            codefixture_audit::i18n::t(&script_locale, "scan_unsupported_config_sections")
                 .replace("{keys}", &unsupported_sections.join(", "))
         ));
     }
@@ -1656,7 +1656,7 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
     let disabled_rules = if !disable_rule.is_empty() {
         disable_rule
     } else {
-        sast_engine::project::project_config::read_disabled_rules_config(&path)
+        codefixture_audit::project::project_config::read_disabled_rules_config(&path)
     };
     // Always read, even if `only_category` (CLI) is already provided:
     // the CLI > file priority (ticket #41/spec #27) is resolved in
@@ -1665,7 +1665,7 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
     // remain two distinct `ScanConfig` fields, see the field doc in
     // `orchestrator.rs`.
     let category_overrides =
-        sast_engine::project::project_config::read_category_overrides_config(&path);
+        codefixture_audit::project::project_config::read_category_overrides_config(&path);
 
     // Custom rules are read by the private build only (ADR-0041): the
     // shared binary scans with the delivered pack alone.
@@ -1697,7 +1697,7 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
             let dir = path.join(REPORTS_DIR);
             if let Err(e) = std::fs::create_dir_all(&dir) {
                 emit_error(
-                    &sast_engine::i18n::t(&script_locale, "scan_internal_error")
+                    &codefixture_audit::i18n::t(&script_locale, "scan_internal_error")
                         .replace("{error}", &format!("{}: {e}", dir.display())),
                 );
                 return None;
@@ -1775,8 +1775,8 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
     emit_progress(
         quiet,
         &format!(
-            "[sast-engine] {}",
-            sast_engine::i18n::t(&script_locale, "scan_analyzing")
+            "[codefixture-audit] {}",
+            codefixture_audit::i18n::t(&script_locale, "scan_analyzing")
         ),
     );
     let t_scan_start = std::time::Instant::now();
@@ -1784,7 +1784,7 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
 
     for (rule_path, err) in &report.rule_errors {
         emit_warning(
-            &sast_engine::i18n::t(&script_locale, "scan_rule_skipped")
+            &codefixture_audit::i18n::t(&script_locale, "scan_rule_skipped")
                 .replace("{path}", &rule_path.display().to_string())
                 .replace("{error}", &err.to_string()),
         );
@@ -1793,18 +1793,18 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
     // replacing the catalog's is wanted, so it is information; a rule
     // defined twice in one source is a mistake, so it is a warning.
     for conflict in &report.rule_conflicts {
-        use sast_engine::rules::catalog::RuleConflictKind;
+        use codefixture_audit::rules::catalog::RuleConflictKind;
         let key = match conflict.kind {
             RuleConflictKind::ClientReplacesCatalog => "scan_rule_replaced",
             RuleConflictKind::DuplicateInSource => "scan_rule_duplicate",
         };
-        let message = sast_engine::i18n::t(&script_locale, key)
+        let message = codefixture_audit::i18n::t(&script_locale, key)
             .replace("{rule}", &conflict.id.to_string())
             .replace("{kept}", &conflict.kept)
             .replace("{dropped}", &conflict.dropped);
         match conflict.kind {
             RuleConflictKind::ClientReplacesCatalog => {
-                emit_progress(quiet, &format!("[sast-engine] {message}"))
+                emit_progress(quiet, &format!("[codefixture-audit] {message}"))
             }
             RuleConflictKind::DuplicateInSource => emit_warning(&message),
         }
@@ -1813,14 +1813,14 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
     // languages found in the project but left out of `languages`, whose
     // files got no rule — a warning, never suppressed by `--quiet`.
     for line in rule_source_lines(&report, &script_locale) {
-        emit_progress(quiet, &format!("[sast-engine] {line}"));
+        emit_progress(quiet, &format!("[codefixture-audit] {line}"));
     }
     // Ticket #152: the folders skipped as holding no project code, named
     // once per scan (`--quiet` hides it, like the scope line).
     if let Some(line) = skipped_dirs_line(&config.root, &report.skipped_dirs, |key| {
-        sast_engine::i18n::t(&script_locale, key)
+        codefixture_audit::i18n::t(&script_locale, key)
     }) {
-        emit_progress(quiet, &format!("[sast-engine] {line}"));
+        emit_progress(quiet, &format!("[codefixture-audit] {line}"));
     }
     // Taint cache (`scan_cache`): what a re-scan redid, so that a slow one
     // shows why (many files changed) and a fast one that it reused work.
@@ -1828,8 +1828,8 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
         emit_progress(
             quiet,
             &format!(
-                "[sast-engine] {}",
-                sast_engine::i18n::t(
+                "[codefixture-audit] {}",
+                codefixture_audit::i18n::t(
                     &script_locale,
                     if stat.language == "patterns" {
                         "scan_cache_patterns_line"
@@ -1847,8 +1847,8 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
     }
     if !report.undeclared_languages.is_empty() {
         emit_warning(&format!(
-            "[sast-engine] {}",
-            sast_engine::i18n::t(&script_locale, "scan_languages_undeclared")
+            "[codefixture-audit] {}",
+            codefixture_audit::i18n::t(&script_locale, "scan_languages_undeclared")
                 .replace("{languages}", &report.undeclared_languages.join(", "))
         ));
     }
@@ -1858,12 +1858,12 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
     // reads as "none".
     if let Some(status) = &report.version_rules {
         let (warning, line) = version_rules_line(status, |key| {
-            sast_engine::i18n::t(&script_locale, key)
+            codefixture_audit::i18n::t(&script_locale, key)
         });
         if warning {
-            emit_warning(&format!("[sast-engine] {line}"));
+            emit_warning(&format!("[codefixture-audit] {line}"));
         } else {
-            emit_result(&format!("[sast-engine] {line}"));
+            emit_result(&format!("[codefixture-audit] {line}"));
         }
     }
 
@@ -1871,12 +1871,12 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
         match write_sbom(&config, &project_name, &brand, &now) {
             Ok(sbom_path) => emit_progress(
                 quiet,
-                &format!("[sast-engine] SBOM : {}", sbom_path.display()),
+                &format!("[codefixture-audit] SBOM : {}", sbom_path.display()),
             ),
             Err(e) => {
                 emit_error(&format!(
-                    "[sast-engine] {}",
-                    sast_engine::i18n::t(&script_locale, "scan_internal_error")
+                    "[codefixture-audit] {}",
+                    codefixture_audit::i18n::t(&script_locale, "scan_internal_error")
                         .replace("{error}", &e)
                 ));
                 return ExitCode::from(4);
@@ -1888,15 +1888,15 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
         "sarif" => {
             let sarif = build_sarif_report(
                 &report.findings,
-                "sast-engine",
-                sast_engine::BUILD_VERSION,
+                "codefixture-audit",
+                codefixture_audit::BUILD_VERSION,
                 &effective_website_url(&brand),
             );
             match serde_json::to_string_pretty(&sarif) {
                 Ok(s) => s,
                 Err(e) => {
                     emit_error(
-                        &sast_engine::i18n::t(&script_locale, "scan_internal_error")
+                        &codefixture_audit::i18n::t(&script_locale, "scan_internal_error")
                             .replace("{error}", &format!("SARIF serialization: {e}")),
                     );
                     return ExitCode::from(4);
@@ -1911,7 +1911,7 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
                 project_description: String::new(),
                 project_path: config.root.display().to_string(),
                 tool_name: effective_tool_name(&brand),
-                tool_version: sast_engine::BUILD_VERSION.to_string(),
+                tool_version: codefixture_audit::BUILD_VERSION.to_string(),
                 company_name: effective_company_name(&brand),
                 report_lang: lang,
                 date_str: now.format("%d/%m/%Y à %H:%M").to_string(),
@@ -1922,7 +1922,7 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
                 health_thresholds: HealthThresholds::default(),
                 rule_catalog: &report.rule_catalog,
             };
-            let audit_params_info = sast_engine::report::audit_params::AuditParamsInfo {
+            let audit_params_info = codefixture_audit::report::audit_params::AuditParamsInfo {
                 languages: report.languages.clone(),
                 include_paths: config.include_paths.clone(),
                 exclude_patterns: config.exclude_patterns.clone(),
@@ -1957,7 +1957,7 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
         Some(out_path) => {
             if let Err(e) = std::fs::write(out_path, &output_text) {
                 emit_error(
-                    &sast_engine::i18n::t(&script_locale, "scan_internal_error")
+                    &codefixture_audit::i18n::t(&script_locale, "scan_internal_error")
                         .replace("{error}", &format!("{}: {e}", out_path.display())),
                 );
                 return ExitCode::from(4);
@@ -1965,8 +1965,8 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
             emit_progress(
                 quiet,
                 &format!(
-                    "[sast-engine] {} : {}",
-                    sast_engine::i18n::t(&script_locale, "report_generated"),
+                    "[codefixture-audit] {} : {}",
+                    codefixture_audit::i18n::t(&script_locale, "report_generated"),
                     out_path.display()
                 ),
             );
@@ -1979,8 +1979,8 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
     // "succeeds" with no finding is indistinguishable from a run that scanned
     // nothing at all.
     emit_result(&format!(
-        "[sast-engine] {}",
-        sast_engine::i18n::t(&script_locale, "scan_summary")
+        "[codefixture-audit] {}",
+        codefixture_audit::i18n::t(&script_locale, "scan_summary")
             .replace("{files}", &report.files_scanned.to_string())
             .replace("{loc}", &report.total_loc.to_string())
             .replace("{findings}", &report.findings.len().to_string())
@@ -1993,14 +1993,14 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
     if JSON_LOGS.load(std::sync::atomic::Ordering::Relaxed) {
         emit_json_line(
             LogLevel::Info,
-            &sast_engine::i18n::t(&script_locale, "scan_total_duration")
+            &codefixture_audit::i18n::t(&script_locale, "scan_total_duration")
                 .replace("{duration}", &format_duration(total_elapsed)),
             Some(serde_json::json!(total_elapsed.as_millis())),
         );
     } else {
         emit_result(&format!(
-            "[sast-engine] {}",
-            sast_engine::i18n::t(&script_locale, "scan_total_duration")
+            "[codefixture-audit] {}",
+            codefixture_audit::i18n::t(&script_locale, "scan_total_duration")
                 .replace("{duration}", &format_duration(total_elapsed))
         ));
     }
@@ -2016,7 +2016,7 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
     // at least one HIGH/CRITICAL exists. Accepted deviations vs Python
     // documented in `read_max_high_threshold_config`.
     let max_high_threshold =
-        sast_engine::project::project_config::read_max_high_threshold_config(&config.root);
+        codefixture_audit::project::project_config::read_max_high_threshold_config(&config.root);
     let exit_code: u8 = if high_count as i64 > max_high_threshold {
         1
     } else {
@@ -2026,10 +2026,10 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
     // Ticket #90: written last, so it records the real exit code. A
     // write failure is an internal error (4), like the report itself.
     if let Some(metrics_path) = &metrics_output {
-        let metrics = sast_engine::report::exports::metrics::build_scan_metrics(
+        let metrics = codefixture_audit::report::exports::metrics::build_scan_metrics(
             &report,
-            "sast-engine",
-            sast_engine::BUILD_VERSION,
+            "codefixture-audit",
+            codefixture_audit::BUILD_VERSION,
             &now.to_rfc3339(),
             t_command_start.elapsed().as_millis(),
             exit_code,
@@ -2039,7 +2039,7 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
             .and_then(|s| std::fs::write(metrics_path, s).map_err(|e| e.to_string()));
         if let Err(e) = written {
             emit_error(
-                &sast_engine::i18n::t(&script_locale, "scan_internal_error")
+                &codefixture_audit::i18n::t(&script_locale, "scan_internal_error")
                     .replace("{error}", &format!("{}: {e}", metrics_path.display())),
             );
             return ExitCode::from(4);

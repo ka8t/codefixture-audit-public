@@ -105,7 +105,7 @@ fn language_severity_data(findings: &[ReportFinding]) -> Value {
 
 /// Taint chart data — port of `_get_taint_chart_data`.
 /// `builtin_loaded`/`custom_loaded`: `_rule_engine_stats` doesn't
-/// exist on the AuditRust side — approximated by the size of the
+/// exist on the codefixture-audit side — approximated by the size of the
 /// loaded rule catalog. The chart has one slice for the catalog's rules
 /// (`json_builtin`) and one for the client's (`json_custom`).
 fn taint_chart_data(findings: &[ReportFinding], rule_catalog: &RuleCatalog) -> Value {
@@ -461,7 +461,7 @@ fn render_glossary_html(report_locale: &Value) -> (String, String) {
     (html, title)
 }
 
-/// "Custom rules" section — empty state only: AuditRust does not yet
+/// "Custom rules" section — empty state only: codefixture-audit does not yet
 /// distinguish builtin/custom (`ScanConfig` has only one
 /// `rules_dir`), so `custom_rules` is always empty, like a real
 /// Python scan with no `json_custom` rule loaded.
@@ -492,7 +492,7 @@ fn render_custom_rules_section(report_locale: &Value) -> String {
 
 /// Removes `<!--DEV_ONLY_DB-->...<!--/DEV_ONLY_DB-->` blocks — in the
 /// compiled Python binary, this removal only happens in compiled mode
-/// (`_check_is_binary()`); AuditRust is *always* a compiled binary,
+/// (`_check_is_binary()`); codefixture-audit is *always* a compiled binary,
 /// so it is always applied, unconditionally.
 fn remove_dev_only_db_blocks(html: &str) -> String {
     let re = Regex::new(r"(?s)<!--DEV_ONLY_DB-->.*?<!--/DEV_ONLY_DB-->")

@@ -8,7 +8,7 @@
 //! (`compliance.rs`) and for the report templates/assets
 //! (`report_assets.rs`). Not ported: merging with project-specific
 //! locales (`_load_locale`, `project_id` block) — there is no
-//! per-project customization system on the AuditRust side to date.
+//! per-project customization system on the codefixture-audit side to date.
 
 use serde_json::Value;
 

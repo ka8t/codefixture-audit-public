@@ -108,7 +108,7 @@ fn read_answer<R: BufRead>(reader: &mut R) -> io::Result<Option<String>> {
 
 /// Asks `question` and reads the answer; `None` when the input closed.
 fn ask<R: BufRead, W: Write>(reader: &mut R, writer: &mut W, question: &str) -> io::Result<Option<String>> {
-    write!(writer, "[sast-engine] {question} ")?;
+    write!(writer, "[codefixture-audit] {question} ")?;
     writer.flush()?;
     read_answer(reader)
 }
@@ -125,7 +125,7 @@ fn pick_folders<R: BufRead, W: Write>(
     question: &str,
     allow_empty: bool,
 ) -> io::Result<Option<Vec<String>>> {
-    writeln!(writer, "[sast-engine] {}", say("config_wizard_folders"))?;
+    writeln!(writer, "[codefixture-audit] {}", say("config_wizard_folders"))?;
     for (i, folder) in folders.iter().enumerate() {
         writeln!(writer, "    {:>2}. {folder}", i + 1)?;
     }
@@ -139,7 +139,7 @@ fn pick_folders<R: BufRead, W: Write>(
             }
             _ => writeln!(
                 writer,
-                "[sast-engine] {}",
+                "[codefixture-audit] {}",
                 say("config_wizard_bad_numbers").replace("{max}", &folders.len().to_string())
             )?,
         }
@@ -181,20 +181,20 @@ pub fn run_config_wizard<R: BufRead, W: Write>(
     let detected = auto_detect_project(root);
     writeln!(
         writer,
-        "[sast-engine] {}",
+        "[codefixture-audit] {}",
         say("config_wizard_intro").replace("{path}", &root.display().to_string())
     )?;
     if !detected.languages.is_empty() {
         writeln!(
             writer,
-            "[sast-engine] {}",
+            "[codefixture-audit] {}",
             say("config_prompt_languages").replace("{languages}", &detected.languages.join(", "))
         )?;
     }
 
     // 1. The whole folder or some sub-folders.
     let top = sub_folders(root, ".");
-    writeln!(writer, "[sast-engine] {}", say("config_wizard_scope_title"))?;
+    writeln!(writer, "[codefixture-audit] {}", say("config_wizard_scope_title"))?;
     writeln!(writer, "     1. {}", say("config_wizard_scope_all"))?;
     writeln!(writer, "     2. {}", say("config_wizard_scope_some"))?;
     let some = loop {
@@ -206,13 +206,13 @@ pub fn run_config_wizard<R: BufRead, W: Write>(
             "2" => break true,
             _ => writeln!(
                 writer,
-                "[sast-engine] {}",
+                "[codefixture-audit] {}",
                 say("config_wizard_bad_numbers").replace("{max}", "2")
             )?,
         }
     };
     let include = if some && top.is_empty() {
-        writeln!(writer, "[sast-engine] {}", say("config_wizard_no_subfolders"))?;
+        writeln!(writer, "[codefixture-audit] {}", say("config_wizard_no_subfolders"))?;
         vec![".".to_string()]
     } else if some {
         match pick_folders(reader, writer, say, &top, &say("config_wizard_pick_include"), false)? {
@@ -232,7 +232,7 @@ pub fn run_config_wizard<R: BufRead, W: Write>(
     if is_yes(&answer, &yes_words, false) {
         let candidates: Vec<String> = include.iter().flat_map(|base| sub_folders(root, base)).collect();
         if candidates.is_empty() {
-            writeln!(writer, "[sast-engine] {}", say("config_wizard_no_exclude_candidates"))?;
+            writeln!(writer, "[codefixture-audit] {}", say("config_wizard_no_exclude_candidates"))?;
         } else {
             match pick_folders(reader, writer, say, &candidates, &say("config_wizard_pick_exclude"), true)? {
                 Some(picked) => exclude = picked,
@@ -246,30 +246,30 @@ pub fn run_config_wizard<R: BufRead, W: Write>(
     let path = root.join("audit.config.json");
     writeln!(
         writer,
-        "[sast-engine] {}",
+        "[codefixture-audit] {}",
         say("config_wizard_preview").replace("{path}", &path.display().to_string())
     )?;
     for line in audit_config_json_text(root, &config).lines() {
         writeln!(writer, "    {line}")?;
     }
-    writeln!(writer, "[sast-engine] {}", say("config_wizard_defaults_note"))?;
+    writeln!(writer, "[codefixture-audit] {}", say("config_wizard_defaults_note"))?;
     let Some(answer) = ask(reader, writer, &say("config_wizard_write_question"))? else {
         return Ok(ConfigWizardOutcome::InputClosed);
     };
     if !is_yes(&answer, &yes_words, true) {
-        writeln!(writer, "[sast-engine] {}", say("config_wizard_declined"))?;
+        writeln!(writer, "[codefixture-audit] {}", say("config_wizard_declined"))?;
         return Ok(ConfigWizardOutcome::Declined);
     }
     let written = write_audit_config_json(root, &config)?;
     writeln!(
         writer,
-        "[sast-engine] {}",
+        "[codefixture-audit] {}",
         say("config_wizard_written").replace("{path}", &written.display().to_string())
     )?;
     // Nothing was analysed yet: said plainly, the caller then prints the
     // exact command to run again (2026-11-14).
     writeln!(writer)?;
-    writeln!(writer, "[sast-engine] {}", say("config_wizard_run_again"))?;
+    writeln!(writer, "[codefixture-audit] {}", say("config_wizard_run_again"))?;
     Ok(ConfigWizardOutcome::Written(written))
 }
 
