@@ -936,8 +936,8 @@ pub fn lower_stmt<'src>(source: &'src [u8], stmt: Node<'src>) -> Vec<IrStmt> {
 // ============================================================================
 // Lowering a CFG node into IR — Java mirror of
 // `worklist.rs::lower_node_to_ir`/`lower_all_nodes`, the entry point
-// consumed by `worklist::analyze_generic` (the `lower_all` parameter)
-// to instantiate `worklist::analyze_java`.
+// consumed by `worklist::prepare_ir_generic` (the `lower_all`
+// parameter) to instantiate `worklist::prepare_java_ir`.
 // ============================================================================
 
 /// Lowers the statements/condition of a Java CFG node into IR.

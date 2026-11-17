@@ -57,6 +57,9 @@ impl AstMatcher {
 /// into the result dict becomes `result["node"]`).
 pub struct AstMatch {
     pub node_start_line: usize, // 1-indexed, cf. get_node_line Python
+    /// Byte column of the node's start in its line (0-indexed): where
+    /// the report clips a long line (ticket #194).
+    pub node_start_column: usize,
 }
 
 /// Executes an S-expression query against an already-parsed tree.
@@ -77,6 +80,7 @@ pub fn query_tree(
         if let Some(first_capture) = m.captures.first() {
             results.push(AstMatch {
                 node_start_line: node_line(first_capture.node),
+                node_start_column: first_capture.node.start_position().column,
             });
         }
     }
@@ -123,6 +127,7 @@ pub fn execute_ast_rule(
                 severity: rule.severity.clone(),
                 line: m.node_start_line,
                 code: line_content(m.node_start_line),
+                column: m.node_start_column,
                 confidence: rule.confidence,
             });
         }

@@ -27,6 +27,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, OnceLock};
 
+use rayon::prelude::*;
+
 use tree_sitter::Node;
 
 pub use super::call_graph::{FileInput, NodeKey, SummariesByFile};
@@ -35,9 +37,11 @@ use super::java_module_registry::{
     collect_java_imports, collect_java_superclass, collect_package, resolve_visible_classes,
 };
 use super::java_summary::{
-    JavaFunctionInfo, add_bare_name_aliases, collect_java_field_types, collect_java_functions,
-    collect_java_local_types, compute_java_summary,
+    JavaFunctionInfo, add_bare_name_aliases, collect_java_field_types, collect_java_local_types,
+    compute_java_summary_with, prepare_java_file,
 };
+use super::line_facts::rule_lines_by_file;
+use super::prepared::{PreparedFile, PreparedFiles};
 use super::transfer::{FunctionSummary, RuleSpecs};
 
 fn text(node: Node, source: &[u8]) -> String {
@@ -97,6 +101,10 @@ pub struct JavaCallGraph<'tree> {
     pub edges: BTreeMap<NodeKey, BTreeMap<String, NodeKey>>,
     pub import_bindings: BTreeMap<String, BTreeMap<String, NodeKey>>,
     source_by_file: BTreeMap<String, &'tree [u8]>,
+    /// Every file of the graph prepared once for all the rules of the
+    /// scan (ticket #192): read for the summaries and handed to the
+    /// taint analysis of each file ([`Self::prepared_file`]).
+    prepared: PreparedFiles<'tree, JavaFunctionInfo<'tree>>,
     /// Lazy caches, independent of `base_specs` — derived
     /// solely from the graph's structure (`nodes`/`edges`), so
     /// identical for every rule. `resolve_summaries` is
@@ -117,6 +125,15 @@ pub struct JavaCallGraph<'tree> {
 }
 
 impl<'tree> JavaCallGraph<'tree> {
+    /// The prepared form of `filepath`, one of the graph's files, for
+    /// the taint analysis of each rule (ticket #192).
+    pub fn prepared_file(
+        &self,
+        filepath: &str,
+    ) -> Option<&PreparedFile<'tree, JavaFunctionInfo<'tree>>> {
+        self.prepared.file(filepath)
+    }
+
     /// Builds the complete graph (nodes + edges + import bindings)
     /// from a set of already-parsed Java files.
     pub fn build(files: &[FileInput<'tree>]) -> Self {
@@ -126,15 +143,22 @@ impl<'tree> JavaCallGraph<'tree> {
         let mut class_names_by_file: BTreeMap<String, (String, Vec<String>)> = BTreeMap::new();
         let mut file_function_names: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
 
-        for f in files {
-            let functions = collect_java_functions(f.root, f.source);
+        // Each file is prepared once for every rule of the scan (ticket
+        // #192), in parallel: a file only reads its own tree. Its
+        // collected methods are the graph nodes.
+        let per_file: Vec<_> = files
+            .par_iter()
+            .map(|f| prepare_java_file(f.root, f.source))
+            .collect();
+        for (f, prepared) in files.iter().zip(per_file) {
             let mut names = BTreeSet::new();
-            for fn_info in functions {
-                names.insert(fn_info.name.clone());
-                graph
-                    .nodes
-                    .insert((f.filepath.clone(), fn_info.name.clone()), fn_info);
+            for (index, function) in prepared.functions.iter().enumerate() {
+                names.insert(function.info.name.clone());
+                let key = (f.filepath.clone(), function.info.name.clone());
+                graph.prepared.index_node(key.clone(), index);
+                graph.nodes.insert(key, function.info.clone());
             }
+            graph.prepared.insert_file(f.filepath.clone(), prepared);
             file_function_names.insert(f.filepath.clone(), names);
             graph.source_by_file.insert(f.filepath.clone(), f.source);
 
@@ -316,6 +340,9 @@ impl<'tree> JavaCallGraph<'tree> {
         let mut recomputed = 0usize;
         let empty_lines = BTreeMap::new();
         let source_lines_by_file = source_lines_by_file.unwrap_or(&empty_lines);
+        // One per-line cache of the hybrid layer per file, shared by every
+        // summary of this rule (ticket #190).
+        let lines_for_rule = rule_lines_by_file(source_lines_by_file, base_specs);
 
         let mut resolved: BTreeMap<NodeKey, Arc<FunctionSummary>> = BTreeMap::new();
         let mut own: SummariesByFile = BTreeMap::new();
@@ -333,7 +360,10 @@ impl<'tree> JavaCallGraph<'tree> {
         for node in self.topo_order_cached() {
             let node = node.clone();
             let (filepath, name) = node.clone();
-            let Some(fn_info) = self.nodes.get(&node) else {
+            let Some(function) = self.prepared.function(&node) else {
+                continue;
+            };
+            let Some(body) = function.body.as_ref() else {
                 continue;
             };
             if let Some(reuse) = reuse
@@ -357,10 +387,7 @@ impl<'tree> JavaCallGraph<'tree> {
                 }
             }
             node_specs.summaries = seed;
-            let Some(&source) = self.source_by_file.get(&filepath) else {
-                continue;
-            };
-            let lines = source_lines_by_file.get(&filepath).map(|v| v.as_slice());
+            let lines = lines_for_rule.get(filepath.as_str());
             // `Arc::new` once per node — every subsequent `.clone()`
             // (below, and in callers' seeds) is then just a
             // reference-count bump, not a deep copy of `FunctionSummary`
@@ -368,7 +395,12 @@ impl<'tree> JavaCallGraph<'tree> {
             // values that are expensive to clone). This is what dominated
             // the actual cost on a large corpus (high fan-in "hub"
             // nodes, e.g. OWASP BenchmarkJava) — see the `SummariesByFile` doc.
-            let summary = Arc::new(compute_java_summary(fn_info, &node_specs, source, lines));
+            let summary = Arc::new(compute_java_summary_with(
+                &function.info,
+                body,
+                &node_specs,
+                lines,
+            ));
             recomputed += 1;
             if reuse.is_none_or(|r| r.previous.get(&node) != Some(&summary)) {
                 changed.insert(node.clone());

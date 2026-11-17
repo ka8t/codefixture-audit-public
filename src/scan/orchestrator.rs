@@ -495,6 +495,15 @@ pub struct ScanReport {
     /// in walk order. Printed by the CLI, so code in a skipped folder never
     /// goes unchecked without a word.
     pub skipped_dirs: Vec<SkippedDir>,
+    /// Files skipped because they are minified (ADR-0045, `scan::
+    /// minified`), relative to the project, in discovery order. Printed
+    /// by the CLI for the same reason as `skipped_dirs`.
+    pub skipped_minified: Vec<String>,
+    /// Files skipped because they belong to a web page saved from a
+    /// browser (ADR-0046, `scan::saved_page`), relative to the project,
+    /// in discovery order. Printed by the CLI for the same reason as
+    /// `skipped_dirs`.
+    pub skipped_saved_pages: Vec<String>,
     /// Catalog of compiled rules, indexed by identity (language + name):
     /// where the reports read each finding's rule texts (risk, solution,
     /// `fix_before`/`fix_after`), see `rules::identity`.
@@ -578,16 +587,49 @@ fn read_version_rules(path: &Path) -> Result<Option<crate::project::advisory_fil
     }
 }
 
+/// Texts of the dependency findings (`unpinned_dependency`,
+/// `vulnerable_dependency`) in the report language — ticket #189.
+///
+/// These findings come from no catalog rule, so no rule carries their
+/// texts in four languages: they live in the report locale, under
+/// `dependency_findings`, with `{name}`-style placeholders. **Deliberate
+/// exception to this module's convention** (see `script_locale`): `run_scan`
+/// otherwise leaves i18n lookups to the report, but the finding's message
+/// and solution are plain strings shared by every output (HTML, SARIF,
+/// text), so they are built here, like the catalog texts already are
+/// with `config.lang` (`extract_i18n_block`).
+struct DependencyTexts {
+    locale: serde_json::Value,
+}
+
+impl DependencyTexts {
+    /// Loads the embedded report locale of `lang` (English for an
+    /// unknown language, like the report itself).
+    fn new(lang: &str) -> Self {
+        Self {
+            locale: crate::i18n::load_report_locale(lang),
+        }
+    }
+
+    /// Text `dependency_findings.<key>`, placeholders left in place.
+    fn get(&self, key: &str) -> String {
+        crate::i18n::t(&self.locale, &format!("dependency_findings.{key}"))
+    }
+}
+
 /// `vulnerable_dependency` findings for the dependencies of `deps` hit
 /// by the version rules `file` of the pack (ADR-0035, ADR-0043) — one finding
 /// per dependency, listing every distinct vulnerability, so a package
 /// with ten CVEs does not bury the report under ten lines. The severity
 /// is the highest among them. Unreadable database files are reported on
 /// stderr and skipped: the rest of the scan does not depend on them.
+/// The texts follow the report language (`texts`, ticket #189); the
+/// advisory identifiers and OSV summaries stay as published, in English.
 fn vulnerable_dependency_findings(
     file: &crate::project::advisory_file::DatabaseFile,
     deps: &[crate::project::dependencies::Dependency],
     root: &Path,
+    texts: &DependencyTexts,
 ) -> Vec<ReportFinding> {
     use crate::project::advisories;
 
@@ -635,7 +677,7 @@ fn vulnerable_dependency_findings(
                     .iter()
                     .map(|a| a.display_id())
                     .collect();
-                listed.push(format!("also {}", rest.join(", ")));
+                listed.push(texts.get("also").replace("{ids}", &rest.join(", ")));
             }
             let mut cwe: Vec<String> = hit.advisories.iter().flat_map(|a| a.cwe.clone()).collect();
             cwe.sort();
@@ -645,30 +687,32 @@ fn vulnerable_dependency_findings(
                 cwe.push("CWE-1395".to_string());
             }
             let solution = match &hit.fixed_version {
-                Some(fixed) => format!("Upgrade {} to {fixed} or later.", dep.name),
-                None => format!(
-                    "No published version fixes every vulnerability: replace or remove {}.",
-                    dep.name
-                ),
+                Some(fixed) => texts
+                    .get("vulnerable_solution_upgrade")
+                    .replace("{name}", &dep.name)
+                    .replace("{fixed}", fixed),
+                None => texts
+                    .get("vulnerable_solution_replace")
+                    .replace("{name}", &dep.name),
+            };
+            let risk_key = if hit.advisories.len() == 1 {
+                "vulnerable_risk_one"
+            } else {
+                "vulnerable_risk_many"
             };
             ReportFinding {
                 rule_key: "vulnerable_dependency".to_string(),
                 rule_language: String::new(), // no catalog rule: the version rules of the pack.
-                rule_name: "Vulnerable dependency".to_string(),
+                rule_name: texts.get("vulnerable_name"),
                 category: "DEPENDENCIES".to_string(),
                 severity: severity.to_string(),
-                risk: format!(
-                    "{} {} is affected by {} published vulnerabilit{}: {}",
-                    dep.name,
-                    hit.version,
-                    hit.advisories.len(),
-                    if hit.advisories.len() == 1 {
-                        "y"
-                    } else {
-                        "ies"
-                    },
-                    listed.join("; ")
-                ),
+                // `{list}` last: an OSV summary may itself hold `{…}`.
+                risk: texts
+                    .get(risk_key)
+                    .replace("{name}", &dep.name)
+                    .replace("{version}", &hit.version)
+                    .replace("{count}", &hit.advisories.len().to_string())
+                    .replace("{list}", &listed.join("; ")),
                 file: project_relative_path(root, &dep.file),
                 line: dep.line,
                 solution: Some(solution),
@@ -676,7 +720,8 @@ fn vulnerable_dependency_findings(
                 owasp: Some("A06:2021".to_string()),
                 taint_flow: None,
                 taint_flows: vec![],
-                code: dep.raw_line.clone(),
+                // Ticket #194: a manifest line can be long too.
+                code: crate::report::text::clip_line(&dep.raw_line, 0),
                 context_before: String::new(),
                 context_after: String::new(),
                 // The version is exact and the range comes from the
@@ -785,6 +830,7 @@ fn engine_finding_to_report(
     source_lines: &[String],
     lang: &str,
 ) -> ReportFinding {
+    use crate::report::text::{clip_line, clip_lines};
     let (context_before, context_after) =
         crate::report::text::context_lines(source_lines, f.line, 2);
     ReportFinding {
@@ -806,9 +852,11 @@ fn engine_finding_to_report(
             .map(|s| s.to_string()),
         taint_flow: None,
         taint_flows: vec![],
-        code: f.code.clone(),
-        context_before,
-        context_after,
+        // Ticket #194: a long line is shown clipped around the match, its
+        // context lines around the same column.
+        code: clip_line(&f.code, f.column),
+        context_before: clip_lines(&context_before, f.column),
+        context_after: clip_lines(&context_after, f.column),
         confidence: f.confidence,
         benefit: extract_i18n_block(rule_json, "benefit", lang),
         committer: None,
@@ -828,15 +876,19 @@ fn build_taint_flow(
     rel_path: &str,
     source_lines: &[String],
 ) -> TaintFlow {
+    use crate::report::text::{clip_line, focus_of};
     // Each step with its file and real code line: a step stamped by the
     // call graph carries both; any other one is in this file.
     let steps: Vec<TaintStep> = f
         .flow
         .iter()
         .map(|s| {
+            // The report owns its strings: the engine's shared texts are
+            // copied once here (ticket #191).
             let code = s
                 .code
-                .clone()
+                .as_deref()
+                .map(str::to_string)
                 .or_else(|| {
                     s.file
                         .is_none()
@@ -845,7 +897,10 @@ fn build_taint_flow(
                         .map(|l| l.trim().to_string())
                 })
                 .filter(|c| !c.is_empty())
-                .unwrap_or_else(|| s.text.clone());
+                .unwrap_or_else(|| s.text.to_string());
+            // Ticket #194: a long step line is clipped around the step's
+            // expression.
+            let code = clip_line(&code, focus_of(&code, &s.text));
             TaintStep {
                 kind: s.kind.clone(),
                 file: s.file.clone().unwrap_or_else(|| rel_path.to_string()),
@@ -860,17 +915,17 @@ fn build_taint_flow(
         .flow
         .iter()
         .filter(|s| s.kind == "propagation")
-        .map(|s| (s.line, String::new(), s.text.clone()))
+        .map(|s| (s.line, String::new(), clip_line(&s.text, 0)))
         .collect();
     TaintFlow {
         rule_key: f.rule_id.clone(),
         source_file: rel_path.to_string(),
         source_line: source_step.map_or_else(|| f.source_line.unwrap_or(f.line), |s| s.line),
-        source_expr: source_step.map_or_else(String::new, |s| s.text.clone()),
+        source_expr: source_step.map_or_else(String::new, |s| clip_line(&s.text, 0)),
         chain,
         sink_file: rel_path.to_string(),
         sink_line: f.line,
-        sink_expr: sink_step.map_or_else(|| f.sink_text.clone(), |s| s.text.clone()),
+        sink_expr: clip_line(sink_step.map_or(&f.sink_text, |s| &s.text), 0),
         source_kind: f.source_kind.clone(),
         steps,
     }
@@ -883,6 +938,7 @@ fn taint_finding_to_report(
     source_lines: &[String],
     lang: &str,
 ) -> ReportFinding {
+    use crate::report::text::{clip_line, clip_lines, focus_of};
     let (context_before, context_after) =
         crate::report::text::context_lines(source_lines, f.line, 2);
     let flow = build_taint_flow(f, rel_path, source_lines);
@@ -899,7 +955,13 @@ fn taint_finding_to_report(
         .get(f.line.saturating_sub(1))
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| f.sink_text.clone());
+        .unwrap_or_else(|| f.sink_text.to_string());
+    // Ticket #194: a long sink line is clipped around the sink's callee,
+    // its context lines around the same column.
+    let focus = focus_of(&code, &f.sink_text);
+    let code = clip_line(&code, focus);
+    let context_before = clip_lines(&context_before, focus);
+    let context_after = clip_lines(&context_after, focus);
     ReportFinding {
         rule_key: f.rule_id.clone(),
         rule_language: rule_language(rule_json),
@@ -1096,20 +1158,64 @@ struct PassContext<'s> {
     cache_stats: &'s mut Vec<crate::scan::scan_cache::CacheStat>,
 }
 
+/// What phase A made of one discovered file.
+enum FileOutcome {
+    /// Read and parsed, with the lines of code it counts.
+    Parsed(usize, ParsedFile),
+    /// Skipped as minified (ADR-0045, `scan::minified`): its path
+    /// relative to the project, for the report and the console.
+    Minified(String),
+    /// Skipped as part of a web page saved from a browser (ADR-0046,
+    /// `scan::saved_page`): its path relative to the project.
+    SavedPage(String),
+    /// Unreadable or unparsable: left out of the scan, as before.
+    Failed,
+}
+
+#[cfg(test)]
+impl FileOutcome {
+    /// The parsed file, `None` when it was skipped or failed: what a test
+    /// fixture expects.
+    fn into_parsed(self) -> Option<ParsedFile> {
+        match self {
+            FileOutcome::Parsed(_, file) => Some(file),
+            FileOutcome::Minified(_) | FileOutcome::SavedPage(_) | FileOutcome::Failed => None,
+        }
+    }
+}
+
 /// Reads and parses one discovered file: its text, lines, tree and
-/// language, with its path relative to `root`. Returns the lines of code
-/// it counts along with it, or `None` when the file cannot be read or
-/// parsed (it is then left out of the scan, as before). Phase A runs it
-/// on every file in parallel; the tests build their files with it, so
-/// they see a file exactly as a scan does.
-fn parse_file(root: &Path, filepath: &Path) -> Option<(usize, ParsedFile)> {
+/// language, with its path relative to `root`, and the lines of code it
+/// counts. A saved web page (ADR-0046) and a minified file (ADR-0045)
+/// are recognized right after reading, before any parsing. Phase A runs it on every file in parallel;
+/// the tests build their files with it, so they see a file exactly as a
+/// scan does.
+fn parse_file(root: &Path, filepath: &Path) -> FileOutcome {
+    match read_and_parse(root, filepath) {
+        Some(outcome) => outcome,
+        None => FileOutcome::Failed,
+    }
+}
+
+/// Body of [`parse_file`]; `None` when the file cannot be read or parsed.
+fn read_and_parse(root: &Path, filepath: &Path) -> Option<FileOutcome> {
     let language = SourceLanguage::from_path(filepath)?; // unknown extension/name: should not happen (discovery already filtered).
     let source_bytes = std::fs::read(filepath).ok()?;
     let source_text = String::from_utf8_lossy(&source_bytes).into_owned();
+    let rel_path = project_relative_path(root, filepath);
+    // A saved page first: it is often minified too, and its own reason
+    // tells the reader more (ADR-0046).
+    if language == SourceLanguage::Html
+        && crate::scan::saved_page::is_saved_page_text(&source_text)
+    {
+        return Some(FileOutcome::SavedPage(rel_path));
+    }
+    if crate::scan::minified::is_minified(filepath, language, &source_text) {
+        return Some(FileOutcome::Minified(rel_path));
+    }
     let all_lines = split_lines_with_terminators(&source_text);
     let source_lines_plain: Vec<String> =
         all_lines.iter().map(|(_, t)| t.clone()).collect();
-    let rel_path = project_relative_path(root, filepath);
 
     let mut parser = TsParser::new();
     let ts_lang: tree_sitter::Language = match language {
@@ -1147,7 +1253,7 @@ fn parse_file(root: &Path, filepath: &Path) -> Option<(usize, ParsedFile)> {
         | SourceLanguage::Yaml
         | SourceLanguage::Dockerfile => count_js_loc(&source_bytes, &tree),
     };
-    Some((
+    Some(FileOutcome::Parsed(
         loc,
         ParsedFile {
             rel_path,
@@ -1509,18 +1615,36 @@ pub fn run_scan(config: &ScanConfig) -> ScanReport {
     // the pipeline (Phase B/C) and the reports depend on it to be
     // identical to the sequential version.
     let t_phase_a = std::time::Instant::now();
-    let parsed_results: Vec<Option<(usize, ParsedFile)>> = files
+    // ADR-0046: the resources folders of saved web pages, found once
+    // for all files (one read of the head of each candidate page).
+    let saved_page_folders = crate::scan::saved_page::SavedPageFolders::find(&config.root, &files);
+    let parsed_results: Vec<FileOutcome> = files
         .par_iter()
-        .map(|filepath| parse_file(&config.root, filepath))
+        .map(|filepath| {
+            if saved_page_folders.contains(filepath) {
+                FileOutcome::SavedPage(project_relative_path(&config.root, filepath))
+            } else {
+                parse_file(&config.root, filepath)
+            }
+        })
         .collect();
 
-    let loc_and_files: Vec<(usize, ParsedFile)> = parsed_results.into_iter().flatten().collect();
-
     let mut parsed_files: Vec<ParsedFile> = Vec::new();
+    // ADR-0045: minified files are skipped, in discovery order.
+    let mut skipped_minified: Vec<String> = Vec::new();
+    // ADR-0046: so are saved web pages, in discovery order.
+    let mut skipped_saved_pages: Vec<String> = Vec::new();
     let mut total_loc = 0usize;
-    for (loc, parsed_file) in loc_and_files {
-        total_loc += loc;
-        parsed_files.push(parsed_file);
+    for outcome in parsed_results {
+        match outcome {
+            FileOutcome::Parsed(loc, parsed_file) => {
+                total_loc += loc;
+                parsed_files.push(parsed_file);
+            }
+            FileOutcome::Minified(rel_path) => skipped_minified.push(rel_path),
+            FileOutcome::SavedPage(rel_path) => skipped_saved_pages.push(rel_path),
+            FileOutcome::Failed => {}
+        }
     }
 
     // Per-language count (ticket #46), split by extension when a group
@@ -1610,29 +1734,41 @@ pub fn run_scan(config: &ScanConfig) -> ScanReport {
         let t_deps = std::time::Instant::now();
         let all_deps = declared_dependencies.take().unwrap_or_default();
         let unpinned: Vec<_> = all_deps.iter().filter(|d| d.version.is_none()).collect();
+        // Ticket #189: the texts follow `--lang`; the unpinned finding had
+        // no message and no solution at all before (2026-11-16).
+        let texts = DependencyTexts::new(&config.lang);
         let unpinned_findings: Vec<ReportFinding> = unpinned
             .iter()
-            .map(|dep| ReportFinding {
-                rule_key: "unpinned_dependency".to_string(),
-                rule_language: String::new(), // no catalog rule: a manifest check.
-                rule_name: "Unpinned dependency".to_string(),
-                category: "DEPENDENCIES".to_string(),
-                severity: "HIGH".to_string(),
-                risk: String::new(),
-                file: project_relative_path(&config.root, &dep.file),
-                line: dep.line,
-                solution: None,
-                cwe: vec![],
-                owasp: None,
-                taint_flow: None,
-                taint_flows: vec![],
-                code: dep.raw_line.clone(),
-                context_before: String::new(),
-                context_after: String::new(),
-                confidence: 90,
-                benefit: String::new(),
-                committer: None,
-                rule_source: "json_builtin".to_string(),
+            .map(|dep| {
+                let file = project_relative_path(&config.root, &dep.file);
+                ReportFinding {
+                    rule_key: "unpinned_dependency".to_string(),
+                    rule_language: String::new(), // no catalog rule: a manifest check.
+                    rule_name: texts.get("unpinned_name"),
+                    category: "DEPENDENCIES".to_string(),
+                    severity: "HIGH".to_string(),
+                    risk: texts.get("unpinned_risk").replace("{name}", &dep.name),
+                    solution: Some(
+                        texts
+                            .get("unpinned_solution")
+                            .replace("{name}", &dep.name)
+                            .replace("{file}", &file),
+                    ),
+                    file,
+                    line: dep.line,
+                    cwe: vec![],
+                    owasp: None,
+                    taint_flow: None,
+                    taint_flows: vec![],
+                    // Ticket #194: a manifest line can be long too.
+                    code: crate::report::text::clip_line(&dep.raw_line, 0),
+                    context_before: String::new(),
+                    context_after: String::new(),
+                    confidence: 90,
+                    benefit: String::new(),
+                    committer: None,
+                    rule_source: "json_builtin".to_string(),
+                }
             })
             .collect();
         let (vulnerable, status) = match read_version_rules(&config.rules_path) {
@@ -1647,7 +1783,10 @@ pub fn run_scan(config: &ScanConfig) -> ScanReport {
                         .map(|e| (e.name.clone(), e.advisories))
                         .collect(),
                 };
-                (vulnerable_dependency_findings(&file, &all_deps, &config.root), status)
+                (
+                    vulnerable_dependency_findings(&file, &all_deps, &config.root, &texts),
+                    status,
+                )
             }
             Ok(None) => (Vec::new(), VersionRulesStatus::Missing),
             Err(error) => (Vec::new(), VersionRulesStatus::Unreadable { error }),
@@ -1809,6 +1948,8 @@ pub fn run_scan(config: &ScanConfig) -> ScanReport {
         rule_sources,
         rules_loaded,
         skipped_dirs,
+        skipped_minified,
+        skipped_saved_pages,
         rule_catalog,
         test_results,
         dependency_stats,
@@ -2091,6 +2232,119 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    /// ADR-0045: a minified file is skipped before parsing and named in
+    /// the report; a hand-written file beside it is scanned as usual.
+    #[test]
+    fn test_end_to_end_minified_file_is_skipped_and_listed() {
+        let root = temp_dir();
+        let rules_dir = root.join("rules");
+        std::fs::create_dir_all(&rules_dir).unwrap();
+        write(
+            &rules_dir,
+            "eval_usage.sca",
+            "rule eval_usage\n  language  javascript\n  category  security\n  severity  HIGH\n  match\n    pattern  eval\\s*\\(\n    scope    line\n  end\nend\n",
+        );
+        write(&root, "app.js", "const x = eval(userInput);\n");
+        write(&root, "bundle.js", &"eval(a);var b=1;".repeat(200));
+
+        let config = ScanConfig {
+            root: root.clone(),
+            rules_path: rules_dir,
+            suppress_file: None,
+            exclude_patterns: vec![],
+            ..ScanConfig::default()
+        };
+        let report = run_scan(&config);
+        assert_eq!(report.skipped_minified, vec!["bundle.js".to_string()]);
+        assert_eq!(report.files_scanned, 1);
+        let files: Vec<&str> = report.findings.iter().map(|f| f.file.as_str()).collect();
+        assert_eq!(files, vec!["app.js"]);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Ticket #194: a finding on a line of 100,000 characters shows a
+    /// bounded snippet that holds the match. Python, never judged minified
+    /// on its content (ADR-0045), keeps the file in the scan.
+    #[test]
+    fn test_end_to_end_long_line_is_clipped_around_the_match() {
+        let root = temp_dir();
+        let rules_dir = root.join("rules");
+        std::fs::create_dir_all(&rules_dir).unwrap();
+        write(
+            &rules_dir,
+            "eval_usage.sca",
+            "rule eval_usage\n  language  python\n  category  security\n  severity  HIGH\n  match\n    pattern  eval\\s*\\(\n    scope    line\n  end\nend\n",
+        );
+        let long_line = format!(
+            "data = '{}'; x = eval(user_input); y = '{}'\n",
+            "a".repeat(50_000),
+            "b".repeat(50_000)
+        );
+        write(&root, "app.py", &long_line);
+
+        let config = ScanConfig {
+            root: root.clone(),
+            rules_path: rules_dir,
+            suppress_file: None,
+            exclude_patterns: vec![],
+            ..ScanConfig::default()
+        };
+        let report = run_scan(&config);
+        let finding = report
+            .findings
+            .iter()
+            .find(|f| f.rule_key == "eval_usage")
+            .expect("eval( is found");
+        assert!(
+            finding.code.contains("eval(user_input)"),
+            "{}",
+            finding.code
+        );
+        assert!(finding.code.starts_with('…') && finding.code.ends_with('…'));
+        assert!(finding.code.chars().count() <= crate::report::text::MAX_SHOWN_CHARS + 2);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// ADR-0046: a page saved from a browser and the files of its
+    /// `<name>_files/` folder are skipped and named; the project's own
+    /// page and script beside them are scanned as usual.
+    #[test]
+    fn test_end_to_end_saved_web_page_is_skipped_and_listed() {
+        let root = temp_dir();
+        let rules_dir = root.join("rules");
+        std::fs::create_dir_all(&rules_dir).unwrap();
+        write(
+            &rules_dir,
+            "eval_usage.sca",
+            "rule eval_usage\n  language  javascript\n  category  security\n  severity  HIGH\n  match\n    pattern  eval\\s*\\(\n    scope    line\n  end\nend\n",
+        );
+        write(&root, "app.js", "const x = eval(userInput);\n");
+        write(&root, "index.html", "<html><body>project page</body></html>\n");
+        write(
+            &root,
+            "writeup.html",
+            "<!DOCTYPE html>\n<!-- saved from url=(0023)https://example.com/x -->\n<html></html>\n",
+        );
+        std::fs::create_dir_all(root.join("writeup_files")).unwrap();
+        write(&root.join("writeup_files"), "main.js", "eval(location.hash);\n");
+
+        let config = ScanConfig {
+            root: root.clone(),
+            rules_path: rules_dir,
+            suppress_file: None,
+            exclude_patterns: vec![],
+            ..ScanConfig::default()
+        };
+        let report = run_scan(&config);
+        let mut skipped = report.skipped_saved_pages.clone();
+        skipped.sort();
+        assert_eq!(skipped, vec!["writeup.html".to_string(), "writeup_files/main.js".to_string()]);
+        assert!(report.skipped_minified.is_empty());
+        let files: Vec<&str> = report.findings.iter().map(|f| f.file.as_str()).collect();
+        assert_eq!(files, vec!["app.js"]);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     #[test]
     fn test_end_to_end_taint_rule_finds_flow() {
         let root = temp_dir();
@@ -2366,6 +2620,103 @@ mod tests {
             ..config
         });
         assert!(report.findings.iter().all(|f| f.rule_key != "unpinned_dependency"));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Ticket #189: the dependency findings were in English whatever
+    /// `--lang`. Their name, message and solution follow the report
+    /// language in the four languages; the advisory identifier and the OSV
+    /// summary stay as published.
+    #[test]
+    fn test_dependency_findings_follow_the_report_language() {
+        use crate::project::advisory_file::{EcosystemPayload, encode};
+        let root = temp_dir();
+        write(&root, "requirements.txt", "lxml==4.6.2\nrequests\n");
+        let pypi = r#"{"format":1,"ecosystem":"PyPI","last_modified":"2026-11-07T00:00:00Z","advisories":[
+              {"id":"GHSA-jq4v-f5q6-mjqq","aliases":["CVE-2021-28957"],"summary":"lxml vulnerable to Cross-Site Scripting",
+               "severity":"MEDIUM","cwe":["CWE-79"],
+               "packages":[{"name":"lxml","ranges":[[{"introduced":"0"},{"fixed":"4.6.3"}]]}]}]}"#;
+        let container = encode(
+            "test",
+            &[EcosystemPayload {
+                name: "PyPI".into(),
+                advisories: 1,
+                last_modified: "2026-11-07T00:00:00Z".into(),
+                json: pypi.as_bytes().to_vec(),
+            }],
+        )
+        .unwrap();
+        let pack = root.join("rules.scapack");
+        std::fs::write(
+            &pack,
+            crate::rules::pack_format::write_pack("test", &[], Some(&container)),
+        )
+        .unwrap();
+        let scan = |lang: &str| {
+            let report = run_scan(&ScanConfig {
+                root: root.clone(),
+                rules_path: pack.clone(),
+                exclude_patterns: vec![],
+                lang: lang.to_string(),
+                ..ScanConfig::default()
+            });
+            let find = |key: &str| {
+                report
+                    .findings
+                    .iter()
+                    .find(|f| f.rule_key == key)
+                    .unwrap_or_else(|| panic!("{lang}: {key} reported"))
+                    .clone()
+            };
+            (find("vulnerable_dependency"), find("unpinned_dependency"))
+        };
+
+        let (vulnerable, unpinned) = scan("fr");
+        assert_eq!(vulnerable.rule_name, "Dépendance vulnérable");
+        assert!(
+            vulnerable
+                .risk
+                .starts_with("lxml 4.6.2 est touchée par 1 vulnérabilité publiée : "),
+            "{}",
+            vulnerable.risk
+        );
+        // Identifier and OSV summary: as published.
+        assert!(vulnerable.risk.contains("CVE-2021-28957 (MEDIUM): lxml vulnerable to Cross-Site Scripting"));
+        assert_eq!(
+            vulnerable.solution.as_deref(),
+            Some("Mettez à jour lxml vers la version 4.6.3 ou plus récente.")
+        );
+        assert_eq!(unpinned.rule_name, "Dépendance sans version fixée");
+        assert!(
+            unpinned.risk.starts_with("Sans version fixée, requests "),
+            "{}",
+            unpinned.risk
+        );
+        assert_eq!(
+            unpinned.solution.as_deref(),
+            Some("Indiquez la version exacte de requests dans requirements.txt.")
+        );
+
+        // Every language has its own texts, none left as a locale key.
+        let mut names = std::collections::BTreeSet::new();
+        for lang in ["en", "fr", "es", "de"] {
+            let (vulnerable, unpinned) = scan(lang);
+            for text in [
+                &vulnerable.rule_name,
+                &vulnerable.risk,
+                vulnerable.solution.as_ref().unwrap(),
+                &unpinned.rule_name,
+                &unpinned.risk,
+                unpinned.solution.as_ref().unwrap(),
+            ] {
+                assert!(
+                    !text.contains("dependency_findings.") && !text.contains('{'),
+                    "{lang}: {text}"
+                );
+            }
+            names.insert(vulnerable.rule_name);
+        }
+        assert_eq!(names.len(), 4, "one name per language: {names:?}");
         std::fs::remove_dir_all(&root).ok();
     }
 

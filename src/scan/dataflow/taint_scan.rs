@@ -12,11 +12,11 @@
 
 use tree_sitter::Tree;
 
-use super::cfg::{build_cfg, build_cfg_from_block};
 use super::lattice::{SourceInfo, Taint, empty_state, state_set};
-use super::summary::{collect_functions, route_source_params, rule_source_kinds};
+use super::line_facts::RuleLines;
+use super::prepared::PreparedFile;
+use super::summary::{FunctionInfo, prepare_python_file, route_source_params, rule_source_kinds};
 use super::transfer::{Finding, RuleSpecs};
-use super::worklist::analyze;
 
 /// Runs a taint rule on an already-parsed Python file.
 ///
@@ -32,18 +32,39 @@ pub fn run_taint_rule(
     specs: &RuleSpecs,
     source_lines: Option<&[String]>,
 ) -> Vec<Finding> {
-    let root = tree.root_node();
+    run_taint_rule_prepared(
+        &prepare_python_file(tree.root_node(), source),
+        source,
+        specs,
+        source_lines,
+    )
+}
 
-    let cfg = build_cfg(tree, source);
-    let result = analyze(&cfg, source, specs, None, source_lines);
-    let mut all_findings: Vec<Finding> = result.findings;
+/// [`run_taint_rule`] on a file already prepared by
+/// `summary::prepare_python_file`: the scan prepares each file once for
+/// all its rules (ticket #192). `source` is the file's text, read for
+/// the route parameters of each function.
+pub fn run_taint_rule_prepared(
+    file: &PreparedFile<FunctionInfo>,
+    source: &[u8],
+    specs: &RuleSpecs,
+    source_lines: Option<&[String]>,
+) -> Vec<Finding> {
+    // One per-line cache of the hybrid layer for every analysis of this
+    // rule on this file (ticket #190).
+    let rule_lines = source_lines.map(|lines| RuleLines::new(lines, specs));
+
+    let mut all_findings: Vec<Finding> = match &file.module {
+        Some(module) => module.analyze(specs, None, rule_lines.as_ref()).findings,
+        None => Vec::new(),
+    };
 
     let http_rule = rule_source_kinds(specs).iter().any(|k| k == "http");
-    for fn_info in collect_functions(root, source) {
-        let Some(body) = fn_info.body_node else {
+    for function in &file.functions {
+        let Some(sub_cfg) = function.body.as_ref() else {
             continue;
         };
-        let sub_cfg = build_cfg_from_block(source, body);
+        let fn_info = &function.info;
 
         // Deliberate deviation from Python (`dataflow_taint.py`, which
         // seeds route parameters for every taint rule): a rule whose
@@ -51,7 +72,7 @@ pub fn run_taint_rule(
         // only) never sees them, otherwise every `.execute(` of a
         // FastAPI handler became "LLM output reaching a sink".
         let route_params = if http_rule {
-            route_source_params(&fn_info, source)
+            route_source_params(fn_info, source)
         } else {
             Vec::new()
         };
@@ -67,7 +88,7 @@ pub fn run_taint_rule(
                         ["http".to_string()],
                         SourceInfo {
                             line: fn_info.lineno,
-                            expr: format!("{}({pname})", fn_info.name),
+                            expr: format!("{}({pname})", fn_info.name).into(),
                             kind: "http".to_string(),
                         },
                     ),
@@ -76,7 +97,7 @@ pub fn run_taint_rule(
             Some(state)
         };
 
-        let sub_result = analyze(&sub_cfg, source, specs, init_state.as_ref(), source_lines);
+        let sub_result = sub_cfg.analyze(specs, init_state.as_ref(), rule_lines.as_ref());
         all_findings.extend(sub_result.findings);
     }
 

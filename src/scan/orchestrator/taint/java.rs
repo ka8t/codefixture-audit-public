@@ -15,7 +15,7 @@ use super::{
 use crate::scan::dataflow::call_graph::{NodeKey, ResolvedSummaries, SummaryReuse};
 use crate::scan::dataflow::java_call_graph::JavaCallGraph;
 use crate::scan::dataflow::java_summary::{collect_java_field_types, collect_java_local_types};
-use crate::scan::dataflow::java_taint_scan::run_taint_rule_java;
+use crate::scan::dataflow::java_taint_scan::{run_taint_rule_java, run_taint_rule_java_prepared};
 use crate::scan::dataflow::transfer::RuleSpecs;
 use crate::scan::orchestrator::{ParsedFile, SourceLanguage};
 
@@ -76,11 +76,20 @@ impl<'a> TaintLanguage<'a> for JavaTaint<'a> {
     ) -> TaintFindings {
         specs.summaries = file_summaries(resolved, &file.rel_path);
         specs.type_map = self.type_maps.get(&file.rel_path).cloned().unwrap_or_default();
-        run_taint_rule_java(
-            file.tree.root_node(),
-            &file.source_bytes,
-            specs,
-            Some(&file.source_lines_plain),
-        )
+        // The graph prepared every file of the pass once for all its
+        // rules (ticket #192). A file it does not know cannot happen (the
+        // pass is built from the files it analyzes); it would still be
+        // analyzed, only prepared again for this rule.
+        match self.call_graph.prepared_file(&file.rel_path) {
+            Some(prepared) => {
+                run_taint_rule_java_prepared(prepared, specs, Some(&file.source_lines_plain))
+            }
+            None => run_taint_rule_java(
+                file.tree.root_node(),
+                &file.source_bytes,
+                specs,
+                Some(&file.source_lines_plain),
+            ),
+        }
     }
 }

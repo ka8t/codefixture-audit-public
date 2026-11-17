@@ -1,11 +1,12 @@
 //! Discovery of PHP functions and summaries for interprocedural
 //! analysis — direct template of `js_summary.rs`.
 //!
-//! **Maximum sharing, not a port**: `compute_summary_from_cfg_generic`
+//! **Maximum sharing, not a port**: `compute_summary_prepared`
 //! (`summary.rs`) already carries 100% of the probing algorithm —
-//! language-neutral. `compute_php_summary` below only builds the PHP
-//! CFG and then delegates to `summary::compute_php_summary_from_cfg`;
-//! no duplicated logic.
+//! language-neutral. `compute_php_summary` below only builds and
+//! prepares the PHP CFG (`prepare_php_file` for a whole file, once per
+//! scan, ticket #192) and then delegates to
+//! `summary::compute_summary_prepared`; no duplicated logic.
 //!
 //! **Interprocedural resolution wired on 08/30** (`php_call_graph.rs`,
 //! orchestrator): `php_call_graph.rs::PhpCallGraph::build` directly
@@ -35,11 +36,17 @@
 //! (`anonymous_function`, classic block form) is still collected
 //! normally.
 
+use super::line_facts::RuleLines;
+use super::prepared::{PreparedCfg, PreparedFile, PreparedFunction};
 use super::transfer::{FunctionSummary, RuleSpecs};
+use super::worklist::prepare_php_ir;
 use tree_sitter::Node;
 
 /// Metadata for a PHP function (top-level function, class method,
 /// `function(...) {...}` closure).
+// Clone: the call graph keeps a copy as its node, next to the
+// prepared function that owns the original (ticket #192).
+#[derive(Clone)]
 pub struct PhpFunctionInfo<'tree> {
     pub name: String,
     pub body_node: Node<'tree>,
@@ -139,29 +146,80 @@ fn function_name(node: Node, source: &[u8]) -> String {
     if let Some(inferred) = inferred_name_from_context(node, source) {
         return inferred;
     }
-    format!("<anonymous>:{}", node.start_position().row + 1)
+    // Line AND column (ticket #193): two anonymous functions on the same
+    // line (`a.then(function () {...}).catch(function () {...})`) must not
+    // share a name, or the call graph, which keys its nodes by
+    // (file, name), would merge them into one node. Deliberate deviation
+    // from the line-only name: no call ever resolves to this synthetic
+    // name, it only has to be unique within the file.
+    let pos = node.start_position();
+    format!("<anonymous>:{}:{}", pos.row + 1, pos.column + 1)
 }
 
 // ============================================================================
 // Summary computation (groundwork, not yet consumed)
 // ============================================================================
 
+/// Computes the summary of a PHP function: prepares its body,
+/// then [`compute_php_summary_with`]. A caller that already holds the prepared
+/// body (the call graph, ticket #192) calls [`compute_php_summary_with`].
 pub fn compute_php_summary<'tree>(
     fn_info: &PhpFunctionInfo<'tree>,
     specs: &RuleSpecs,
     source: &'tree [u8],
-    source_lines: Option<&[String]>,
+    source_lines: Option<&RuleLines>,
 ) -> FunctionSummary {
-    let cfg = super::php_cfg::build_php_cfg(fn_info.body_node, source);
-    super::summary::compute_php_summary_from_cfg(
-        &cfg,
+    let body = PreparedCfg::new(
+        super::php_cfg::build_php_cfg(fn_info.body_node, source),
+        source,
+        prepare_php_ir,
+    );
+    compute_php_summary_with(fn_info, &body, specs, source_lines)
+}
+
+/// Summary of a PHP function whose body is already prepared
+/// ([`prepare_php_file`]); delegates to the shared
+/// probing algorithm (`summary::compute_summary_prepared`).
+pub fn compute_php_summary_with(
+    fn_info: &PhpFunctionInfo,
+    body: &PreparedCfg,
+    specs: &RuleSpecs,
+    source_lines: Option<&RuleLines>,
+) -> FunctionSummary {
+    super::summary::compute_summary_prepared(
+        body,
         &fn_info.name,
         &fn_info.param_names,
         specs,
-        source,
         source_lines,
         fn_info.lineno,
     )
+}
+
+/// Prepares a PHP file for every taint rule of the scan (ticket
+/// #192): the module top level and every collected function.
+pub fn prepare_php_file<'tree>(
+    root: Node<'tree>,
+    source: &'tree [u8],
+) -> PreparedFile<'tree, PhpFunctionInfo<'tree>> {
+    PreparedFile {
+        module: Some(PreparedCfg::new(
+            super::php_cfg::build_php_cfg(root, source),
+            source,
+            prepare_php_ir,
+        )),
+        functions: collect_php_functions(root, source)
+            .into_iter()
+            .map(|info| PreparedFunction {
+                body: Some(PreparedCfg::new(
+                    super::php_cfg::build_php_cfg(info.body_node, source),
+                    source,
+                    prepare_php_ir,
+                )),
+                info,
+            })
+            .collect(),
+    }
 }
 
 pub fn compute_php_file_summaries<'tree>(
@@ -170,9 +228,12 @@ pub fn compute_php_file_summaries<'tree>(
     source: &'tree [u8],
     source_lines: Option<&[String]>,
 ) -> std::collections::BTreeMap<String, FunctionSummary> {
+    // One per-line cache of the hybrid layer for every summary of this
+    // rule on this file (ticket #190).
+    let rule_lines = source_lines.map(|lines| RuleLines::new(lines, specs));
     let mut summaries = std::collections::BTreeMap::new();
     for fn_info in collect_php_functions(root, source) {
-        let summary = compute_php_summary(&fn_info, specs, source, source_lines);
+        let summary = compute_php_summary(&fn_info, specs, source, rule_lines.as_ref());
         summaries.insert(fn_info.name.clone(), summary);
     }
     summaries
@@ -217,6 +278,17 @@ mod tests {
         let functions = collect_php_functions(tree.root_node(), src.as_bytes());
         assert_eq!(functions.len(), 1);
         assert!(functions[0].name.starts_with("<anonymous>:"));
+    }
+
+    #[test]
+    fn test_two_anonymous_closures_on_one_line_get_distinct_names() {
+        // Ticket #193: the synthetic name carries the column, so two
+        // closures written on the same line stay two functions.
+        let src = "<?php\nmap(function($a) { f($a); }, function($b) { g($b); });\n";
+        let tree = parse_php(src);
+        let functions = collect_php_functions(tree.root_node(), src.as_bytes());
+        let names: Vec<&str> = functions.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, vec!["<anonymous>:2:5", "<anonymous>:2:30"]);
     }
 
     #[test]

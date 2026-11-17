@@ -149,6 +149,12 @@ fn is_match(re: &Regex, text: &str) -> bool {
     re.is_match(text).unwrap_or(false)
 }
 
+/// Byte offset where `re` first matches in `text`, `None` when it does
+/// not match (or fails, like [`is_match`]): the column of a finding.
+fn match_start(re: &Regex, text: &str) -> Option<usize> {
+    re.find(text).ok().flatten().map(|m| m.start())
+}
+
 /// Executes a regex rule against a file — one finding per
 /// match. Mirrors `execute()` (regex.py).
 pub fn execute_regex_rule(rule: &CompiledRegexRule, all_lines: &[(usize, String)]) -> Vec<Finding> {
@@ -168,7 +174,9 @@ pub fn execute_regex_rule(rule: &CompiledRegexRule, all_lines: &[(usize, String)
         .filter_map(|p| p.compiled_pattern_not.as_ref())
         .collect();
 
-    let mut candidates: BTreeMap<usize, String> = BTreeMap::new();
+    // Line number → (text the negative patterns are tested on, byte
+    // column of the match in the line, ticket #194).
+    let mut candidates: BTreeMap<usize, (String, usize)> = BTreeMap::new();
 
     for p in &rule.patterns {
         if p.match_scope == "file" {
@@ -192,19 +200,19 @@ pub fn execute_regex_rule(rule: &CompiledRegexRule, all_lines: &[(usize, String)
                 continue;
             }
             for (line_num, line) in all_lines {
-                if is_match(&p.compiled, line) {
-                    candidates.insert(*line_num, clean_content.clone());
+                if let Some(column) = match_start(&p.compiled, line) {
+                    candidates.insert(*line_num, (clean_content.clone(), column));
                 }
             }
         } else if p.match_scope == "line" {
             for ((line_num, line), (_, clean_line)) in all_lines.iter().zip(clean_lines.iter()) {
-                if is_match(&p.compiled, line) {
+                if let Some(column) = match_start(&p.compiled, line) {
                     if let Some(with) = &p.compiled_with
                         && !is_match(with, clean_line)
                     {
                         continue;
                     }
-                    candidates.insert(*line_num, clean_line.clone());
+                    candidates.insert(*line_num, (clean_line.clone(), column));
                 }
             }
         } else if let Some(window_str) = p.match_scope.strip_prefix("context-") {
@@ -240,6 +248,12 @@ pub fn execute_regex_rule(rule: &CompiledRegexRule, all_lines: &[(usize, String)
                 let local_start = m.start();
                 let newlines_before = block_text[..local_start].matches('\n').count();
                 let start_line = all_lines[start_idx].0 + newlines_before;
+                // Column of the match in its own line: past the last line
+                // break before it.
+                let column = local_start
+                    - block_text[..local_start]
+                        .rfind('\n')
+                        .map_or(0, |newline| newline + 1);
 
                 // block_text only extends forward from
                 // start_idx: pattern-not could never see a
@@ -257,7 +271,7 @@ pub fn execute_regex_rule(rule: &CompiledRegexRule, all_lines: &[(usize, String)
 
                 candidates.insert(
                     start_line,
-                    format!("{clean_backward_text}{clean_block_text}"),
+                    (format!("{clean_backward_text}{clean_block_text}"), column),
                 );
             }
         }
@@ -269,7 +283,7 @@ pub fn execute_regex_rule(rule: &CompiledRegexRule, all_lines: &[(usize, String)
 
     let mut findings = Vec::new();
     let n_lines = all_lines.len();
-    for (&line_num, context_text) in &candidates {
+    for (&line_num, (context_text, column)) in &candidates {
         if line_num < 1 || line_num > n_lines {
             continue;
         }
@@ -286,6 +300,7 @@ pub fn execute_regex_rule(rule: &CompiledRegexRule, all_lines: &[(usize, String)
             severity: rule.severity.clone(),
             line: line_num,
             code: line_text.clone(),
+            column: *column,
             confidence: rule.confidence,
         });
     }

@@ -175,6 +175,8 @@ pub fn execute_file_contains_rule(
         severity: rule.severity.clone(),
         line: 1,
         code,
+        // A file-level condition points at no spot in the line.
+        column: 0,
         confidence: rule.confidence,
     })
 }

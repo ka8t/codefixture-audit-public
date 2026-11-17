@@ -13,10 +13,16 @@
 //! lowering at runtime via a `language: str` parameter. Rust has no
 //! such dynamic-typing escape hatch — the same contract is ported via
 //! generic parameters resolved at compile time
-//! (`analyze_generic`/`compute_dead_edges_generic`, parameterized by
-//! `lower_all`/`lower_expr`), with `analyze` (Python, unchanged for
-//! every existing caller) and `analyze_java` as concrete
-//! instantiations.
+//! (`prepare_ir_generic`/`compute_dead_edges_generic`, parameterized by
+//! `lower_all`/`lower_expr`), with `prepare_ir` (Python) and
+//! `prepare_java_ir`, `prepare_js_ir`... as concrete instantiations.
+//!
+//! **Preparation and analysis are separate (ticket #192)**: the
+//! lowering and the constant pre-pass do not read the rule, so they are
+//! done once per CFG (`PreparedIr`, held with its CFG by
+//! `prepared::PreparedCfg`) and only the taint fixpoint
+//! (`analyze_prepared`) runs for each rule. `analyze`, `analyze_java`...
+//! chain both for a caller that analyzes a CFG once.
 
 use std::collections::{BTreeMap, HashSet, VecDeque};
 
@@ -24,11 +30,12 @@ use tree_sitter::Node;
 
 use super::cfg::{Cfg, EdgeLabel, NodeKind};
 use super::const_eval::{
-    ConstState, apply_list_mutation, const_state_equal, empty_const_state, eval_const,
-    invalidate_var, is_truthy, join_const_states, simplify_stmt, update_const_on_assign,
+    ConstState, EvalConst, apply_assign, const_state_equal, empty_const_state, eval_const,
+    is_truthy, join_const_states, simplify_stmt, simulate_list_mutation,
 };
 use super::ir::{IrStmt, Rhs, canon_rhs};
 use super::lattice::{State, empty_state, state_equal, state_join, state_widen};
+use super::line_facts::RuleLines;
 use super::lowering::{lower_expr_standalone, lower_for_target_assign, lower_stmts};
 use super::transfer::{Finding, RuleSpecs, transfer_stmts};
 
@@ -111,7 +118,8 @@ fn simplify_and_apply_stmts(
         let simplified = simplify_stmt(stmt, &cs);
         match &simplified {
             IrStmt::Assign { lhs, rhs, .. } => {
-                cs = update_const_on_assign(&cs, lhs, rhs);
+                // In place: one copy of the state per node (ticket #191).
+                apply_assign(&mut cs, lhs, rhs);
             }
             IrStmt::Call {
                 callee: Rhs::AttrRef { base, attr },
@@ -124,9 +132,13 @@ fn simplify_and_apply_stmts(
                     // §9.quater — first tries to simulate the
                     // operation on a list tracked as Tuple. Otherwise,
                     // conservative invalidation.
-                    match apply_list_mutation(&cs, &base_key, attr, args) {
-                        Some(simulated) => cs = simulated,
-                        None => cs = invalidate_var(&cs, &base_key),
+                    match simulate_list_mutation(&cs, &base_key, attr, args) {
+                        Some(list) => {
+                            cs.insert(base_key, EvalConst::Tuple(list));
+                        }
+                        None => {
+                            cs.remove(&base_key);
+                        }
                     }
                 }
             }
@@ -347,10 +359,138 @@ pub struct AnalysisResult {
     pub iterations: u32,
 }
 
-/// Runs the dataflow analysis on a CFG with a taint rule (§6).
+/// Rule-independent preparation of one CFG: its statements lowered to
+/// IR, simplified by the constant-propagation pre-pass (§9), and the
+/// dead edges that pre-pass found.
+///
+/// None of this reads the taint rule, so it is computed once per CFG
+/// and shared by every analysis of that CFG: the base pass and the
+/// per-parameter probes of a function summary, and (ticket #192, step
+/// 2) every rule of the scan. Before #192, each analysis lowered the
+/// whole CFG again: on `bountybench-main`, lowering was about 65 % of
+/// the scan time.
+///
+/// It does not hold the CFG it was built from (`Cfg` is not `Clone`
+/// and the callers keep using theirs); [`analyze_prepared`] takes both
+/// and checks in debug builds that they belong together.
+pub struct PreparedIr {
+    /// Simplified IR of each CFG node, by node id.
+    node_ir: BTreeMap<usize, Vec<IrStmt>>,
+    /// `(src, dst)` edges made dead by constant propagation.
+    dead_edges: HashSet<(usize, usize)>,
+    /// **Raw** IR (before the constant pre-pass) of the nodes holding a
+    /// `Return` statement, with their node id: what a function summary
+    /// replays to compute the taint of the return value
+    /// (`summary::return_taint_generic`). Raw on purpose: the return
+    /// taint has always been computed on the raw lowering (port of
+    /// `summary.py::return_taint`), and ticket #192 keeps results
+    /// identical. Kept here because the preparation already lowers
+    /// every node: the summary no longer lowers anything itself.
+    return_nodes: Vec<(usize, Vec<IrStmt>)>,
+}
+
+impl PreparedIr {
+    /// See the `return_nodes` field.
+    pub(crate) fn return_nodes(&self) -> &[(usize, Vec<IrStmt>)] {
+        &self.return_nodes
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Number of [`prepare_ir_generic`] calls on this thread, so that
+    /// tests can check a preparation is shared instead of redone.
+    pub(crate) static IR_PREPARATIONS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+/// Prepares `cfg` with the given language lowering (`lower_all` for
+/// the nodes, `lower_expr` for the standalone conditions read by the
+/// dead-edge pre-pass). Rust mirror of the `language: str` parameter of
+/// `worklist.py::analyze`, resolved at compile time.
+pub fn prepare_ir_generic<'tree, FAll, FExpr>(
+    cfg: &Cfg<'tree>,
+    source: &'tree [u8],
+    lower_all: FAll,
+    lower_expr: FExpr,
+) -> PreparedIr
+where
+    FAll: Fn(&Cfg<'tree>, &'tree [u8]) -> BTreeMap<usize, Vec<IrStmt>>,
+    FExpr: Fn(&'tree [u8], Node<'tree>) -> (Rhs, Vec<IrStmt>) + Copy,
+{
+    #[cfg(test)]
+    IR_PREPARATIONS.with(|count| count.set(count.get() + 1));
+    // Lowers everything at once, upfront.
+    let mut node_ir = lower_all(cfg, source);
+    // Copied before the pre-pass below simplifies `node_ir` in place.
+    let return_nodes: Vec<(usize, Vec<IrStmt>)> = node_ir
+        .iter()
+        .filter(|(_, ir)| ir.iter().any(|stmt| matches!(stmt, IrStmt::Return { .. })))
+        .map(|(&nid, ir)| (nid, ir.clone()))
+        .collect();
+    // §9 — pre-pass: constant propagation to identify dead edges
+    // (branches whose condition is known at compile time). It also
+    // simplifies `node_ir` in place.
+    let dead_edges = compute_dead_edges_generic(cfg, &mut node_ir, source, lower_expr);
+    PreparedIr {
+        node_ir,
+        dead_edges,
+        return_nodes,
+    }
+}
+
+/// Prepares a Python CFG (see [`PreparedIr`]).
+pub fn prepare_ir<'tree>(cfg: &Cfg<'tree>, source: &'tree [u8]) -> PreparedIr {
+    prepare_ir_generic(cfg, source, lower_all_nodes, lower_expr_standalone)
+}
+
+/// Prepares a Java CFG (see [`PreparedIr`]).
+pub fn prepare_java_ir<'tree>(cfg: &Cfg<'tree>, source: &'tree [u8]) -> PreparedIr {
+    prepare_ir_generic(
+        cfg,
+        source,
+        super::java_lowering::lower_all_nodes,
+        super::java_lowering::lower_expr_standalone,
+    )
+}
+
+/// Prepares a JavaScript/TypeScript CFG (see [`PreparedIr`]).
+pub fn prepare_js_ir<'tree>(cfg: &Cfg<'tree>, source: &'tree [u8]) -> PreparedIr {
+    prepare_ir_generic(
+        cfg,
+        source,
+        super::js_lowering::lower_all_nodes,
+        super::js_lowering::lower_expr_standalone,
+    )
+}
+
+/// Prepares a PHP CFG (see [`PreparedIr`]).
+pub fn prepare_php_ir<'tree>(cfg: &Cfg<'tree>, source: &'tree [u8]) -> PreparedIr {
+    prepare_ir_generic(
+        cfg,
+        source,
+        super::php_lowering::lower_all_nodes,
+        super::php_lowering::lower_expr_standalone,
+    )
+}
+
+/// Prepares a C# CFG (see [`PreparedIr`]).
+pub fn prepare_csharp_ir<'tree>(cfg: &Cfg<'tree>, source: &'tree [u8]) -> PreparedIr {
+    prepare_ir_generic(
+        cfg,
+        source,
+        super::csharp_lowering::lower_all_nodes,
+        super::csharp_lowering::lower_expr_standalone,
+    )
+}
+
+/// Runs the dataflow analysis on a Python CFG with a taint rule (§6):
+/// prepares the CFG ([`prepare_ir`]), then [`analyze_prepared`]. A
+/// caller that analyzes the same CFG several times prepares it once
+/// and calls [`analyze_prepared`] directly.
 ///
 /// `initial_state`: entry state (default: empty = clean everywhere —
-/// used for the future interprocedural analysis, a function parameter
+/// used for the interprocedural analysis, a function parameter
 /// already tainted by the caller). `source_lines`: enables §10bis
 /// hybrid matching (cf. `transfer::transfer_stmt`).
 pub fn analyze<'tree>(
@@ -358,128 +498,83 @@ pub fn analyze<'tree>(
     source: &'tree [u8],
     specs: &RuleSpecs,
     initial_state: Option<&State>,
-    source_lines: Option<&[String]>,
+    source_lines: Option<&RuleLines>,
 ) -> AnalysisResult {
-    analyze_generic(
-        cfg,
-        source,
-        specs,
-        initial_state,
-        source_lines,
-        lower_all_nodes,
-        lower_expr_standalone,
-    )
+    let prepared = prepare_ir(cfg, source);
+    analyze_prepared(cfg, &prepared, specs, initial_state, source_lines)
 }
 
-/// Java equivalent of [`analyze`] — same fixpoint algorithm, Java
-/// lowering (`java_lowering::lower_all_nodes`/
-/// `lower_expr_standalone`).
+/// Java equivalent of [`analyze`] ([`prepare_java_ir`], then
+/// [`analyze_prepared`]).
 pub fn analyze_java<'tree>(
     cfg: &Cfg<'tree>,
     source: &'tree [u8],
     specs: &RuleSpecs,
     initial_state: Option<&State>,
-    source_lines: Option<&[String]>,
+    source_lines: Option<&RuleLines>,
 ) -> AnalysisResult {
-    analyze_generic(
-        cfg,
-        source,
-        specs,
-        initial_state,
-        source_lines,
-        super::java_lowering::lower_all_nodes,
-        super::java_lowering::lower_expr_standalone,
-    )
+    let prepared = prepare_java_ir(cfg, source);
+    analyze_prepared(cfg, &prepared, specs, initial_state, source_lines)
 }
 
-/// JavaScript equivalent of [`analyze`] — same fixpoint algorithm, JS
-/// lowering (`js_lowering::lower_all_nodes`/
-/// `lower_expr_standalone`).
+/// JavaScript equivalent of [`analyze`] ([`prepare_js_ir`], then
+/// [`analyze_prepared`]).
 pub fn analyze_js<'tree>(
     cfg: &Cfg<'tree>,
     source: &'tree [u8],
     specs: &RuleSpecs,
     initial_state: Option<&State>,
-    source_lines: Option<&[String]>,
+    source_lines: Option<&RuleLines>,
 ) -> AnalysisResult {
-    analyze_generic(
-        cfg,
-        source,
-        specs,
-        initial_state,
-        source_lines,
-        super::js_lowering::lower_all_nodes,
-        super::js_lowering::lower_expr_standalone,
-    )
+    let prepared = prepare_js_ir(cfg, source);
+    analyze_prepared(cfg, &prepared, specs, initial_state, source_lines)
 }
 
-/// PHP equivalent of [`analyze`] — same fixpoint algorithm, PHP
-/// lowering (`php_lowering::lower_all_nodes`/
-/// `lower_expr_standalone`).
+/// PHP equivalent of [`analyze`] ([`prepare_php_ir`], then
+/// [`analyze_prepared`]).
 pub fn analyze_php<'tree>(
     cfg: &Cfg<'tree>,
     source: &'tree [u8],
     specs: &RuleSpecs,
     initial_state: Option<&State>,
-    source_lines: Option<&[String]>,
+    source_lines: Option<&RuleLines>,
 ) -> AnalysisResult {
-    analyze_generic(
-        cfg,
-        source,
-        specs,
-        initial_state,
-        source_lines,
-        super::php_lowering::lower_all_nodes,
-        super::php_lowering::lower_expr_standalone,
-    )
+    let prepared = prepare_php_ir(cfg, source);
+    analyze_prepared(cfg, &prepared, specs, initial_state, source_lines)
 }
 
-/// C# equivalent of [`analyze`] — same fixpoint algorithm, C#
-/// lowering (`csharp_lowering::lower_all_nodes`/
-/// `lower_expr_standalone`), ticket #79/spec #77.
+/// C# equivalent of [`analyze`] ([`prepare_csharp_ir`], then
+/// [`analyze_prepared`]), ticket #79/spec #77.
 pub fn analyze_csharp<'tree>(
     cfg: &Cfg<'tree>,
     source: &'tree [u8],
     specs: &RuleSpecs,
     initial_state: Option<&State>,
-    source_lines: Option<&[String]>,
+    source_lines: Option<&RuleLines>,
 ) -> AnalysisResult {
-    analyze_generic(
-        cfg,
-        source,
-        specs,
-        initial_state,
-        source_lines,
-        super::csharp_lowering::lower_all_nodes,
-        super::csharp_lowering::lower_expr_standalone,
-    )
+    let prepared = prepare_csharp_ir(cfg, source);
+    analyze_prepared(cfg, &prepared, specs, initial_state, source_lines)
 }
 
-/// Generic variant of [`analyze`], parameterized by CFG→IR lowering
-/// (`lower_all`) and the lowering of a standalone condition
-/// (`lower_expr`, for `compute_dead_edges_generic`) — Rust mirror of
-/// the `language: str` parameter of `worklist.py::analyze` (runtime
-/// dispatch on the Python side; resolved here at compile time).
-pub fn analyze_generic<'tree, FAll, FExpr>(
+/// Taint fixpoint (§6) of one rule on a CFG already prepared by one of
+/// the `prepare_*ir` functions: the only part of the analysis that
+/// depends on the rule. Language-neutral, since the language only
+/// enters through the lowering done by the preparation.
+pub fn analyze_prepared<'tree>(
     cfg: &Cfg<'tree>,
-    source: &'tree [u8],
+    prepared: &PreparedIr,
     specs: &RuleSpecs,
     initial_state: Option<&State>,
-    source_lines: Option<&[String]>,
-    lower_all: FAll,
-    lower_expr: FExpr,
-) -> AnalysisResult
-where
-    FAll: Fn(&Cfg<'tree>, &'tree [u8]) -> BTreeMap<usize, Vec<IrStmt>>,
-    FExpr: Fn(&'tree [u8], Node<'tree>) -> (Rhs, Vec<IrStmt>) + Copy,
-{
-    // Lowers everything at once, upfront.
-    let mut node_ir = lower_all(cfg, source);
-
-    // §9 — pre-pass: constant propagation to identify dead edges
-    // (branches whose condition is known at compile time). Excluded
-    // from the σ_in[n] computation below.
-    let dead_edges = compute_dead_edges_generic(cfg, &mut node_ir, source, lower_expr);
+    source_lines: Option<&RuleLines>,
+) -> AnalysisResult {
+    // A preparation lowers every node of its CFG: different node ids
+    // mean it was built from another CFG.
+    debug_assert!(
+        prepared.node_ir.keys().eq(cfg.nodes.keys()),
+        "PreparedIr used with a CFG it was not built from"
+    );
+    let node_ir = &prepared.node_ir;
+    let dead_edges = &prepared.dead_edges;
 
     // Initialization: state_in[entry] = initial_state, others = empty.
     let mut state_in: BTreeMap<usize, State> =
@@ -537,9 +632,12 @@ where
         // Applies the node's transfer function. §9 — findings are
         // collected PER ITERATION to allow final deduplication.
         let mut local_findings: Vec<Finding> = Vec::new();
-        let mut new_out = transfer_stmts(
+        // One copy of the state per node; the statements of the node then
+        // update it in place (ticket #191).
+        let mut new_out = state_in[&n].clone();
+        transfer_stmts(
             &node_ir[&n],
-            &state_in[&n],
+            &mut new_out,
             specs,
             &mut local_findings,
             source_lines,
@@ -936,7 +1034,7 @@ mod tests {
                 ["cli".to_string()],
                 SourceInfo {
                     line: 0,
-                    expr: "param x".to_string(),
+                    expr: "param x".to_string().into(),
                     kind: "cli".to_string(),
                 },
             ),
@@ -961,7 +1059,7 @@ mod tests {
 
     // ------------------------------------------------------------------
     // analyze_java() — same fixpoint, Java lowering (verifies the
-    // generic wiring end-to-end, cf. `analyze_generic`).
+    // generic wiring end-to-end, cf. `prepare_ir_generic`).
     // ------------------------------------------------------------------
 
     fn parse_java(src: &str) -> tree_sitter::Tree {
@@ -1058,7 +1156,7 @@ mod tests {
     // CALL-shaped source (`Request.GetParameter("cmd")`), not an
     // indexer (`Request.QueryString["cmd"]`, the real shape of the 18
     // C# taint rules from ticket #80) — deliberately, to test here the
-    // generic `analyze_generic`/`eval_rhs` wiring the same way as
+    // generic `prepare_ir_generic`/`eval_rhs` wiring the same way as
     // `test_analyze_java_*` above (source_lines=None, pure structural
     // matching). An indexer source with a literal key (`SubscriptRef`
     // with `key: Const`) is NOT recognized by `eval_rhs`'s structural

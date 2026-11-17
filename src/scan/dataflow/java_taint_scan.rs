@@ -17,11 +17,11 @@
 
 use tree_sitter::Node;
 
-use super::java_cfg::build_java_cfg;
-use super::java_summary::collect_java_functions;
+use super::java_summary::{JavaFunctionInfo, prepare_java_file};
 use super::lattice::{SourceInfo, Taint, empty_state, state_set};
+use super::line_facts::RuleLines;
+use super::prepared::PreparedFile;
 use super::transfer::{Finding, RuleSpecs};
-use super::worklist::analyze_java;
 
 /// Runs a taint rule on an already-parsed Java file.
 ///
@@ -39,10 +39,27 @@ pub fn run_taint_rule_java<'tree>(
     specs: &RuleSpecs,
     source_lines: Option<&[String]>,
 ) -> Vec<Finding> {
+    run_taint_rule_java_prepared(&prepare_java_file(root, source), specs, source_lines)
+}
+
+/// [`run_taint_rule_java`] on a file already prepared by
+/// `java_summary::prepare_java_file`: the scan prepares each file once
+/// for all its rules (ticket #192).
+pub fn run_taint_rule_java_prepared(
+    file: &PreparedFile<JavaFunctionInfo>,
+    specs: &RuleSpecs,
+    source_lines: Option<&[String]>,
+) -> Vec<Finding> {
+    // One per-line cache of the hybrid layer for every analysis of this
+    // rule on this file (ticket #190).
+    let rule_lines = source_lines.map(|lines| RuleLines::new(lines, specs));
     let mut all_findings: Vec<Finding> = Vec::new();
 
-    for fn_info in collect_java_functions(root, source) {
-        let cfg = build_java_cfg(fn_info.body_node, source);
+    for function in &file.functions {
+        let Some(prepared) = function.body.as_ref() else {
+            continue;
+        };
+        let fn_info = &function.info;
 
         let mut state = empty_state();
         let mut seeded = false;
@@ -54,7 +71,7 @@ pub fn run_taint_rule_java<'tree>(
                     ["http".to_string()],
                     SourceInfo {
                         line: fn_info.lineno,
-                        expr: format!("{}({pname})", fn_info.name),
+                        expr: format!("{}({pname})", fn_info.name).into(),
                         kind: "http".to_string(),
                     },
                 ),
@@ -84,7 +101,7 @@ pub fn run_taint_rule_java<'tree>(
                         [src.kind.clone()],
                         SourceInfo {
                             line: fn_info.lineno,
-                            expr: format!("{}({pname})", fn_info.name),
+                            expr: format!("{}({pname})", fn_info.name).into(),
                             kind: src.kind.clone(),
                         },
                     ),
@@ -94,7 +111,7 @@ pub fn run_taint_rule_java<'tree>(
         }
         let init_state = seeded.then_some(state);
 
-        let result = analyze_java(&cfg, source, specs, init_state.as_ref(), source_lines);
+        let result = prepared.analyze(specs, init_state.as_ref(), rule_lines.as_ref());
         all_findings.extend(result.findings);
     }
 
@@ -298,7 +315,7 @@ mod tests {
                 severity: "HIGH".to_string(),
                 line: 1,
                 column: 0,
-                sink_text: "sink".to_string(),
+                sink_text: "sink".to_string().into(),
                 source_line: None,
                 message: String::new(),
                 cwe: None,
@@ -328,7 +345,7 @@ mod tests {
                 severity: "HIGH".to_string(),
                 line: 1,
                 column: 0,
-                sink_text: "sink".to_string(),
+                sink_text: "sink".to_string().into(),
                 source_line: None,
                 message: String::new(),
                 cwe: None,
@@ -365,7 +382,7 @@ mod tests {
                 severity: "HIGH".to_string(),
                 line: 1,
                 column: 0,
-                sink_text: "sink".to_string(),
+                sink_text: "sink".to_string().into(),
                 source_line: None,
                 message: String::new(),
                 cwe: None,

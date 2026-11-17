@@ -492,18 +492,31 @@ fn eval_string_method_call(rhs: &Rhs, const_state: &ConstState) -> Option<EvalCo
 // State update on assignment
 // ============================================================================
 
-/// Computes the new state after `lhs := rhs`.
+/// Computes the new state after `lhs := rhs` (copy of the state; see
+/// [`apply_assign`] for the in-place form the analysis uses).
 pub fn update_const_on_assign(const_state: &ConstState, lhs: &Lhs, rhs: &Rhs) -> ConstState {
     let mut new_state = const_state.clone();
-    apply_lhs_invalidation(&mut new_state, lhs, rhs, const_state);
+    apply_assign(&mut new_state, lhs, rhs);
     new_state
 }
 
-fn apply_lhs_invalidation(state: &mut ConstState, lhs: &Lhs, rhs: &Rhs, read_state: &ConstState) {
+/// Applies `lhs := rhs` to `state` in place. The constant pass runs it at
+/// every assignment: copying the state each time made a block of N
+/// assignments cost N² (ticket #191).
+///
+/// `rhs` is evaluated once, against the state before the assignment: every
+/// variable of a tuple target (`a, b = rhs`) receives that same value, as
+/// when each one evaluated `rhs` against the unchanged state.
+pub fn apply_assign(state: &mut ConstState, lhs: &Lhs, rhs: &Rhs) {
+    let value = eval_const(rhs, state);
+    assign_value(state, lhs, &value);
+}
+
+fn assign_value(state: &mut ConstState, lhs: &Lhs, value: &Option<EvalConst>) {
     match lhs {
-        Lhs::VarLhs(name) => match eval_const(rhs, read_state) {
+        Lhs::VarLhs(name) => match value {
             Some(v) => {
-                state.insert(name.clone(), v);
+                state.insert(name.clone(), v.clone());
             }
             None => {
                 state.remove(name);
@@ -514,10 +527,10 @@ fn apply_lhs_invalidation(state: &mut ConstState, lhs: &Lhs, rhs: &Rhs, read_sta
         }
         Lhs::TupleLhs(elements) => {
             for elt in elements {
-                apply_lhs_invalidation(state, elt, rhs, read_state);
+                assign_value(state, elt, value);
             }
         }
-        Lhs::StarLhs(inner) => apply_lhs_invalidation(state, inner, rhs, read_state),
+        Lhs::StarLhs(inner) => assign_value(state, inner, value),
     }
 }
 
@@ -538,13 +551,28 @@ pub fn invalidate_var(const_state: &ConstState, name: &str) -> ConstState {
 /// call on a `Tuple` value currently tracked in `const_state`.
 ///
 /// Returns the new state if the simulation succeeds, `None` otherwise
-/// (the caller must then invalidate `base_key` to stay correct).
+/// (the caller must then invalidate `base_key` to stay correct). Copies
+/// the state: the analysis uses [`simulate_list_mutation`] and updates
+/// its state in place.
 pub fn apply_list_mutation(
     const_state: &ConstState,
     base_key: &str,
     method: &str,
     args: &[Rhs],
 ) -> Option<ConstState> {
+    let tup = simulate_list_mutation(const_state, base_key, method, args)?;
+    Some(update_tuple(const_state, base_key, tup))
+}
+
+/// The list `<base_key>` after `<base_key>.<method>(args)`, when the
+/// call can be simulated on the `Tuple` tracked in `const_state`; `None`
+/// otherwise (the caller must then invalidate `base_key`).
+pub fn simulate_list_mutation(
+    const_state: &ConstState,
+    base_key: &str,
+    method: &str,
+    args: &[Rhs],
+) -> Option<Vec<TupleSlot>> {
     let current = const_state.get(base_key)?;
     let EvalConst::Tuple(items) = current else {
         return None;
@@ -557,7 +585,7 @@ pub fn apply_list_mutation(
                 return None;
             }
             tup.push(eval_slot(&args[0], const_state));
-            Some(update_tuple(const_state, base_key, tup))
+            Some(tup)
         }
         "extend" => {
             if args.len() != 1 {
@@ -568,7 +596,7 @@ pub fn apply_list_mutation(
                 return None;
             };
             tup.extend(more);
-            Some(update_tuple(const_state, base_key, tup))
+            Some(tup)
         }
         "insert" => {
             if args.len() != 2 {
@@ -577,7 +605,7 @@ pub fn apply_list_mutation(
             let idx = eval_int_arg(&args[0], const_state)?;
             let slot = eval_slot(&args[1], const_state);
             insert_at(&mut tup, idx, slot);
-            Some(update_tuple(const_state, base_key, tup))
+            Some(tup)
         }
         // `remove` with no argument doesn't exist on the Java side (no
         // relevant Python-only equivalent — cf. scope note at the top
@@ -595,18 +623,18 @@ pub fn apply_list_mutation(
                 _ => return None,
             };
             remove_at(&mut tup, idx)?;
-            Some(update_tuple(const_state, base_key, tup))
+            Some(tup)
         }
         "add" => match args.len() {
             1 => {
                 tup.push(eval_slot(&args[0], const_state));
-                Some(update_tuple(const_state, base_key, tup))
+                Some(tup)
             }
             2 => {
                 let idx = eval_int_arg(&args[0], const_state)?;
                 let slot = eval_slot(&args[1], const_state);
                 insert_at(&mut tup, idx, slot);
-                Some(update_tuple(const_state, base_key, tup))
+                Some(tup)
             }
             _ => None,
         },
@@ -1090,6 +1118,28 @@ mod tests {
         };
         let new_state = update_const_on_assign(&state, &lhs, &int(5));
         assert!(!new_state.contains_key("obj.attr"));
+    }
+
+    /// `a, b = a + 1` gives both targets the value computed from `a`
+    /// BEFORE the assignment (2, 2), not `b` from the `a` just written
+    /// (2, 3): the in-place update (ticket #191) evaluates `rhs` once,
+    /// before writing, as the copying version did against its unchanged
+    /// read state.
+    #[test]
+    fn test_apply_assign_tuple_reads_the_state_before_the_assignment() {
+        let mut state = empty_const_state();
+        state.insert("a".to_string(), EvalConst::Const(ConstValue::Int(1)));
+        let lhs = Lhs::TupleLhs(vec![
+            Lhs::VarLhs("a".to_string()),
+            Lhs::VarLhs("b".to_string()),
+        ]);
+        let rhs = bin("+", Rhs::VarRef("a".to_string()), int(1));
+        let copied = update_const_on_assign(&state, &lhs, &rhs);
+        apply_assign(&mut state, &lhs, &rhs);
+        let two = Some(EvalConst::Const(ConstValue::Int(2)));
+        assert_eq!(state.get("a").cloned(), two);
+        assert_eq!(state.get("b").cloned(), two);
+        assert_eq!(state, copied);
     }
 
     #[test]

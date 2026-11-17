@@ -342,6 +342,8 @@
   "scan_scope_whole_project": "todo el proyecto",
   "scan_scope_default_excludes": "{count} patrones por defecto",
   "scan_skipped_dirs": "Omitidos, no son código del proyecto: {dirs}. Indique una carpeta en paths.include para analizarla.",
+  "scan_skipped_minified": "Omitidos, código minificado ({count} archivo(s)): {files}. Analice en su lugar las fuentes sin minificar.",
+  "scan_skipped_saved_pages": "Omitidos, páginas web guardadas desde un navegador ({count} archivo(s)): {files}. Son copias de otros sitios, no código del proyecto.",
   "scan_skipped_documentation": "documentación",
   "scan_skipped_virtualenv": "entorno virtual de Python",
   "scan_skipped_build_output": "salida de compilación",

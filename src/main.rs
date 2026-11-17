@@ -399,6 +399,35 @@ fn skipped_dirs_line(
     Some(say("scan_skipped_dirs").replace("{dirs}", &dirs))
 }
 
+/// The console line naming the files skipped for one reason, from the
+/// locale message `key`: minified files (`scan_skipped_minified`,
+/// ADR-0045, `Skipped, minified code: a.js, b.html`) or saved web pages
+/// (`scan_skipped_saved_pages`, ADR-0046). Past `SCOPE_LIST_MAX` files the
+/// rest is counted, like the scope line. `None` when nothing was skipped.
+/// Never silent, for the reason of [`skipped_dirs_line`]: a file the scan
+/// leaves out must be named.
+fn skipped_files_line(
+    key: &str,
+    files: &[String],
+    say: impl Fn(&str) -> String,
+) -> Option<String> {
+    if files.is_empty() {
+        return None;
+    }
+    let list = if files.len() <= SCOPE_LIST_MAX + 1 {
+        files.join(", ")
+    } else {
+        let more =
+            say("scan_scope_more").replace("{count}", &(files.len() - SCOPE_LIST_MAX).to_string());
+        format!("{}, {more}", files[..SCOPE_LIST_MAX].join(", "))
+    };
+    Some(
+        say(key)
+            .replace("{count}", &files.len().to_string())
+            .replace("{files}", &list),
+    )
+}
+
 /// Include paths of `audit.config.json` that do not exist under `root`,
 /// in their configured order. The walk skips them (`find_files`), so the
 /// CLI reports them once per scan instead of letting a typo scan nothing
@@ -677,6 +706,26 @@ mod tests {
 
     /// Ticket #152: skipped folders are named relative to the project with
     /// their reason, cut past `SCOPE_LIST_MAX`; nothing skipped, no line.
+    #[test]
+    fn test_skipped_files_line_names_files_and_counts_the_rest() {
+        let say = |key: &str| match key {
+            "scan_skipped_minified" => "Skipped, minified code ({count}): {files}.".to_string(),
+            "scan_scope_more" => "+{count} more".to_string(),
+            other => other.to_string(),
+        };
+        assert!(skipped_files_line("scan_skipped_minified", &[], say).is_none());
+        let two = vec!["a.js".to_string(), "b.html".to_string()];
+        assert_eq!(
+            skipped_files_line("scan_skipped_minified", &two, say).unwrap(),
+            "Skipped, minified code (2): a.js, b.html."
+        );
+        let many: Vec<String> = (0..SCOPE_LIST_MAX + 5)
+            .map(|i| format!("f{i}.js"))
+            .collect();
+        let line = skipped_files_line("scan_skipped_minified", &many, say).unwrap();
+        assert!(line.ends_with("+5 more."), "{line}");
+    }
+
     #[test]
     fn test_skipped_dirs_line_names_folders_and_reasons() {
         use codefixture_audit::scan::discovery::SkippedDirKind;
@@ -1058,7 +1107,11 @@ impl Default for ScanExtraArgs {
 #[allow(clippy::large_enum_variant)]
 enum Command {
     /// Scans a project (Python, Java, JavaScript/TypeScript, PHP, C#,
-    /// HTML templates, YAML, Dockerfile).
+    /// HTML templates, YAML, Dockerfile). Minified files (a `.min.` name,
+    /// or JavaScript, TypeScript and HTML written on very long lines) are
+    /// skipped and listed after the scan, and so are web pages saved from
+    /// a browser (a `<!-- saved from url=` mark, and their `<name>_files/`
+    /// folder).
     Scan {
         /// Path of the project to scan.
         path: PathBuf,
@@ -1822,6 +1875,18 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
     }) {
         emit_progress(quiet, &format!("[codefixture-audit] {line}"));
     }
+    // ADR-0045 and ADR-0046: the files skipped as minified or as saved
+    // web pages, named once per scan.
+    for (key, files) in [
+        ("scan_skipped_minified", &report.skipped_minified),
+        ("scan_skipped_saved_pages", &report.skipped_saved_pages),
+    ] {
+        if let Some(line) = skipped_files_line(key, files, |key| {
+            codefixture_audit::i18n::t(&script_locale, key)
+        }) {
+            emit_progress(quiet, &format!("[codefixture-audit] {line}"));
+        }
+    }
     // Taint cache (`scan_cache`): what a re-scan redid, so that a slow one
     // shows why (many files changed) and a fast one that it reused work.
     for stat in &report.cache_stats {
@@ -1930,8 +1995,21 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
                 only_category: config.only_category.clone(),
                 disabled_rules: config.disabled_rules.clone(),
                 with_tests: config.with_tests,
-                // The phase ran: asked for, or a pack with version rules.
-                with_deps: report.version_rules.is_some(),
+                with_deps: config.with_deps,
+                // What the dependencies phase did, whatever started it
+                // (`--with-deps` or a pack with version rules, ADR-0043):
+                // a scope row, never an option name (ticket #188).
+                dependencies: {
+                    use codefixture_audit::report::audit_params::DependencyCheck;
+                    use codefixture_audit::scan::orchestrator::VersionRulesStatus;
+                    match &report.version_rules {
+                        None => DependencyCheck::NotRun,
+                        Some(VersionRulesStatus::Read { .. }) => DependencyCheck::Checked,
+                        Some(
+                            VersionRulesStatus::Missing | VersionRulesStatus::Unreadable { .. },
+                        ) => DependencyCheck::VersionsNotChecked,
+                    }
+                },
                 database_configured: config.database.is_some(),
                 severity_levels: config.severity_levels.clone(),
                 report_lang: ctx.report_lang.clone(),

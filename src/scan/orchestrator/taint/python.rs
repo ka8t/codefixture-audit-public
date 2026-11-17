@@ -10,7 +10,7 @@ use super::{
     TaintFindings, TaintLanguage, call_graph_inputs, file_summaries, source_lines_by_file,
 };
 use crate::scan::dataflow::call_graph::{CallGraph, NodeKey, ResolvedSummaries, SummaryReuse};
-use crate::scan::dataflow::taint_scan::run_taint_rule;
+use crate::scan::dataflow::taint_scan::{run_taint_rule, run_taint_rule_prepared};
 use crate::scan::dataflow::transfer::RuleSpecs;
 use crate::scan::orchestrator::{ParsedFile, SourceLanguage};
 
@@ -54,6 +54,23 @@ impl<'a> TaintLanguage<'a> for PythonTaint<'a> {
         resolved: &ResolvedSummaries,
     ) -> TaintFindings {
         specs.summaries = file_summaries(resolved, &file.rel_path);
-        run_taint_rule(&file.tree, &file.source_bytes, specs, Some(&file.source_lines_plain))
+        // The graph prepared every file of the pass once for all its
+        // rules (ticket #192). A file it does not know cannot happen (the
+        // pass is built from the files it analyzes); it would still be
+        // analyzed, only prepared again for this rule.
+        match self.call_graph.prepared_file(&file.rel_path) {
+            Some(prepared) => run_taint_rule_prepared(
+                prepared,
+                &file.source_bytes,
+                specs,
+                Some(&file.source_lines_plain),
+            ),
+            None => run_taint_rule(
+                &file.tree,
+                &file.source_bytes,
+                specs,
+                Some(&file.source_lines_plain),
+            ),
+        }
     }
 }

@@ -23,11 +23,11 @@
 
 use tree_sitter::Node;
 
-use super::js_cfg::build_js_cfg;
-use super::js_summary::collect_js_functions;
+use super::js_summary::{JsFunctionInfo, prepare_js_file};
 use super::lattice::empty_state;
+use super::line_facts::RuleLines;
+use super::prepared::PreparedFile;
 use super::transfer::{Finding, RuleSpecs};
-use super::worklist::analyze_js;
 
 /// Runs a taint rule on an already-parsed JS file.
 ///
@@ -42,27 +42,37 @@ use super::worklist::analyze_js;
 /// `build_js_cfg(root, ...)` treats every `function_declaration` it encounters as an opaque
 /// statement (see `js_cfg.rs` doc), without descending into its body.
 /// Final global deduplication by `(rule_id, line, source_line)`.
+///
+/// Prepares the file, then [`run_taint_rule_js_prepared`]. The scan
+/// prepares each file once for all its rules and calls
+/// [`run_taint_rule_js_prepared`] directly (ticket #192).
 pub fn run_taint_rule_js<'tree>(
     root: Node<'tree>,
     source: &'tree [u8],
     specs: &RuleSpecs,
     source_lines: Option<&[String]>,
 ) -> Vec<Finding> {
+    run_taint_rule_js_prepared(&prepare_js_file(root, source), specs, source_lines)
+}
+
+/// [`run_taint_rule_js`] on a file already prepared by
+/// `js_summary::prepare_js_file`.
+pub fn run_taint_rule_js_prepared(
+    file: &PreparedFile<JsFunctionInfo>,
+    specs: &RuleSpecs,
+    source_lines: Option<&[String]>,
+) -> Vec<Finding> {
+    // One per-line cache of the hybrid layer for every analysis of this
+    // rule on this file (ticket #190).
+    let rule_lines = source_lines.map(|lines| RuleLines::new(lines, specs));
     let mut all_findings: Vec<Finding> = Vec::new();
 
-    let module_cfg = build_js_cfg(root, source);
-    let module_result = analyze_js(
-        &module_cfg,
-        source,
-        specs,
-        Some(&empty_state()),
-        source_lines,
-    );
-    all_findings.extend(module_result.findings);
-
-    for fn_info in collect_js_functions(root, source) {
-        let cfg = build_js_cfg(fn_info.body_node, source);
-        let result = analyze_js(&cfg, source, specs, Some(&empty_state()), source_lines);
+    let bodies = file
+        .module
+        .iter()
+        .chain(file.functions.iter().filter_map(|f| f.body.as_ref()));
+    for prepared in bodies {
+        let result = prepared.analyze(specs, Some(&empty_state()), rule_lines.as_ref());
         all_findings.extend(result.findings);
     }
 
@@ -217,7 +227,7 @@ mod tests {
                             severity: "HIGH".to_string(),
                             line: 0,
                             column: 0,
-                            sink_text: "db.query(query)".to_string(),
+                            sink_text: "db.query(query)".to_string().into(),
                             source_line: Some(0),
                             message: "test".to_string(),
                             cwe: Some("CWE-89".to_string()),
@@ -225,14 +235,14 @@ mod tests {
                                 crate::scan::dataflow::transfer::FlowStep {
                                     line: 0,
                                     kind: "source".to_string(),
-                                    text: String::new(),
+                                    text: String::new().into(),
                                     file: None,
                                     code: None,
                                 },
                                 crate::scan::dataflow::transfer::FlowStep {
                                     line: 0,
                                     kind: "sink".to_string(),
-                                    text: String::new(),
+                                    text: String::new().into(),
                                     file: None,
                                     code: None,
                                 },
@@ -255,5 +265,47 @@ mod tests {
         let findings2 = run(src, &sqli_specs());
         assert_eq!(findings1.len(), findings2.len());
         assert_eq!(findings1.len(), 1);
+    }
+
+    /// Ticket #192: the call graph prepares each file once (module plus
+    /// each function: 3 CFGs here); computing the summaries and running
+    /// several rules afterwards prepares nothing again, and finds the
+    /// flow that goes through a function summary.
+    #[test]
+    fn test_graph_prepares_each_file_once_for_every_rule() {
+        use crate::scan::dataflow::call_graph::FileInput;
+        use crate::scan::dataflow::js_call_graph::JsCallGraph;
+        use crate::scan::dataflow::worklist::IR_PREPARATIONS;
+
+        let src = "function run(db, q) { db.query(q); }\n\
+                   function handler(req, db) { const q = req.query.q; run(db, q); }\n\
+                   handler(r, d);\n";
+        let tree = parse(src);
+        let lines: Vec<String> = src.lines().map(str::to_string).collect();
+        let prepared_count = || IR_PREPARATIONS.with(|count| count.get());
+
+        let before_build = prepared_count();
+        let graph = JsCallGraph::build(&[FileInput {
+            filepath: "app.js".to_string(),
+            root: tree.root_node(),
+            source: src.as_bytes(),
+        }]);
+        assert_eq!(prepared_count() - before_build, 3);
+
+        let after_build = prepared_count();
+        let by_file = BTreeMap::from([("app.js".to_string(), lines.clone())]);
+        let file = graph
+            .prepared_file("app.js")
+            .expect("the graph prepared app.js");
+        for _ in 0..3 {
+            let (own, _extra) = graph.resolve_summaries(&sqli_specs(), Some(&by_file));
+            let specs = RuleSpecs {
+                summaries: own.get("app.js").cloned().unwrap_or_default(),
+                ..sqli_specs()
+            };
+            let findings = run_taint_rule_js_prepared(file, &specs, Some(&lines));
+            assert_eq!(findings.len(), 1, "{findings:?}");
+        }
+        assert_eq!(prepared_count(), after_build);
     }
 }

@@ -342,6 +342,8 @@
   "scan_scope_whole_project": "tout le projet",
   "scan_scope_default_excludes": "{count} motifs par défaut",
   "scan_skipped_dirs": "Ignorés, hors code du projet : {dirs}. Citez un dossier dans paths.include pour l'analyser.",
+  "scan_skipped_minified": "Ignorés, code minifié ({count} fichier(s)) : {files}. Analysez plutôt les sources non minifiées.",
+  "scan_skipped_saved_pages": "Ignorés, pages web enregistrées depuis un navigateur ({count} fichier(s)) : {files}. Ce sont des copies d'autres sites, pas du code du projet.",
   "scan_skipped_documentation": "documentation",
   "scan_skipped_virtualenv": "environnement virtuel Python",
   "scan_skipped_build_output": "sortie de compilation",

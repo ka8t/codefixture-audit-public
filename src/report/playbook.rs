@@ -85,25 +85,32 @@ fn step_icon(step_type: &str) -> &'static str {
 /// reference) — port of `_render_playbook_inline`.
 /// The text of a playbook step in the report's language.
 ///
-/// The playbook file is written in English. In another language: the
-/// two generic steps ("Locate…", "Run the audit again…") come from the
-/// report locale, the fix step is the rule's own `solution` in that
-/// language (the playbook copies the English one), and a rule-specific
-/// step uses its `action_i18n`. English text stays only as a last
-/// resort. Fixed after a French report showed an English playbook
-/// (2026-11-14); the Python report has the same English-only playbook.
+/// The fix step is the rule's own `solution` in the report's language,
+/// in English too: the playbook is keyed by rule id, and one entry serves
+/// every language that has a rule of that id (a `multi` entry holds a
+/// general step, an entry of another language that language's API), so
+/// only the rule's own text names the right functions (issue #184,
+/// 2026-11-17). The playbook file is written in English. In another
+/// language: the two generic steps ("Locate…", "Run the audit again…")
+/// come from the report locale and a rule-specific step uses its
+/// `action_i18n`. English text stays only as a last resort. Fixed after a
+/// French report showed an English playbook (2026-11-14); the Python
+/// report has the same English-only playbook.
 fn step_text(step: &PlaybookStep, lang: &str, report_locale: &Value, solution: Option<&str>) -> String {
     const LOCATE: &str = "Locate the vulnerable code pattern in the file";
     const RERUN: &str = "Run the audit again to verify the finding is resolved";
+    if step.step_type == "code_change"
+        && let Some(own) = solution.filter(|s| !s.is_empty())
+    {
+        return own.to_string();
+    }
     if lang == "en" {
         return step.action.clone();
     }
     match step.step_type.as_str() {
         "diagnostic" if step.action == LOCATE => t(report_locale, "playbook_step_locate"),
         "verification" if step.action == RERUN => t(report_locale, "playbook_step_rerun"),
-        "code_change" => solution
-            .filter(|s| !s.is_empty())
-            .map_or_else(|| step.action.clone(), str::to_string),
+        "code_change" => step.action.clone(),
         _ => step
             .action_i18n
             .get(lang)
@@ -180,7 +187,9 @@ pub fn render_playbook_inline(
         }
     }
 
-    let benefit = if lang != "en" && !benefit.is_empty() {
+    // The rule's own benefit, in every language, for the reason of
+    // `step_text`; the playbook's copy only when the rule has none.
+    let benefit = if !benefit.is_empty() {
         benefit
     } else {
         entry.benefit.as_str()
@@ -242,6 +251,24 @@ mod tests {
         let generic = render_playbook_inline("xss_unsafe_html_construction", &fr, None, "");
         assert!(generic.contains("Repérez le code vulnérable"), "{generic}");
         assert!(generic.contains("Relancez l"), "{generic}");
+    }
+
+    /// An entry serves every rule of its id: in English too, the fix step
+    /// and the benefit are the rule's own texts, so a JavaScript finding
+    /// never shows the Python API of an entry written for Python.
+    #[test]
+    fn test_render_playbook_in_english_uses_the_rules_own_texts() {
+        let en = load_report_locale("en");
+        let html = render_playbook_inline(
+            "insecure_cookie",
+            &en,
+            Some("Pass httpOnly: true and secure: true to res.cookie()."),
+            "Scripts can no longer read the cookie.",
+        );
+        assert!(html.contains("Pass httpOnly: true"), "{html}");
+        assert!(html.contains("Scripts can no longer read the cookie."), "{html}");
+        assert!(!html.contains("set_cookie"), "{html}");
+        assert!(html.contains("Locate the vulnerable code pattern"), "{html}");
     }
 
     #[test]

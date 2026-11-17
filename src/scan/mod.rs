@@ -6,6 +6,8 @@ pub mod counters;
 pub mod dataflow;
 pub mod discovery;
 pub mod engine;
+pub mod minified;
 pub mod orchestrator;
 pub mod parser;
+pub mod saved_page;
 pub mod scan_cache;

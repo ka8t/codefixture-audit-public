@@ -28,104 +28,22 @@ use fancy_regex::Regex;
 use super::ir::{
     IrStmt, Lhs, Rhs, canon_callee, canon_lhs, canon_rhs, canon_subscript_key, pretty_rhs,
 };
-use super::lattice::{SourceInfo, State, Taint, join, state_get, state_set};
+use super::lattice::{SharedText, SourceInfo, State, Taint, join, state_get, state_put};
+use super::line_facts::RuleLines;
+#[cfg(test)]
+use super::line_facts::strip_plain_string_literals;
 
 // ============================================================================
-// §10bis — Static regexes for hybrid matching over the source text
+// §10bis — Hybrid matching over the source text
 // ============================================================================
-
-/// Terminator of a sanitizer-guard: the line following
-/// `if not <san>(x): ...` must contain one of these calls for the
-/// block to be considered a guard (the downstream sink is no longer
-/// reached if the predicate fails).
-static GUARD_TERMINATOR_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\b(?:abort|raise|return|exit|sys\.exit|os\._exit)\b")
-        .expect("regex statique valide")
-});
-
-/// Terminators of a guard written on one line in a brace language,
-/// `if (!ALLOWED.Contains(cmd)) return Forbid();` — the list of the
-/// Audit's lexical engine (`lexical_taint.py::
-/// _GUARD_TERMINATOR_RE_MULTILANG`), which is the reference behavior for
-/// C#, PHP and JavaScript (ADR-0003, ADR-0007). Ticket #178.
-static GUARD_TERMINATOR_SAMELINE_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r"\b(?:return|throw|raise|break|continue|exit|die|abort|halt|Forbid|Halt|sendError|sendRedirect|RedirectToAction|Response\.End)\b",
-    )
-    .expect("regex statique valide")
-});
-
-/// `!` negation (Java/C#/JS style, e.g. `if (!isValid(x))`) —
-/// alternative to Python's `not`/`in`. Excludes `!=` (not a negation
-/// of a sanitizer call).
-static NEGATION_BANG_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"!(?!=)").expect("regex statique valide"));
-
-/// Reassignment to a literal inside a guard
-/// `if (!check(x)) x = "literal";` (same physical line as the if).
-/// The PHP `$` is part of the captured name: the PHP engine keeps it in
-/// its variable names (`$next`). The Audit's pattern allowed `\$?` before
-/// the group; the first port had lost it, so a PHP guard
-/// `if (!filter_var($next, ...)) { $next = '/'; }` left `$next` tainted
-/// (ticket #157).
-static GUARD_REASSIGN_SAMELINE_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r#"\)\s*\{?\s*(\$?[A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:["'][^"']*["']|[+-]?[0-9]+|null|None|undefined|true|false)"#,
-    )
-    .expect("regex statique valide")
-});
-
-/// Same idiom, but as a whole following line (multi-line guard body).
-/// Anchored at the start of the line (standalone statement, not a
-/// continuation of `)`). Same `$` as `GUARD_REASSIGN_SAMELINE_RE`.
-static GUARD_REASSIGN_NEXTLINE_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r#"^\s*(\$?[A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:["'][^"']*["']|[+-]?[0-9]+|null|None|undefined|true|false)\s*;"#,
-    )
-    .expect("regex statique valide")
-});
-
-/// String literals (single/double quote), to strip them from the
-/// text before a substring search (variable name). Pattern identical
-/// to `lexical_taint.py::_STRING_LIT_STRIP_RE` — unambiguous
-/// partition (each repetition of `(?:\\.[^"\\]*)*` starts on a
-/// literal backslash excluded from the previous group), no
-/// exponential backtracking despite the appearance of nested
-/// quantifiers.
-static STRING_LIT_STRIP_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#""[^"\\]*(?:\\.[^"\\]*)*"|'[^'\\]*(?:\\.[^'\\]*)*'"#)
-        .expect("regex statique valide")
-});
+//
+// The guard patterns and the string-literal stripping moved to
+// `line_facts.rs` with the per-line cache (ticket #190).
 
 /// `\b\w+\b`-style identifiers (ASCII) — used to extract the
 /// identifiers mentioned on a guard line (§10bis).
 static IDENTIFIER_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\b[A-Za-z_][A-Za-z0-9_]*\b").expect("regex statique valide"));
-
-/// Strips "flat" string literals from `text`, but leaves intact
-/// those that interpolate (contain `{`/`}`) — a Python f-string
-/// (`f'Hello {bar}'`) or a JS template carries a REAL variable
-/// reference inside the quotes, not a textual coincidence: stripping
-/// it would break legitimate XSS detection on
-/// `return f'...{bar}...'`. A "flat" literal (e.g. SQL text) is
-/// indeed stripped.
-fn strip_plain_string_literals(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut last = 0;
-    for m in STRING_LIT_STRIP_RE.find_iter(text) {
-        let Ok(m) = m else { break };
-        out.push_str(&text[last..m.start()]);
-        let matched = m.as_str();
-        if matched.contains('{') || matched.contains('}') {
-            out.push_str(matched);
-        } else {
-            out.push(' ');
-        }
-        last = m.end();
-    }
-    out.push_str(&text[last..]);
-    out
-}
 
 fn extract_identifiers(text: &str) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
@@ -183,30 +101,11 @@ fn backward_aliased_var(
 /// mentioned on the guard line. Step 2: backward aliasing — for each
 /// identifier in the guard, scans the 10 preceding lines for an
 /// assignment `<id> = ...<var>...`.
-fn apply_guard_cleanup(
-    state: &State,
-    line_text: &str,
-    lineno: usize,
-    source_lines: &[String],
-) -> State {
-    let mut state = state.clone();
-    let keys: Vec<String> = state.keys().cloned().collect();
-    for var_name in &keys {
-        if line_text.contains(var_name.as_str()) && state_get(&state, var_name).is_tainted() {
-            state = state_set(&state, var_name, Taint::Clean);
-        }
-    }
+fn apply_guard_cleanup(state: &mut State, line_text: &str, lineno: usize, source_lines: &[String]) {
+    // Every key of the state is tainted: a `Clean` taint is never stored.
+    state.retain(|var_name, _| !line_text.contains(var_name.as_str()));
     let guard_ids = extract_identifiers(line_text);
-    let keys2: Vec<String> = state.keys().cloned().collect();
-    for var_name in &keys2 {
-        if !state_get(&state, var_name).is_tainted() {
-            continue;
-        }
-        if backward_aliased_var(var_name, &guard_ids, lineno, source_lines) {
-            state = state_set(&state, var_name, Taint::Clean);
-        }
-    }
-    state
+    state.retain(|var_name, _| !backward_aliased_var(var_name, &guard_ids, lineno, source_lines));
 }
 
 fn kind_str_compatible(kind: &str, sink_kinds: &[String]) -> bool {
@@ -239,38 +138,40 @@ fn stmt_lineno(stmt: &IrStmt) -> usize {
 /// Only removes a finding if at least one spec whose glob matches its
 /// `sink_text` exists AND none of those specs validates `raw_regex`
 /// against the relevant text — a spec with no `raw_regex` is never
-/// filtered out. Relevant text: `sink_text` THEN the source line, in
-/// that order (both forms of sink DSL depend on it).
+/// filtered out. Relevant text: `sink_text` or the source line (both
+/// forms of sink DSL depend on it). The source-line test reads the
+/// per-line cache (`LineFacts::sinks`, ticket #190); a line outside the
+/// file is tested as empty text, as before.
 fn discard_sinks_failing_raw_regex(
     findings: &mut Vec<Finding>,
     before: usize,
     specs: &RuleSpecs,
-    source_lines: &[String],
+    source_lines: &RuleLines,
 ) {
     if before >= findings.len() {
         return;
     }
     let mut kept: Vec<Finding> = findings[..before].to_vec();
     for f in &findings[before..] {
-        let candidates: Vec<&SinkSpec> = specs
+        let candidates: Vec<(usize, &SinkSpec)> = specs
             .sinks
             .iter()
-            .filter(|s| match_pattern(&f.sink_text, &s.compiled))
+            .enumerate()
+            .filter(|(_, s)| match_pattern(&f.sink_text, &s.compiled))
             .collect();
         if candidates.is_empty() {
             kept.push(f.clone());
             continue;
         }
-        let line_text = if f.line > 0 && f.line <= source_lines.len() {
-            source_lines[f.line - 1].as_str()
-        } else {
-            ""
-        };
-        let passes = candidates.iter().any(|c| match &c.raw_regex {
+        let facts = source_lines.facts(f.line, specs);
+        let passes = candidates.iter().any(|(index, c)| match &c.raw_regex {
             None => true,
             Some(rx) => {
-                rx.is_match(&f.sink_text).unwrap_or(false)
-                    || rx.is_match(line_text).unwrap_or(false)
+                let line_matches = match facts {
+                    Some(facts) => facts.sinks.contains(index),
+                    None => rx.is_match("").unwrap_or(false),
+                };
+                line_matches || rx.is_match(f.sink_text.as_ref()).unwrap_or(false)
             }
         });
         if passes {
@@ -284,133 +185,127 @@ fn discard_sinks_failing_raw_regex(
 /// For each sink/sanitizer/source spec carrying a `raw_regex`, tests
 /// against the statement's source line; on a match, triggers the
 /// corresponding behavior.
+///
+/// Every test that only depends on the line text (raw regexes, guard
+/// patterns, literal stripping, multi-line call span) is read from the
+/// per-line cache of `source_lines` (`line_facts.rs`, ticket #190): a
+/// line holding thousands of statements (minified code) is matched once
+/// per rule instead of once per statement and per fixpoint pass. Only
+/// what depends on `state` is computed here.
 fn aux_match_line(
     stmt: &IrStmt,
-    state: &State,
+    state: &mut State,
     specs: &RuleSpecs,
     findings: &mut Vec<Finding>,
-    source_lines: &[String],
-) -> State {
+    source_lines: &RuleLines,
+) {
     let lineno = stmt_lineno(stmt);
-    if lineno == 0 || lineno > source_lines.len() {
-        return state.clone();
-    }
-    let line_text = source_lines[lineno - 1].clone();
+    let (Some(line_text), Some(facts)) =
+        (source_lines.line(lineno), source_lines.facts(lineno, specs))
+    else {
+        return;
+    };
+    // The trimmed line, shared by every source, finding and flow step
+    // this statement produces (ticket #191).
+    let trimmed = || {
+        source_lines
+            .trimmed(lineno, specs)
+            .expect("the line exists: its facts were found")
+    };
+    let guard = || {
+        source_lines
+            .guard(lineno, specs)
+            .expect("the line exists: its facts were found")
+    };
     let lhs_key: Option<String> = if let IrStmt::Assign { lhs, .. } = stmt {
         Some(canon_lhs(lhs))
     } else {
         None
     };
-    let mut state = state.clone();
-
-    // Generic guard (before the sanitizers loop) — `if EXPR: body`
+    // Generic guard (before the sanitizers check) — `if EXPR: body`
     // with a terminator (return/raise/abort) in the body and
     // `not`/`in` in the condition. Cleans any tainted variable
     // mentioned on the line. Covers `if '\'' in bar: return` and
     // `if not bar.startswith(...): return` without depending on a
     // specific sanitizer.
-    let stripped_full = line_text.trim_start();
-    if (stripped_full.starts_with("if ") || stripped_full.starts_with("elif "))
-        && (line_text.contains(" not ") || line_text.contains(" in "))
-    {
-        let if_indent = line_text.len() - stripped_full.len();
+    if guard().starts_python_if && guard().has_not_or_in {
+        let if_indent = guard().indent;
         for off in 0..8usize {
-            let idx = lineno + off;
-            if idx >= source_lines.len() {
+            // Body line `lineno + off + 1` (1-based).
+            let Some(nxt) = source_lines.guard(lineno + off + 1, specs) else {
                 break;
-            }
-            let nxt = &source_lines[idx];
-            if nxt.trim().is_empty() {
+            };
+            if nxt.is_blank {
                 continue;
             }
-            let nxt_indent = nxt.len() - nxt.trim_start().len();
-            if nxt_indent <= if_indent {
+            if nxt.indent <= if_indent {
                 break;
             }
-            if GUARD_TERMINATOR_RE.is_match(nxt).unwrap_or(false) {
-                return apply_guard_cleanup(&state, &line_text, lineno, source_lines);
+            if nxt.terminator {
+                apply_guard_cleanup(state, line_text, lineno, source_lines);
+                return;
             }
         }
     }
 
-    // Sanitizers — kills the LHS taint if the line matches.
-    for san in &specs.sanitizers {
-        let Some(rx) = &san.raw_regex else { continue };
-        if !rx.is_match(&line_text).unwrap_or(false) {
-            continue;
-        }
+    // Sanitizers — kills the LHS taint if the line matches (the first
+    // matching sanitizer decides, the body does not depend on which).
+    if facts.first_sanitizer.is_some() {
+        let line_guard = guard();
         // "sanitizer-guard" case (predicate, §10bis):
         // `if not <sanitizer>(x): abort/raise/return/break/sys.exit`.
-        let stripped = line_text.trim_start();
-        let if_indent = line_text.len() - stripped.len();
+        let if_indent = line_guard.indent;
         // A brace-language guard can end on its own line:
         // `if (!ALLOWED.Contains(cmd)) return Forbid();`. The Python
         // dataflow engine only looks at the following, more indented
         // lines (its own syntax); the Audit read C#/PHP/JS guards with its
         // lexical engine, which also tests the guard line (ticket #178).
-        let brace_if = stripped.starts_with("if (") || stripped.starts_with("if(");
-        let mut terminator_nearby = brace_if
-            && GUARD_TERMINATOR_SAMELINE_RE
-                .is_match(&line_text)
-                .unwrap_or(false);
-        let mut reassign_var: Option<String> = None;
-        if let Ok(Some(caps)) = GUARD_REASSIGN_SAMELINE_RE.captures(&line_text) {
-            reassign_var = caps.get(1).map(|m| m.as_str().to_string());
-        }
+        let mut terminator_nearby = line_guard.starts_brace_if && line_guard.terminator_same_line;
+        let mut reassign_var: Option<String> = line_guard.reassign_same_line.clone();
         for off in 0..8usize {
             if terminator_nearby {
                 break;
             }
-            let idx = lineno + off;
-            if idx >= source_lines.len() {
+            let Some(nxt) = source_lines.guard(lineno + off + 1, specs) else {
                 break;
-            }
-            let nxt = &source_lines[idx];
-            if nxt.trim().is_empty() {
+            };
+            if nxt.is_blank {
                 continue;
             }
-            let nxt_indent = nxt.len() - nxt.trim_start().len();
-            if nxt_indent <= if_indent {
+            if nxt.indent <= if_indent {
                 break; // exited the if block
             }
-            if GUARD_TERMINATOR_RE.is_match(nxt).unwrap_or(false) {
+            if nxt.terminator {
                 terminator_nearby = true;
                 break;
             }
-            if reassign_var.is_none()
-                && let Ok(Some(caps)) = GUARD_REASSIGN_NEXTLINE_RE.captures(nxt)
-            {
-                reassign_var = caps.get(1).map(|m| m.as_str().to_string());
+            if reassign_var.is_none() {
+                reassign_var = nxt.reassign_next_line.clone();
             }
         }
-        let has_negation = line_text.contains(" not ")
-            || line_text.contains(" in ")
-            || NEGATION_BANG_RE.is_match(&line_text).unwrap_or(false);
-        let is_guard = (stripped.starts_with("if ")
-            || stripped.starts_with("if(")
-            || stripped.starts_with("elif "))
+        let has_negation = line_guard.has_not_or_in || line_guard.negation_bang;
+        // `if `/`elif ` or `if(`: `starts_brace_if` adds `if(`, its
+        // `if (` is already an `if `.
+        let is_guard = (line_guard.starts_python_if || line_guard.starts_brace_if)
             && has_negation
             && (terminator_nearby || reassign_var.is_some());
         if is_guard {
             if terminator_nearby {
-                let line_text_no_lit = strip_plain_string_literals(&line_text);
-                let keys: Vec<String> = state.keys().cloned().collect();
-                for var_name in &keys {
-                    if line_text_no_lit.contains(var_name.as_str())
-                        && state_get(&state, var_name).is_tainted()
-                    {
-                        state = state_set(&state, var_name, Taint::Clean);
-                    }
-                }
+                let line_text_no_lit = source_lines
+                    .text_without_literals(lineno, specs)
+                    .expect("the line exists: its facts were found");
+                // Every key of the state is tainted: a `Clean` taint is
+                // never stored.
+                state.retain(|var_name, _| !line_text_no_lit.contains(var_name.as_str()));
             } else if let Some(rv) = &reassign_var {
-                state = state_set(&state, rv, Taint::Clean);
+                state_put(state, rv, Taint::Clean);
             }
-            return state;
+            return;
         }
         if let Some(key) = &lhs_key {
-            state = state_set(&state, key, Taint::Clean);
+            state_put(state, key, Taint::Clean);
         }
-        return state; // first sanitizer match is enough
+        return; // first sanitizer match is enough
     }
 
     // Does a user assignment line ALSO contain a sink?
@@ -422,87 +317,50 @@ fn aux_match_line(
         .as_deref()
         .map(|k| !k.starts_with("__t"))
         .unwrap_or(false)
-        && specs.sinks.iter().any(|s| {
-            s.raw_regex
-                .as_ref()
-                .map(|rx| rx.is_match(&line_text).unwrap_or(false))
-                .unwrap_or(false)
-        });
+        && !facts.sinks.is_empty();
 
-    // Sources — marks the LHS as tainted.
-    for src in &specs.sources {
-        let Some(rx) = &src.raw_regex else { continue };
-        if !rx.is_match(&line_text).unwrap_or(false) {
-            continue;
-        }
+    // Sources — marks the LHS as tainted (only the first source that
+    // matches the line acts: every branch below leaves the loop).
+    if let Some(&first_source) = facts.sources.first() {
+        let src = &specs.sources[first_source];
         if let Some(key) = &lhs_key {
-            state = state_set(
-                &state,
+            state_put(
+                state,
                 key,
                 Taint::tainted(
                     [src.kind.clone()],
                     SourceInfo {
                         line: lineno,
-                        expr: line_text.trim().to_string(),
+                        expr: trimmed(),
                         kind: src.kind.clone(),
                     },
                 ),
             );
-            if assign_line_has_sink {
-                break; // let the sinks loop detect the inline flow
+            if !assign_line_has_sink {
+                return;
             }
-            return state;
+            // Otherwise the sinks loop detects the inline flow.
+        } else if !matches!(stmt, IrStmt::Call { .. }) {
+            // Part 4 — only for a Call statement (direct call): a source
+            // passed as an argument can feed a sink on the same line. For
+            // a Return/Branch, a LITERAL source in the text must not open
+            // sink detection.
+            return;
         }
-        // Part 4 — only for a Call statement (direct call): a source
-        // passed as an argument can feed a sink on the same line. For
-        // a Return/Branch, a LITERAL source in the text must not open
-        // sink detection.
-        if matches!(stmt, IrStmt::Call { .. }) {
-            break;
-        }
-        return state;
     }
 
     // Sinks — emits a finding if a taint is visible on the line.
-    for sink in &specs.sinks {
-        let Some(rx) = &sink.raw_regex else { continue };
-        if !rx.is_match(&line_text).unwrap_or(false) {
+    for &sink_index in &facts.sinks {
+        let sink = &specs.sinks[sink_index];
+        let scan = source_lines
+            .sink_scan(lineno, specs)
+            .expect("the line exists: its facts were found");
+        // Multi-line call cleared by a sanitizer in its continuation
+        // lines (see `SinkScan::compute`).
+        if scan.continuation_sanitized {
             continue;
         }
-        // Multi-line call: if the line opens unbalanced parentheses,
-        // extends the search text to the continuation lines (until
-        // balanced, capped at 25 lines).
-        let mut scan_text = line_text.clone();
-        let mut paren_depth =
-            line_text.matches('(').count() as i64 - line_text.matches(')').count() as i64;
-        if paren_depth > 0 {
-            let mut span = vec![line_text.clone()];
-            let mut j = lineno; // source_lines[lineno-1] == line_text ; next = index lineno
-            let j_end = (lineno + 25).min(source_lines.len());
-            while j < j_end && paren_depth > 0 {
-                let cont = &source_lines[j];
-                span.push(cont.clone());
-                paren_depth += cont.matches('(').count() as i64 - cont.matches(')').count() as i64;
-                j += 1;
-            }
-            scan_text = span.join("\n");
-            // A sanitizer written in the continuation clears the sink, as
-            // it does on a one-line call (the sanitizers loop above returns
-            // before this loop). Deliberate deviation from Python
-            // (`transfer.py`), which searched the tainted variable over the
-            // whole call but the sanitizer on its first line only: every
-            // SQLAlchemy `db.execute(\n select(...).where(x == p))` was an
-            // injection (my-ia, 2026-11-14).
-            let continuation = &span[1..].join("\n");
-            if specs.sanitizers.iter().any(|san| {
-                san.raw_regex
-                    .as_ref()
-                    .is_some_and(|rx| rx.is_match(continuation).unwrap_or(false))
-            }) {
-                continue;
-            }
-        }
-        let scan_text_no_lit = strip_plain_string_literals(&scan_text);
+        let scan_text_no_lit = scan.text_without_literals.as_str();
         let mut hit = false;
         for (var_name, var_taint) in state.iter() {
             if scan_text_no_lit.contains(var_name.as_str()) && var_taint.is_tainted() {
@@ -530,7 +388,7 @@ fn aux_match_line(
                 flow.push(FlowStep {
                     line: lineno,
                     kind: "sink".to_string(),
-                    text: line_text.trim().to_string(),
+                    text: trimmed(),
                     file: None,
                     code: None,
                 });
@@ -539,7 +397,7 @@ fn aux_match_line(
                     severity: specs.severity.clone(),
                     line: lineno,
                     column: 0,
-                    sink_text: line_text.trim().to_string(),
+                    sink_text: trimmed(),
                     source_line,
                     message: specs.message.clone(),
                     cwe: specs.cwe.clone(),
@@ -554,11 +412,8 @@ fn aux_match_line(
         // Part 4 — source written DIRECTLY on the sink line, with no
         // intermediate variable.
         if !hit {
-            for src in &specs.sources {
-                let Some(rx) = &src.raw_regex else { continue };
-                if !rx.is_match(&line_text).unwrap_or(false) {
-                    continue;
-                }
+            for &source_index in &facts.sources {
+                let src = &specs.sources[source_index];
                 if !kind_str_compatible(&src.kind, &sink.kinds) {
                     continue;
                 }
@@ -567,7 +422,7 @@ fn aux_match_line(
                     severity: specs.severity.clone(),
                     line: lineno,
                     column: 0,
-                    sink_text: line_text.trim().to_string(),
+                    sink_text: trimmed(),
                     source_line: Some(lineno),
                     message: specs.message.clone(),
                     cwe: specs.cwe.clone(),
@@ -575,14 +430,14 @@ fn aux_match_line(
                         FlowStep {
                             line: lineno,
                             kind: "source".to_string(),
-                            text: line_text.trim().to_string(),
+                            text: trimmed(),
                             file: None,
                             code: None,
                         },
                         FlowStep {
                             line: lineno,
                             kind: "sink".to_string(),
-                            text: line_text.trim().to_string(),
+                            text: trimmed(),
                             file: None,
                             code: None,
                         },
@@ -593,8 +448,6 @@ fn aux_match_line(
             }
         }
     }
-
-    state
 }
 
 // ============================================================================
@@ -839,7 +692,7 @@ pub struct FlowStep {
     pub line: usize,
     /// "source" | "propagation" | "sink".
     pub kind: String,
-    pub text: String,
+    pub text: SharedText,
     /// File of the step, relative to the scanned root, when it differs
     /// from the finding's own file: set on the steps of a cross-file
     /// function summary (`call_graph::compute_one`). `None` means the
@@ -848,7 +701,7 @@ pub struct FlowStep {
     /// The source line of the step (trimmed), stamped with `file` so
     /// that the report can show the code of another file without
     /// reading it again. `None`: read from the finding's file.
-    pub code: Option<String>,
+    pub code: Option<SharedText>,
 }
 
 /// A reported taint finding, conforming to CONTRACT-SCA-AUDITAI.md §3.2.
@@ -858,7 +711,7 @@ pub struct Finding {
     pub severity: String,
     pub line: usize,
     pub column: usize,
-    pub sink_text: String,
+    pub sink_text: SharedText,
     pub source_line: Option<usize>,
     pub message: String,
     pub cwe: Option<String>,
@@ -913,7 +766,7 @@ fn check_source_match(name: &str, specs: &RuleSpecs, lineno: usize) -> Option<Ta
                 [s.kind.clone()],
                 SourceInfo {
                     line: lineno,
-                    expr: name.to_string(),
+                    expr: name.to_string().into(),
                     kind: s.kind.clone(),
                 },
             ));
@@ -1062,7 +915,7 @@ fn arg_regex_source(arg: &Rhs, specs: &RuleSpecs, lineno: usize) -> Option<Taint
                 [src.kind.clone()],
                 SourceInfo {
                     line: lineno,
-                    expr: e.clone(),
+                    expr: e.clone().into(),
                     kind: src.kind.clone(),
                 },
             ));
@@ -1115,7 +968,7 @@ pub fn eval_call(
             [spec.kind.clone()],
             SourceInfo {
                 line: lineno,
-                expr: callee_name,
+                expr: callee_name.into(),
                 kind: spec.kind.clone(),
             },
         ),
@@ -1224,7 +1077,7 @@ pub fn eval_call(
                         [kind.clone()],
                         SourceInfo {
                             line: lineno,
-                            expr: format!("{callee_name}()"),
+                            expr: format!("{callee_name}()").into(),
                             kind,
                         },
                     ),
@@ -1276,7 +1129,7 @@ fn apply_summary_at_call(
         flow.push(FlowStep {
             line: lineno,
             kind: "propagation".to_string(),
-            text: format!("{callee_name}(...) → {}", template.sink_text),
+            text: format!("{callee_name}(...) → {}", template.sink_text).into(),
             file: None,
             code: None,
         });
@@ -1308,7 +1161,7 @@ fn apply_summary_at_call(
             severity: specs.severity.clone(),
             line: lineno,
             column: 0,
-            sink_text: format!("{callee_name}(...)"),
+            sink_text: format!("{callee_name}(...)").into(),
             source_line,
             message: specs.message.clone(),
             cwe: specs.cwe.clone(),
@@ -1364,7 +1217,7 @@ fn check_sink(
         flow.push(FlowStep {
             line: lineno,
             kind: "sink".to_string(),
-            text: callee_name.to_string(),
+            text: callee_name.to_string().into(),
             file: None,
             code: None,
         });
@@ -1373,7 +1226,7 @@ fn check_sink(
             severity: rule_specs.severity.clone(),
             line: lineno,
             column: 0,
-            sink_text: callee_name.to_string(),
+            sink_text: callee_name.to_string().into(),
             source_line,
             message: rule_specs.message.clone(),
             cwe: rule_specs.cwe.clone(),
@@ -1500,10 +1353,10 @@ fn transfer_assign(
     stmt_lhs: &Lhs,
     stmt_rhs: &Rhs,
     lineno: usize,
-    state: &State,
+    state: &mut State,
     specs: &RuleSpecs,
     findings: &mut Vec<Finding>,
-) -> State {
+) {
     let rhs_taint = eval_rhs(stmt_rhs, state, specs, findings, lineno);
     if rhs_taint.is_tainted()
         && let Some(target_name) = lhs_sink_target(stmt_lhs)
@@ -1536,7 +1389,7 @@ fn transfer_assign(
             flow.push(FlowStep {
                 line: lineno,
                 kind: "sink".to_string(),
-                text: target_name.clone(),
+                text: target_name.clone().into(),
                 file: None,
                 code: None,
             });
@@ -1545,7 +1398,7 @@ fn transfer_assign(
                 severity: specs.severity.clone(),
                 line: lineno,
                 column: 0,
-                sink_text: target_name.clone(),
+                sink_text: target_name.clone().into(),
                 source_line,
                 message: specs.message.clone(),
                 cwe: specs.cwe.clone(),
@@ -1555,19 +1408,17 @@ fn transfer_assign(
             break; // one finding per assignment is enough
         }
     }
-    assign_lhs(stmt_lhs, rhs_taint, state)
+    assign_lhs(stmt_lhs, rhs_taint, state);
 }
 
-fn assign_lhs(lhs: &Lhs, taint: Taint, state: &State) -> State {
+fn assign_lhs(lhs: &Lhs, taint: Taint, state: &mut State) {
     match lhs {
-        Lhs::VarLhs(name) => state_set(state, name, taint),
-        Lhs::AttrLhs { .. } | Lhs::SubscriptLhs { .. } => state_set(state, &canon_lhs(lhs), taint),
+        Lhs::VarLhs(name) => state_put(state, name, taint),
+        Lhs::AttrLhs { .. } | Lhs::SubscriptLhs { .. } => state_put(state, &canon_lhs(lhs), taint),
         Lhs::TupleLhs(elements) => {
-            let mut new_state = state.clone();
             for elt in elements {
-                new_state = assign_lhs(elt, taint.clone(), &new_state);
+                assign_lhs(elt, taint.clone(), state);
             }
-            new_state
         }
         Lhs::StarLhs(inner) => assign_lhs(inner, taint, state),
     }
@@ -1607,17 +1458,17 @@ pub fn transfer_call_stmt(
     call_args: &[Rhs],
     kwargs: &[(String, Rhs)],
     lineno: usize,
-    state: &State,
+    state: &mut State,
     specs: &RuleSpecs,
     findings: &mut Vec<Finding>,
-) -> State {
+) {
     eval_call(callee, call_args, kwargs, state, specs, findings, lineno);
 
     let Rhs::AttrRef { base, attr } = callee else {
-        return state.clone();
+        return;
     };
     if !is_mutation_method(attr) {
-        return state.clone();
+        return;
     }
     let base_key = canon_rhs(base);
     if base_key.is_empty()
@@ -1625,47 +1476,46 @@ pub fn transfer_call_stmt(
         || base_key == "<call>"
         || base_key.starts_with('<')
     {
-        return state.clone();
+        return;
     }
 
     if INDEXED_WRITE_METHODS.contains(&attr.as_str()) {
         let Some((slot, val_taint)) =
             compute_indexed_write_key(attr, call_args, &base_key, state, specs, findings, lineno)
         else {
-            return state.clone();
+            return;
         };
         if val_taint.is_tainted() {
             let existing = state_get(state, &slot);
-            return state_set(state, &slot, join(&existing, &val_taint));
+            state_put(state, &slot, join(&existing, &val_taint));
         }
-        return state.clone();
+        return;
     }
 
     if BULK_UPDATE_METHODS.contains(&attr.as_str()) {
-        return apply_bulk_update(call_args, kwargs, &base_key, state, specs, findings, lineno);
+        apply_bulk_update(call_args, kwargs, &base_key, state, specs, findings, lineno);
+        return;
     }
 
     if ELEMENT_WRITE_METHODS.contains(&attr.as_str()) {
-        return apply_element_write(call_args, kwargs, &base_key, state, specs, findings, lineno);
+        apply_element_write(call_args, kwargs, &base_key, state, specs, findings, lineno);
+        return;
     }
 
     if RECEIVER_WRITE_METHODS.contains(&attr.as_str()) {
-        return apply_receiver_write(call_args, kwargs, &base_key, state, specs, findings, lineno);
+        apply_receiver_write(call_args, kwargs, &base_key, state, specs, findings, lineno);
     }
-
-    state.clone()
 }
 
 fn apply_bulk_update(
     call_args: &[Rhs],
     kwargs: &[(String, Rhs)],
     base_key: &str,
-    state: &State,
+    state: &mut State,
     specs: &RuleSpecs,
     findings: &mut Vec<Finding>,
     lineno: usize,
-) -> State {
-    let mut new_state = state.clone();
+) {
     let mut items: Vec<(String, Rhs)> = Vec::new();
     if let Some(first) = call_args.first() {
         if let Rhs::DictRef(entries) = first {
@@ -1673,11 +1523,11 @@ fn apply_bulk_update(
                 items.push((key_repr(k), v.clone()));
             }
         } else {
-            let arg_taint = eval_rhs(first, &new_state, specs, findings, lineno);
+            let arg_taint = eval_rhs(first, state, specs, findings, lineno);
             if arg_taint.is_tainted() {
                 let wkey = format!("{base_key}[*]");
-                let existing = state_get(&new_state, &wkey);
-                new_state = state_set(&new_state, &wkey, join(&existing, &arg_taint));
+                let existing = state_get(state, &wkey);
+                state_put(state, &wkey, join(&existing, &arg_taint));
             }
         }
     }
@@ -1686,24 +1536,23 @@ fn apply_bulk_update(
     }
     for (kstr, v) in &items {
         let slot = format!("{base_key}[{kstr}]");
-        let vtaint = eval_rhs(v, &new_state, specs, findings, lineno);
+        let vtaint = eval_rhs(v, state, specs, findings, lineno);
         if vtaint.is_tainted() {
-            let existing = state_get(&new_state, &slot);
-            new_state = state_set(&new_state, &slot, join(&existing, &vtaint));
+            let existing = state_get(state, &slot);
+            state_put(state, &slot, join(&existing, &vtaint));
         }
     }
-    new_state
 }
 
 fn apply_element_write(
     call_args: &[Rhs],
     kwargs: &[(String, Rhs)],
     base_key: &str,
-    state: &State,
+    state: &mut State,
     specs: &RuleSpecs,
     findings: &mut Vec<Finding>,
     lineno: usize,
-) -> State {
+) {
     let mut arg_taint = Taint::Clean;
     for arg in call_args {
         arg_taint = join(&arg_taint, &eval_rhs(arg, state, specs, findings, lineno));
@@ -1714,20 +1563,19 @@ fn apply_element_write(
     if arg_taint.is_tainted() {
         let wkey = format!("{base_key}[*]");
         let existing = state_get(state, &wkey);
-        return state_set(state, &wkey, join(&existing, &arg_taint));
+        state_put(state, &wkey, join(&existing, &arg_taint));
     }
-    state.clone()
 }
 
 fn apply_receiver_write(
     call_args: &[Rhs],
     kwargs: &[(String, Rhs)],
     base_key: &str,
-    state: &State,
+    state: &mut State,
     specs: &RuleSpecs,
     findings: &mut Vec<Finding>,
     lineno: usize,
-) -> State {
+) {
     let mut arg_taint = Taint::Clean;
     for arg in call_args {
         arg_taint = join(&arg_taint, &eval_rhs(arg, state, specs, findings, lineno));
@@ -1737,9 +1585,8 @@ fn apply_receiver_write(
     }
     if arg_taint.is_tainted() {
         let existing = state_get(state, base_key);
-        return state_set(state, base_key, join(&existing, &arg_taint));
+        state_put(state, base_key, join(&existing, &arg_taint));
     }
-    state.clone()
 }
 
 fn transfer_return(
@@ -1748,11 +1595,10 @@ fn transfer_return(
     state: &State,
     specs: &RuleSpecs,
     findings: &mut Vec<Finding>,
-) -> State {
+) {
     if let Some(v) = value {
         eval_rhs(v, state, specs, findings, lineno);
     }
-    state.clone()
 }
 
 fn transfer_raise(
@@ -1761,14 +1607,15 @@ fn transfer_raise(
     state: &State,
     specs: &RuleSpecs,
     findings: &mut Vec<Finding>,
-) -> State {
+) {
     if let Some(v) = value {
         eval_rhs(v, state, specs, findings, lineno);
     }
-    state.clone()
 }
 
-/// Applies the transfer function of a single IR statement.
+/// Applies the transfer function of a single IR statement, updating
+/// `state` in place (ticket #191: returning a new state copied the whole
+/// state at every statement).
 ///
 /// `source_lines`: if provided, enables hybrid regex matching against
 /// the source line (§10bis) — lets sinks/sanitizers/sources also be
@@ -1777,13 +1624,13 @@ fn transfer_raise(
 /// glob (`discard_sinks_failing_raw_regex`).
 pub fn transfer_stmt(
     stmt: &IrStmt,
-    state: &State,
+    state: &mut State,
     specs: &RuleSpecs,
     findings: &mut Vec<Finding>,
-    source_lines: Option<&[String]>,
-) -> State {
+    source_lines: Option<&RuleLines>,
+) {
     let before = findings.len();
-    let new_state = match stmt {
+    match stmt {
         IrStmt::Assign { lhs, rhs, lineno } => {
             transfer_assign(lhs, rhs, *lineno, state, specs, findings)
         }
@@ -1801,32 +1648,28 @@ pub fn transfer_stmt(
         }
         IrStmt::Branch { condition, lineno } => {
             eval_rhs(condition, state, specs, findings, *lineno);
-            state.clone()
         }
-        IrStmt::Noop { .. } => return state.clone(),
-    };
+        IrStmt::Noop { .. } => return,
+    }
     if let Some(lines) = source_lines {
         discard_sinks_failing_raw_regex(findings, before, specs, lines);
-        return aux_match_line(stmt, &new_state, specs, findings, lines);
+        aux_match_line(stmt, state, specs, findings, lines);
     }
-    new_state
 }
 
 /// Sequentially applies the transfer functions of a list of statements
-/// (processes an entire basic block). See `transfer_stmt` for
-/// `source_lines`.
+/// (processes an entire basic block), updating `state` in place. See
+/// `transfer_stmt` for `source_lines`.
 pub fn transfer_stmts(
     stmts: &[IrStmt],
-    state: &State,
+    state: &mut State,
     specs: &RuleSpecs,
     findings: &mut Vec<Finding>,
-    source_lines: Option<&[String]>,
-) -> State {
-    let mut state = state.clone();
+    source_lines: Option<&RuleLines>,
+) {
     for stmt in stmts {
-        state = transfer_stmt(stmt, &state, specs, findings, source_lines);
+        transfer_stmt(stmt, state, specs, findings, source_lines);
     }
-    state
 }
 
 // ============================================================================
@@ -1837,7 +1680,7 @@ pub fn transfer_stmts(
 mod tests {
     use super::*;
     use crate::scan::dataflow::ir::ConstValue;
-    use crate::scan::dataflow::lattice::empty_state;
+    use crate::scan::dataflow::lattice::{empty_state, state_set};
 
     fn varref(name: &str) -> Rhs {
         Rhs::VarRef(name.to_string())
@@ -1879,7 +1722,7 @@ mod tests {
             severity: "HIGH".to_string(),
             line,
             column: 0,
-            sink_text: sink_text.to_string(),
+            sink_text: sink_text.to_string().into(),
             source_line: None,
             message: "test finding".to_string(),
             cwe: None,
@@ -1893,7 +1736,7 @@ mod tests {
             [kind.to_string()],
             SourceInfo {
                 line,
-                expr: "x".to_string(),
+                expr: "x".to_string().into(),
                 kind: kind.to_string(),
             },
         )
@@ -1974,7 +1817,7 @@ mod tests {
         assert!(t.is_clean(), "le retour d'un sink reste clean par défaut");
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].line, 10);
-        assert_eq!(findings[0].sink_text, "os.system");
+        assert_eq!(findings[0].sink_text, "os.system".into());
     }
 
     #[test]
@@ -2036,7 +1879,8 @@ mod tests {
             rhs: call(varref("input"), vec![]),
             lineno: 1,
         };
-        let new_state = transfer_stmt(&stmt, &empty_state(), &specs, &mut findings, None);
+        let mut new_state = empty_state();
+        transfer_stmt(&stmt, &mut new_state, &specs, &mut findings, None);
         assert!(state_get(&new_state, "x").is_tainted());
     }
 
@@ -2053,9 +1897,9 @@ mod tests {
             rhs: call(varref("input"), vec![]),
             lineno: 7,
         };
-        transfer_stmt(&stmt, &empty_state(), &specs, &mut findings, None);
+        transfer_stmt(&stmt, &mut empty_state(), &specs, &mut findings, None);
         assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].sink_text, "response.headers");
+        assert_eq!(findings[0].sink_text, "response.headers".into());
     }
 
     #[test]
@@ -2069,7 +1913,8 @@ mod tests {
             kwargs: vec![],
             lineno: 1,
         };
-        let new_state = transfer_stmt(&stmt, &empty_state(), &specs, &mut findings, None);
+        let mut new_state = empty_state();
+        transfer_stmt(&stmt, &mut new_state, &specs, &mut findings, None);
         assert!(state_get(&new_state, "lst[*]").is_tainted());
     }
 
@@ -2089,7 +1934,8 @@ mod tests {
             kwargs: vec![],
             lineno: 1,
         };
-        let new_state = transfer_stmt(&stmt, &empty_state(), &specs, &mut findings, None);
+        let mut new_state = empty_state();
+        transfer_stmt(&stmt, &mut new_state, &specs, &mut findings, None);
         assert!(state_get(&new_state, "d['k']").is_tainted());
     }
 
@@ -2104,7 +1950,7 @@ mod tests {
                 ["cli".to_string()],
                 SourceInfo {
                     line: 1,
-                    expr: "x".to_string(),
+                    expr: "x".to_string().into(),
                     kind: "cli".to_string(),
                 },
             ),
@@ -2134,7 +1980,7 @@ mod tests {
             value: Some(sink_call),
             lineno: 4,
         };
-        transfer_stmt(&stmt, &empty_state(), &specs, &mut findings, None);
+        transfer_stmt(&stmt, &mut empty_state(), &specs, &mut findings, None);
         assert_eq!(findings.len(), 1);
     }
 
@@ -2154,7 +2000,8 @@ mod tests {
                 lineno: 2,
             },
         ];
-        let out = transfer_stmts(&stmts, &empty_state(), &specs, &mut findings, None);
+        let mut out = empty_state();
+        transfer_stmts(&stmts, &mut out, &specs, &mut findings, None);
         assert!(
             state_get(&out, "y").is_tainted(),
             "la taint doit se propager de x à y"
@@ -2166,9 +2013,10 @@ mod tests {
         let specs = specs_with(vec![], vec![]);
         let mut findings = Vec::new();
         let state = empty_state();
-        let out = transfer_stmt(
+        let mut out = state.clone();
+        transfer_stmt(
             &IrStmt::Noop { lineno: 1 },
-            &state,
+            &mut out,
             &specs,
             &mut findings,
             None,
@@ -2203,7 +2051,12 @@ mod tests {
         );
         let source_lines = vec!["System.out.println(tainted);".to_string()];
         let mut findings = vec![dummy_finding("System.out.println", 1)];
-        discard_sinks_failing_raw_regex(&mut findings, 0, &specs, &source_lines);
+        discard_sinks_failing_raw_regex(
+            &mut findings,
+            0,
+            &specs,
+            &RuleLines::new(&source_lines, &specs),
+        );
         assert!(
             findings.is_empty(),
             "System.out.println doit être exclu par le lookbehind négatif"
@@ -2219,7 +2072,12 @@ mod tests {
         );
         let source_lines = vec!["foo.println(tainted);".to_string()];
         let mut findings = vec![dummy_finding("foo.println", 1)];
-        discard_sinks_failing_raw_regex(&mut findings, 0, &specs, &source_lines);
+        discard_sinks_failing_raw_regex(
+            &mut findings,
+            0,
+            &specs,
+            &RuleLines::new(&source_lines, &specs),
+        );
         assert_eq!(findings.len(), 1, "foo.println ne doit pas être exclu");
     }
 
@@ -2228,7 +2086,12 @@ mod tests {
         let specs = specs_with(vec![], vec![SinkSpec::new("os.system")]);
         let source_lines = vec!["cursor.execute(tainted)".to_string()];
         let mut findings = vec![dummy_finding("cursor.execute", 1)];
-        discard_sinks_failing_raw_regex(&mut findings, 0, &specs, &source_lines);
+        discard_sinks_failing_raw_regex(
+            &mut findings,
+            0,
+            &specs,
+            &RuleLines::new(&source_lines, &specs),
+        );
         assert_eq!(
             findings.len(),
             1,
@@ -2250,7 +2113,14 @@ mod tests {
             lineno: 1,
         };
         let mut findings = Vec::new();
-        let new_state = aux_match_line(&stmt, &state, &specs, &mut findings, &source_lines);
+        let mut new_state = state.clone();
+        aux_match_line(
+            &stmt,
+            &mut new_state,
+            &specs,
+            &mut findings,
+            &RuleLines::new(&source_lines, &specs),
+        );
         assert!(!state_get(&new_state, "bar").is_tainted());
     }
 
@@ -2275,7 +2145,14 @@ mod tests {
             lineno: 1,
         };
         let mut findings = Vec::new();
-        let new_state = aux_match_line(&stmt, &state, &specs, &mut findings, &source_lines);
+        let mut new_state = state.clone();
+        aux_match_line(
+            &stmt,
+            &mut new_state,
+            &specs,
+            &mut findings,
+            &RuleLines::new(&source_lines, &specs),
+        );
         assert!(!state_get(&new_state, "$next").is_tainted());
     }
 
@@ -2293,7 +2170,14 @@ mod tests {
             lineno: 1,
         };
         let mut findings = Vec::new();
-        let new_state = aux_match_line(&stmt, &state, &specs, &mut findings, &source_lines);
+        let mut new_state = state.clone();
+        aux_match_line(
+            &stmt,
+            &mut new_state,
+            &specs,
+            &mut findings,
+            &RuleLines::new(&source_lines, &specs),
+        );
         assert!(!state_get(&new_state, "bar").is_tainted());
     }
 
@@ -2313,7 +2197,14 @@ mod tests {
             lineno: 2,
         };
         let mut findings = Vec::new();
-        let new_state = aux_match_line(&stmt, &state, &specs, &mut findings, &source_lines);
+        let mut new_state = state.clone();
+        aux_match_line(
+            &stmt,
+            &mut new_state,
+            &specs,
+            &mut findings,
+            &RuleLines::new(&source_lines, &specs),
+        );
         assert!(
             !state_get(&new_state, "bar").is_tainted(),
             "aliasing arrière doit nettoyer bar via url"
@@ -2334,7 +2225,14 @@ mod tests {
             lineno: 1,
         };
         let mut findings = Vec::new();
-        let new_state = aux_match_line(&stmt, &empty_state(), &specs, &mut findings, &source_lines);
+        let mut new_state = empty_state();
+        aux_match_line(
+            &stmt,
+            &mut new_state,
+            &specs,
+            &mut findings,
+            &RuleLines::new(&source_lines, &specs),
+        );
         assert!(state_get(&new_state, "x").is_tainted());
     }
 
@@ -2354,9 +2252,15 @@ mod tests {
             lineno: 1,
         };
         let mut findings = Vec::new();
-        aux_match_line(&stmt, &state, &specs, &mut findings, &source_lines);
+        aux_match_line(
+            &stmt,
+            &mut state.clone(),
+            &specs,
+            &mut findings,
+            &RuleLines::new(&source_lines, &specs),
+        );
         assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].sink_text, "os.system(cmd)");
+        assert_eq!(findings[0].sink_text, "os.system(cmd)".into());
     }
 
     #[test]
@@ -2379,7 +2283,13 @@ mod tests {
             lineno: 1,
         };
         let mut findings = Vec::new();
-        aux_match_line(&stmt, &state, &specs, &mut findings, &source_lines);
+        aux_match_line(
+            &stmt,
+            &mut state.clone(),
+            &specs,
+            &mut findings,
+            &RuleLines::new(&source_lines, &specs),
+        );
         assert_eq!(
             findings.len(),
             1,
@@ -2414,7 +2324,13 @@ mod tests {
             lineno: 1,
         };
         let mut findings = Vec::new();
-        aux_match_line(&stmt, &state, &specs, &mut findings, &source_lines);
+        aux_match_line(
+            &stmt,
+            &mut state.clone(),
+            &specs,
+            &mut findings,
+            &RuleLines::new(&source_lines, &specs),
+        );
         assert!(findings.is_empty(), "{findings:?}");
     }
 
@@ -2432,7 +2348,13 @@ mod tests {
             lineno: 1,
         };
         let mut findings = Vec::new();
-        aux_match_line(&stmt, &empty_state(), &specs, &mut findings, &source_lines);
+        aux_match_line(
+            &stmt,
+            &mut empty_state(),
+            &specs,
+            &mut findings,
+            &RuleLines::new(&source_lines, &specs),
+        );
         assert!(findings.is_empty());
     }
 
@@ -2451,19 +2373,21 @@ mod tests {
         };
 
         let mut findings = Vec::new();
-        let state_none = transfer_stmt(&stmt, &empty_state(), &specs, &mut findings, None);
+        let mut state_none = empty_state();
+        transfer_stmt(&stmt, &mut state_none, &specs, &mut findings, None);
         assert!(
             !state_get(&state_none, "x").is_tainted(),
             "sans source_lines, seul le cœur IR (RHS=Const) doit s'appliquer"
         );
 
         let mut findings2 = Vec::new();
-        let state_some = transfer_stmt(
+        let mut state_some = empty_state();
+        transfer_stmt(
             &stmt,
-            &empty_state(),
+            &mut state_some,
             &specs,
             &mut findings2,
-            Some(&source_lines),
+            Some(&RuleLines::new(&source_lines, &specs)),
         );
         assert!(
             state_get(&state_some, "x").is_tainted(),
@@ -2490,7 +2414,7 @@ mod tests {
                 severity: "HIGH".to_string(),
                 line: 42,
                 column: 0,
-                sink_text: "os.system".to_string(),
+                sink_text: "os.system".to_string().into(),
                 source_line: None,
                 message: String::new(),
                 cwe: None,
@@ -2510,7 +2434,7 @@ mod tests {
             findings[0].line, 7,
             "le finding est émis au site d'appel, pas dans le résumé"
         );
-        assert_eq!(findings[0].sink_text, "helper(...)");
+        assert_eq!(findings[0].sink_text, "helper(...)".into());
         assert!(
             findings[0]
                 .flow
@@ -2635,7 +2559,7 @@ mod tests {
                 severity: "HIGH".to_string(),
                 line: 42,
                 column: 0,
-                sink_text: "sink".to_string(),
+                sink_text: "sink".to_string().into(),
                 source_line: None,
                 message: String::new(),
                 cwe: None,
@@ -2681,7 +2605,7 @@ mod tests {
                 severity: "HIGH".to_string(),
                 line: 1,
                 column: 0,
-                sink_text: "sink".to_string(),
+                sink_text: "sink".to_string().into(),
                 source_line: None,
                 message: String::new(),
                 cwe: None,

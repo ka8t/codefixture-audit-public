@@ -2,11 +2,12 @@
 //! `java_summary.rs`, faithful port of `Audit/sca/dataflow/csharp_summary.py`
 //! (ticket #79/spec #77).
 //!
-//! **Maximal sharing, not a port**: `compute_summary_from_cfg_generic`
+//! **Maximal sharing, not a port**: `compute_summary_prepared`
 //! (`summary.rs`) already carries 100% of the probing algorithm —
 //! language-neutral, it only consumes the generic IR and the CFG.
-//! `compute_csharp_summary` below only builds the C#
-//! CFG and delegates to `summary::compute_csharp_summary_from_cfg`;
+//! `compute_csharp_summary` below only builds and prepares the C#
+//! CFG (`prepare_csharp_file` for a whole file, once per scan, ticket
+//! #192) and delegates to `summary::compute_summary_prepared`;
 //! no duplicated logic.
 //!
 //! What genuinely differs per language — and justifies this
@@ -46,12 +47,15 @@
 //! detection). `CSharpFunctionInfo` therefore does NOT have this field,
 //! unlike `JavaFunctionInfo`.
 
+use super::prepared::{PreparedCfg, PreparedFile, PreparedFunction};
+use super::worklist::prepare_csharp_ir;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use tree_sitter::Node;
 
 use super::csharp_cfg::flatten_preproc_members;
+use super::line_facts::RuleLines;
 pub use super::transfer::FunctionSummary;
 use super::transfer::RuleSpecs;
 
@@ -217,27 +221,62 @@ fn constructor_info<'tree>(
 // Summary computation
 // ============================================================================
 
-/// Computes the summary of a C# method/constructor.
-///
-/// Builds the CFG from `fn.body_node` then delegates to
-/// `summary::compute_csharp_summary_from_cfg` — no duplication of
-/// the probing algorithm.
+/// Computes the summary of a C# function: prepares its body,
+/// then [`compute_csharp_summary_with`]. A caller that already holds the prepared
+/// body (the call graph, ticket #192) calls [`compute_csharp_summary_with`].
 pub fn compute_csharp_summary<'tree>(
     fn_info: &CSharpFunctionInfo<'tree>,
     specs: &RuleSpecs,
     source: &'tree [u8],
-    source_lines: Option<&[String]>,
+    source_lines: Option<&RuleLines>,
 ) -> FunctionSummary {
-    let cfg = super::csharp_cfg::build_csharp_cfg(fn_info.body_node, source);
-    super::summary::compute_csharp_summary_from_cfg(
-        &cfg,
+    let body = PreparedCfg::new(
+        super::csharp_cfg::build_csharp_cfg(fn_info.body_node, source),
+        source,
+        prepare_csharp_ir,
+    );
+    compute_csharp_summary_with(fn_info, &body, specs, source_lines)
+}
+
+/// Summary of a C# function whose body is already prepared
+/// ([`prepare_csharp_file`]); delegates to the shared
+/// probing algorithm (`summary::compute_summary_prepared`).
+pub fn compute_csharp_summary_with(
+    fn_info: &CSharpFunctionInfo,
+    body: &PreparedCfg,
+    specs: &RuleSpecs,
+    source_lines: Option<&RuleLines>,
+) -> FunctionSummary {
+    super::summary::compute_summary_prepared(
+        body,
         &fn_info.name,
         &fn_info.param_names,
         specs,
-        source,
         source_lines,
         fn_info.lineno,
     )
+}
+
+/// Prepares a C# file for every taint rule of the scan (ticket
+/// #192): every collected method (no module top level: executable code only lives in methods).
+pub fn prepare_csharp_file<'tree>(
+    root: Node<'tree>,
+    source: &'tree [u8],
+) -> PreparedFile<'tree, CSharpFunctionInfo<'tree>> {
+    PreparedFile {
+        module: None,
+        functions: collect_csharp_functions(root, source)
+            .into_iter()
+            .map(|info| PreparedFunction {
+                body: Some(PreparedCfg::new(
+                    super::csharp_cfg::build_csharp_cfg(info.body_node, source),
+                    source,
+                    prepare_csharp_ir,
+                )),
+                info,
+            })
+            .collect(),
+    }
 }
 
 /// Computes the summaries of all methods/constructors of a C# file.
@@ -254,15 +293,32 @@ pub fn compute_csharp_file_summaries<'tree>(
     source: &'tree [u8],
     source_lines: Option<&[String]>,
 ) -> BTreeMap<String, Arc<FunctionSummary>> {
+    compute_csharp_file_summaries_prepared(&prepare_csharp_file(root, source), specs, source_lines)
+}
+
+/// [`compute_csharp_file_summaries`] on a file already prepared by
+/// [`prepare_csharp_file`]: the C# pass prepares each file once for
+/// all its rules (ticket #192).
+pub fn compute_csharp_file_summaries_prepared(
+    file: &PreparedFile<CSharpFunctionInfo>,
+    specs: &RuleSpecs,
+    source_lines: Option<&[String]>,
+) -> BTreeMap<String, Arc<FunctionSummary>> {
+    // One per-line cache of the hybrid layer for every summary of this
+    // rule on this file (ticket #190).
+    let rule_lines = source_lines.map(|lines| RuleLines::new(lines, specs));
     let mut summaries = BTreeMap::new();
-    for fn_info in collect_csharp_functions(root, source) {
-        let summary = Arc::new(compute_csharp_summary(
-            &fn_info,
+    for function in &file.functions {
+        let Some(body) = function.body.as_ref() else {
+            continue;
+        };
+        let summary = Arc::new(compute_csharp_summary_with(
+            &function.info,
+            body,
             specs,
-            source,
-            source_lines,
+            rule_lines.as_ref(),
         ));
-        summaries.insert(fn_info.name, summary);
+        summaries.insert(function.info.name.clone(), summary);
     }
     add_bare_name_aliases(&mut summaries);
     summaries

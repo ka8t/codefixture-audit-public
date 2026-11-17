@@ -6,12 +6,13 @@
 //! `summary.rs` (Python side), consumed by the future
 //! `java_call_graph.rs`.
 //!
-//! **Maximum sharing, not a port**: `compute_summary_from_cfg_generic`
+//! **Maximum sharing, not a port**: `compute_summary_prepared`
 //! (`summary.rs`, § generalized on 2026-08-25) already carries 100% of
 //! the probing algorithm (base pass + one pass per parameter) —
 //! language-neutral, it only consumes the generic IR and the CFG.
-//! `compute_java_summary` below only builds the Java CFG
-//! then delegates to `summary::compute_java_summary_from_cfg`;
+//! `compute_java_summary` below only builds and prepares the Java CFG
+//! (`prepare_java_file` for a whole file, once per scan, ticket #192)
+//! then delegates to `summary::compute_summary_prepared`;
 //! no duplicated logic.
 //!
 //! What genuinely differs per language — and justifies this separate
@@ -32,11 +33,14 @@
 //! consumed by the future `java_taint_scan.rs` to seed
 //! `initial_state`.
 
+use super::prepared::{PreparedCfg, PreparedFile, PreparedFunction};
+use super::worklist::prepare_java_ir;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use tree_sitter::Node;
 
+use super::line_facts::RuleLines;
 pub use super::transfer::FunctionSummary;
 use super::transfer::RuleSpecs;
 
@@ -59,6 +63,9 @@ const TOP_LEVEL_TYPE_DECLS: [&str; 4] = [
 /// mapped handler (`@GetMapping`/...), not annotated at all (implicit
 /// binding by name) — see [`route_param_names`]. Empty for
 /// constructors (Spring never binds a constructor).
+// Clone: the call graph keeps a copy as its node, next to the
+// prepared function that owns the original (ticket #192).
+#[derive(Clone)]
 pub struct JavaFunctionInfo<'tree> {
     pub name: String,
     pub body_node: Node<'tree>,
@@ -430,29 +437,62 @@ fn constructor_info<'tree>(
 // Summary computation
 // ============================================================================
 
-/// Computes the summary of a Java method/constructor.
-///
-/// Builds the CFG from `fn.body_node` then delegates to
-/// `summary::compute_java_summary_from_cfg` (language-neutral at the
-/// algorithm level, Java-specialized via `analyze_java`/
-/// `java_lowering::lower_node_to_ir`) — no duplication of
-/// the probing algorithm.
+/// Computes the summary of a Java function: prepares its body,
+/// then [`compute_java_summary_with`]. A caller that already holds the prepared
+/// body (the call graph, ticket #192) calls [`compute_java_summary_with`].
 pub fn compute_java_summary<'tree>(
     fn_info: &JavaFunctionInfo<'tree>,
     specs: &RuleSpecs,
     source: &'tree [u8],
-    source_lines: Option<&[String]>,
+    source_lines: Option<&RuleLines>,
 ) -> FunctionSummary {
-    let cfg = super::java_cfg::build_java_cfg(fn_info.body_node, source);
-    super::summary::compute_java_summary_from_cfg(
-        &cfg,
+    let body = PreparedCfg::new(
+        super::java_cfg::build_java_cfg(fn_info.body_node, source),
+        source,
+        prepare_java_ir,
+    );
+    compute_java_summary_with(fn_info, &body, specs, source_lines)
+}
+
+/// Summary of a Java function whose body is already prepared
+/// ([`prepare_java_file`]); delegates to the shared
+/// probing algorithm (`summary::compute_summary_prepared`).
+pub fn compute_java_summary_with(
+    fn_info: &JavaFunctionInfo,
+    body: &PreparedCfg,
+    specs: &RuleSpecs,
+    source_lines: Option<&RuleLines>,
+) -> FunctionSummary {
+    super::summary::compute_summary_prepared(
+        body,
         &fn_info.name,
         &fn_info.param_names,
         specs,
-        source,
         source_lines,
         fn_info.lineno,
     )
+}
+
+/// Prepares a Java file for every taint rule of the scan (ticket
+/// #192): every collected method (no module top level: executable code only lives in methods).
+pub fn prepare_java_file<'tree>(
+    root: Node<'tree>,
+    source: &'tree [u8],
+) -> PreparedFile<'tree, JavaFunctionInfo<'tree>> {
+    PreparedFile {
+        module: None,
+        functions: collect_java_functions(root, source)
+            .into_iter()
+            .map(|info| PreparedFunction {
+                body: Some(PreparedCfg::new(
+                    super::java_cfg::build_java_cfg(info.body_node, source),
+                    source,
+                    prepare_java_ir,
+                )),
+                info,
+            })
+            .collect(),
+    }
 }
 
 /// Computes the summaries of all methods/constructors of a
@@ -476,9 +516,17 @@ pub fn compute_java_file_summaries<'tree>(
     source: &'tree [u8],
     source_lines: Option<&[String]>,
 ) -> BTreeMap<String, Arc<FunctionSummary>> {
+    // One per-line cache of the hybrid layer for every summary of this
+    // rule on this file (ticket #190).
+    let rule_lines = source_lines.map(|lines| RuleLines::new(lines, specs));
     let mut summaries = BTreeMap::new();
     for fn_info in collect_java_functions(root, source) {
-        let summary = Arc::new(compute_java_summary(&fn_info, specs, source, source_lines));
+        let summary = Arc::new(compute_java_summary(
+            &fn_info,
+            specs,
+            source,
+            rule_lines.as_ref(),
+        ));
         summaries.insert(fn_info.name, summary);
     }
     add_bare_name_aliases(&mut summaries);

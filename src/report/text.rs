@@ -18,6 +18,71 @@ pub fn rule_display_name(rule: &Value, lang: &str) -> String {
     rule.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string()
 }
 
+/// Longest code line a finding shows whole, in characters: the limit of
+/// the Python engine (`runner.py::_add_finding`, `code.strip()[:200]`).
+pub const MAX_SHOWN_CHARS: usize = 200;
+
+/// Characters a clipped line keeps before the spot it is clipped around,
+/// so that the start of the match reads with what leads to it.
+const LEAD_CHARS: usize = 50;
+
+/// `line` as a finding shows it (ticket #194): unchanged up to
+/// [`MAX_SHOWN_CHARS`] characters, otherwise a window of that many
+/// characters around `focus` (a byte offset in `line`, 0 when the spot
+/// is unknown), marked `…` on each side that was cut.
+///
+/// **Deliberate deviation from the Python engine**, which keeps the first
+/// 200 characters with no mark: on a long line the match can sit past
+/// them (a saved page, a long template), and an unmarked cut reads as the
+/// whole line. The window starts [`LEAD_CHARS`] before the focus and is
+/// moved back when it would run past the end. A `focus` that is not a
+/// character boundary is moved back to the previous one.
+pub fn clip_line(line: &str, focus: usize) -> String {
+    let total = line.chars().count();
+    if total <= MAX_SHOWN_CHARS {
+        return line.to_string();
+    }
+    let mut focus = focus.min(line.len());
+    while !line.is_char_boundary(focus) {
+        focus -= 1;
+    }
+    let focus_char = line[..focus].chars().count();
+    let start = focus_char
+        .saturating_sub(LEAD_CHARS)
+        .min(total - MAX_SHOWN_CHARS);
+    let end = start + MAX_SHOWN_CHARS;
+    let mut shown = String::new();
+    if start > 0 {
+        shown.push('…');
+    }
+    shown.extend(line.chars().skip(start).take(MAX_SHOWN_CHARS));
+    if end < total {
+        shown.push('…');
+    }
+    shown
+}
+
+/// [`clip_line`] on each line of a block of context lines, around the
+/// same byte column as the finding's line, so that the lines of the block
+/// stay aligned.
+pub fn clip_lines(block: &str, focus: usize) -> String {
+    block
+        .split('\n')
+        .map(|line| clip_line(line, focus))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Byte offset of `needle` in `line`, 0 when it is absent or empty: where
+/// to clip a line around a text the engine knows (the callee of a taint
+/// sink, the expression of a flow step) but not its column.
+pub fn focus_of(line: &str, needle: &str) -> usize {
+    if needle.is_empty() {
+        return 0;
+    }
+    line.find(needle).unwrap_or(0)
+}
+
 /// Escapes special HTML characters — port of `_escape`.
 ///
 /// **Deliberate deviation from the Python `_escape` (security fix,
@@ -410,5 +475,52 @@ mod tests {
             let out = linkify_acronyms(&en, "HTTPS is secure");
             assert_eq!(out.matches("glossary-link").count(), 1);
         }
+    }
+
+    /// Ticket #194: a line up to the limit is shown whole.
+    #[test]
+    fn test_clip_line_keeps_a_short_line_whole() {
+        let line = "x".repeat(MAX_SHOWN_CHARS);
+        assert_eq!(clip_line(&line, 150), line);
+    }
+
+    /// Ticket #194: a line of 100,000 characters shows a bounded window
+    /// that holds the spot, marked on both sides.
+    #[test]
+    fn test_clip_line_bounds_a_long_line_around_the_spot() {
+        let line = format!("{}eval(x){}", "a".repeat(50_000), "b".repeat(50_000));
+        let shown = clip_line(&line, 50_000);
+        assert!(shown.contains("eval(x)"), "{shown}");
+        assert!(shown.starts_with('…') && shown.ends_with('…'));
+        assert_eq!(shown.chars().count(), MAX_SHOWN_CHARS + 2);
+    }
+
+    /// Unknown spot: the window starts at the line start, cut at the end
+    /// only. A spot near the end moves the window back.
+    #[test]
+    fn test_clip_line_window_stays_inside_the_line() {
+        let line = "c".repeat(1000);
+        let start = clip_line(&line, 0);
+        assert!(!start.starts_with('…') && start.ends_with('…'));
+        let end = clip_line(&line, 999);
+        assert!(end.starts_with('…') && !end.ends_with('…'));
+        assert_eq!(end.chars().count(), MAX_SHOWN_CHARS + 1);
+    }
+
+    /// A focus inside a multi-byte character does not panic.
+    #[test]
+    fn test_clip_line_handles_a_focus_inside_a_character() {
+        let line = "é".repeat(500);
+        assert_eq!(clip_line(&line, 301).chars().count(), MAX_SHOWN_CHARS + 2);
+    }
+
+    /// Context lines are clipped one by one around the same column.
+    #[test]
+    fn test_clip_lines_clips_each_line() {
+        let block = format!("short\n{}", "d".repeat(500));
+        let shown = clip_lines(&block, 0);
+        let lines: Vec<&str> = shown.split('\n').collect();
+        assert_eq!(lines[0], "short");
+        assert_eq!(lines[1].chars().count(), MAX_SHOWN_CHARS + 1);
     }
 }

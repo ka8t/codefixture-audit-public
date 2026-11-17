@@ -342,6 +342,8 @@
   "scan_scope_whole_project": "the whole project",
   "scan_scope_default_excludes": "{count} default patterns",
   "scan_skipped_dirs": "Skipped, not project code: {dirs}. Name a folder in paths.include to scan it.",
+  "scan_skipped_minified": "Skipped, minified code ({count} file(s)): {files}. Scan the unminified sources instead.",
+  "scan_skipped_saved_pages": "Skipped, web pages saved from a browser ({count} file(s)): {files}. They are copies of other sites, not code of the project.",
   "scan_skipped_documentation": "documentation",
   "scan_skipped_virtualenv": "Python virtualenv",
   "scan_skipped_build_output": "build output",

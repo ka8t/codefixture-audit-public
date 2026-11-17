@@ -26,9 +26,16 @@ pub struct Finding {
     pub category: String,
     pub severity: String,
     pub line: usize,
-    /// Content of the line where the finding was detected (not
-    /// truncated — Python truncates to 200 characters in
-    /// `_add_finding`, out of scope here).
+    /// Content of the line where the finding was detected, whole: the
+    /// report clips a long line around [`Self::column`]
+    /// (`report::text::clip_line`, ticket #194), after the inline
+    /// `# sca-ignore` check has read the whole line.
     pub code: String,
+    /// Byte offset in `code` where the match starts, 0 when the matcher
+    /// does not know it (a `file_contains` rule): where a long line is
+    /// clipped for display. `serde(default)` reads the findings cached
+    /// before this field (ticket #194).
+    #[serde(default)]
+    pub column: usize,
     pub confidence: i64,
 }

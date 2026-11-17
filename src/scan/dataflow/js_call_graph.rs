@@ -44,11 +44,15 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+use rayon::prelude::*;
+
 use tree_sitter::Node;
 
 pub use super::call_graph::{FileInput, MAX_SCC_FIXPOINT_ITER, NodeKey, SummariesByFile};
 use super::js_module_registry::{JsImportInfo, collect_js_imports, resolve_target_file};
-use super::js_summary::{JsFunctionInfo, collect_js_functions, compute_js_summary};
+use super::js_summary::{JsFunctionInfo, compute_js_summary_with, prepare_js_file};
+use super::line_facts::{RuleLinesByFile, rule_lines_by_file};
+use super::prepared::{PreparedFile, PreparedFiles};
 use super::transfer::{FunctionSummary, RuleSpecs};
 
 fn text(node: Node, source: &[u8]) -> String {
@@ -191,9 +195,22 @@ pub struct JsCallGraph<'tree> {
     pub edges: BTreeMap<NodeKey, BTreeMap<String, NodeKey>>,
     pub import_bindings: BTreeMap<String, BTreeMap<String, NodeKey>>,
     source_by_file: BTreeMap<String, &'tree [u8]>,
+    /// Every file of the graph prepared once for all the rules of the
+    /// scan (ticket #192): read for the summaries and handed to the
+    /// taint analysis of each file ([`Self::prepared_file`]).
+    prepared: PreparedFiles<'tree, JsFunctionInfo<'tree>>,
 }
 
 impl<'tree> JsCallGraph<'tree> {
+    /// The prepared form of `filepath`, one of the graph's files, for
+    /// the taint analysis of each rule (ticket #192).
+    pub fn prepared_file(
+        &self,
+        filepath: &str,
+    ) -> Option<&PreparedFile<'tree, JsFunctionInfo<'tree>>> {
+        self.prepared.file(filepath)
+    }
+
     /// Builds the complete graph (nodes + edges + import bindings) from
     /// a set of already-parsed JS/TS files.
     pub fn build(files: &[FileInput<'tree>]) -> Self {
@@ -201,18 +218,34 @@ impl<'tree> JsCallGraph<'tree> {
         let mut file_function_names: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         let mut imports_by_file: BTreeMap<String, Vec<JsImportInfo>> = BTreeMap::new();
 
-        for f in files {
-            let functions = collect_js_functions(f.root, f.source);
+        // Each file is prepared once for every rule of the scan (ticket
+        // #192), in parallel: a file only reads its own tree. Its
+        // collected functions are the graph nodes.
+        let per_file: Vec<_> = files
+            .par_iter()
+            .map(|f| {
+                (
+                    prepare_js_file(f.root, f.source),
+                    collect_js_imports(f.root, f.source),
+                )
+            })
+            .collect();
+        for (f, (prepared, imports)) in files.iter().zip(per_file) {
             file_function_names.insert(
                 f.filepath.clone(),
-                functions.iter().map(|fi| fi.name.clone()).collect(),
+                prepared
+                    .functions
+                    .iter()
+                    .map(|function| function.info.name.clone())
+                    .collect(),
             );
-            for fi in functions {
-                graph
-                    .nodes
-                    .insert((f.filepath.clone(), fi.name.clone()), fi);
+            for (index, function) in prepared.functions.iter().enumerate() {
+                let key = (f.filepath.clone(), function.info.name.clone());
+                graph.prepared.index_node(key.clone(), index);
+                graph.nodes.insert(key, function.info.clone());
             }
-            imports_by_file.insert(f.filepath.clone(), collect_js_imports(f.root, f.source));
+            graph.prepared.insert_file(f.filepath.clone(), prepared);
+            imports_by_file.insert(f.filepath.clone(), imports);
             graph.source_by_file.insert(f.filepath.clone(), f.source);
         }
 
@@ -226,11 +259,13 @@ impl<'tree> JsCallGraph<'tree> {
                 .cloned()
                 .unwrap_or_default();
             let source = graph.source_by_file[filepath];
+            // This file's functions: a range of the sorted keys, not a scan
+            // of every function of the project (as `call_graph.rs`).
             let fn_keys: Vec<NodeKey> = graph
                 .nodes
-                .keys()
-                .filter(|(fp, _)| fp == filepath)
-                .cloned()
+                .range((filepath.clone(), String::new())..)
+                .take_while(|((fp, _), _)| fp == filepath)
+                .map(|(k, _)| k.clone())
                 .collect();
             for key in fn_keys {
                 let edges = outgoing_edges(
@@ -329,10 +364,10 @@ impl<'tree> JsCallGraph<'tree> {
         node: &NodeKey,
         seed: BTreeMap<String, Arc<FunctionSummary>>,
         base_specs: &RuleSpecs,
-        source_lines_by_file: &BTreeMap<String, Vec<String>>,
+        lines_for_rule: &RuleLinesByFile,
     ) -> Option<Arc<FunctionSummary>> {
         let (filepath, _name) = node;
-        let fn_info = self.nodes.get(node)?;
+        let function = self.prepared.function(node)?;
         let specs = if seed.is_empty() {
             base_specs.clone()
         } else {
@@ -341,9 +376,13 @@ impl<'tree> JsCallGraph<'tree> {
                 ..base_specs.clone()
             }
         };
-        let source = *self.source_by_file.get(filepath)?;
-        let lines = source_lines_by_file.get(filepath).map(|v| v.as_slice());
-        Some(Arc::new(compute_js_summary(fn_info, &specs, source, lines)))
+        let lines = lines_for_rule.get(filepath.as_str());
+        Some(Arc::new(compute_js_summary_with(
+            &function.info,
+            function.body.as_ref()?,
+            &specs,
+            lines,
+        )))
     }
 
     /// Computes the summaries of every function in the graph — same
@@ -370,6 +409,9 @@ impl<'tree> JsCallGraph<'tree> {
     ) -> super::call_graph::ResolvedSummaries {
         let empty_lines = BTreeMap::new();
         let source_lines_by_file = source_lines_by_file.unwrap_or(&empty_lines);
+        // One per-line cache of the hybrid layer per file, shared by every
+        // summary of this rule (ticket #190).
+        let lines_for_rule = rule_lines_by_file(source_lines_by_file, base_specs);
         let sccs = self.strongly_connected_components();
         super::call_graph::resolve_incremental(
             sccs,
@@ -378,7 +420,7 @@ impl<'tree> JsCallGraph<'tree> {
             reuse,
             |node, resolved, current| {
                 let seed = self.build_seed(node, resolved, current);
-                self.compute_one(node, seed, base_specs, source_lines_by_file)
+                self.compute_one(node, seed, base_specs, &lines_for_rule)
             },
         )
     }
@@ -460,6 +502,22 @@ mod tests {
             edges.get("helper"),
             Some(&("m.js".to_string(), "helper".to_string()))
         );
+    }
+
+    #[test]
+    fn test_build_keeps_two_anonymous_callbacks_of_one_line_as_two_nodes() {
+        // Ticket #193: with a line-only synthetic name, the second
+        // callback replaced the first one in the nodes keyed by
+        // (file, name).
+        let src = b"p.then(function (a) { f(a); }).catch(function (e) { g(e); });\n".to_vec();
+        let tree = parse(std::str::from_utf8(&src).unwrap());
+        let files = vec![FileInput {
+            filepath: "m.js".to_string(),
+            root: tree.root_node(),
+            source: &src,
+        }];
+        let graph = JsCallGraph::build(&files);
+        assert_eq!(graph.nodes.len(), 2);
     }
 
     #[test]

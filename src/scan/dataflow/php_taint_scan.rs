@@ -38,10 +38,10 @@
 use tree_sitter::Node;
 
 use super::lattice::empty_state;
-use super::php_cfg::build_php_cfg;
-use super::php_summary::collect_php_functions;
+use super::line_facts::RuleLines;
+use super::php_summary::{PhpFunctionInfo, prepare_php_file};
+use super::prepared::PreparedFile;
 use super::transfer::{Finding, RuleSpecs};
-use super::worklist::analyze_php;
 
 /// Runs a taint rule on an already-parsed PHP file.
 ///
@@ -56,27 +56,39 @@ use super::worklist::analyze_php;
 /// deliberate vulnerabilities, all in top-level code). No double-counting with
 /// the functions (see `php_cfg.rs` doc). Final global deduplication
 /// by `(rule_id, line, source_line)`.
+///
+/// Prepares the file, then [`run_taint_rule_php_prepared`]. The scan
+/// prepares each file once for all its rules and calls
+/// [`run_taint_rule_php_prepared`] directly (ticket #192).
 pub fn run_taint_rule_php<'tree>(
     root: Node<'tree>,
     source: &'tree [u8],
     specs: &RuleSpecs,
     source_lines: Option<&[String]>,
 ) -> Vec<Finding> {
+    run_taint_rule_php_prepared(&prepare_php_file(root, source), source, specs, source_lines)
+}
+
+/// [`run_taint_rule_php`] on a file already prepared by
+/// `php_summary::prepare_php_file`. `source` is the file's text, read
+/// by the final sanitizer-line filter.
+pub fn run_taint_rule_php_prepared(
+    file: &PreparedFile<PhpFunctionInfo>,
+    source: &[u8],
+    specs: &RuleSpecs,
+    source_lines: Option<&[String]>,
+) -> Vec<Finding> {
+    // One per-line cache of the hybrid layer for every analysis of this
+    // rule on this file (ticket #190).
+    let rule_lines = source_lines.map(|lines| RuleLines::new(lines, specs));
     let mut all_findings: Vec<Finding> = Vec::new();
 
-    let module_cfg = build_php_cfg(root, source);
-    let module_result = analyze_php(
-        &module_cfg,
-        source,
-        specs,
-        Some(&empty_state()),
-        source_lines,
-    );
-    all_findings.extend(module_result.findings);
-
-    for fn_info in collect_php_functions(root, source) {
-        let cfg = build_php_cfg(fn_info.body_node, source);
-        let result = analyze_php(&cfg, source, specs, Some(&empty_state()), source_lines);
+    let bodies = file
+        .module
+        .iter()
+        .chain(file.functions.iter().filter_map(|f| f.body.as_ref()));
+    for prepared in bodies {
+        let result = prepared.analyze(specs, Some(&empty_state()), rule_lines.as_ref());
         all_findings.extend(result.findings);
     }
 

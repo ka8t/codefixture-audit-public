@@ -4,8 +4,8 @@
 //!
 //! Phase 6 approach: each function definition is treated as a
 //! standalone sub-module and an intra-procedural analysis is run on
-//! it (`compute_summary`/`compute_summary_from_cfg`, parameter-by-
-//! parameter probing). `FunctionSummary` lives in `transfer.rs`
+//! it (`compute_summary`/`compute_summary_prepared`, parameter-by-
+//! parameter probing, on a body prepared once: ticket #192). `FunctionSummary` lives in `transfer.rs`
 //! (co-located with `RuleSpecs`/`Finding` — see `transfer.rs`'s
 //! docstring for why: Python types this field as `Any` precisely to
 //! break an import cycle that Rust cannot work around the same way);
@@ -23,15 +23,20 @@ use tree_sitter::Node;
 use super::cfg::build_cfg_from_block;
 use super::ir::IrStmt;
 use super::lattice::{SourceInfo, State, Taint, empty_state, join, state_set};
+use super::line_facts::RuleLines;
+use super::prepared::{PreparedCfg, PreparedFile, PreparedFunction};
 pub use super::transfer::FunctionSummary;
 use super::transfer::{Finding, RuleSpecs, eval_rhs, transfer_stmt};
-use super::worklist::{analyze, lower_node_to_ir};
+use super::worklist::prepare_ir;
 
 // ============================================================================
 // Collecting functions (§8.1)
 // ============================================================================
 
 /// Metadata for a function defined in the module.
+// Clone: the call graph keeps a copy as its node, next to the
+// prepared function that owns the original (ticket #192).
+#[derive(Clone)]
 pub struct FunctionInfo<'tree> {
     /// Name (for global functions) or dotted name (Class.method).
     pub name: String,
@@ -534,77 +539,63 @@ pub(crate) fn rule_source_kinds(specs: &RuleSpecs) -> Vec<String> {
 }
 
 /// Taint of a source detected only by a line regex on the `return`
-/// (e.g. `return request.GET[...]`); CLEAN if none matches.
+/// (e.g. `return request.GET[...]`); CLEAN if none matches. The first
+/// source whose raw regex matches the line decides, read from the
+/// per-line cache (ticket #190).
 fn return_line_source_taint(
     lineno: usize,
-    source_lines: Option<&[String]>,
+    source_lines: Option<&RuleLines>,
     specs: &RuleSpecs,
 ) -> Taint {
     let Some(lines) = source_lines else {
         return Taint::Clean;
     };
-    if lineno == 0 || lineno > lines.len() {
+    let Some(facts) = lines.facts(lineno, specs) else {
         return Taint::Clean;
-    }
-    let line_text = &lines[lineno - 1];
-    for src in &specs.sources {
-        if let Some(rx) = &src.raw_regex
-            && rx.is_match(line_text).unwrap_or(false)
-        {
-            return Taint::tainted(
-                [src.kind.clone()],
-                SourceInfo {
-                    line: lineno,
-                    expr: line_text.trim().to_string(),
-                    kind: src.kind.clone(),
-                },
-            );
-        }
-    }
-    Taint::Clean
+    };
+    let Some(&first_source) = facts.sources.first() else {
+        return Taint::Clean;
+    };
+    let src = &specs.sources[first_source];
+    Taint::tainted(
+        [src.kind.clone()],
+        SourceInfo {
+            line: lineno,
+            expr: lines
+                .trimmed(lineno, specs)
+                .expect("the line exists: its facts were found"),
+            kind: src.kind.clone(),
+        },
+    )
 }
 
 /// Taint of a function's return value = join of the taints evaluated
 /// at each `Return` statement, in the dataflow state computed at that
 /// point. Replays the statements of each node from its `state_in`
 /// (to account for assignments preceding the return in the same
-/// node).
-fn return_taint<'tree>(
-    cfg: &super::cfg::Cfg<'tree>,
+/// node). Port of `summary.py::return_taint`.
+///
+/// `return_nodes` comes from `PreparedIr::return_nodes`: the raw IR of
+/// the nodes holding a `Return`. Replaying only the
+/// nodes that hold a `Return` gives the same result as replaying all
+/// of them, as the code did before ticket #192: the replay of a node
+/// without `Return` only fed a state and findings that were thrown
+/// away.
+pub(crate) fn return_taint_generic(
+    return_nodes: &[(usize, Vec<IrStmt>)],
     result: &super::worklist::AnalysisResult,
     specs: &RuleSpecs,
-    source: &'tree [u8],
-    source_lines: Option<&[String]>,
+    source_lines: Option<&RuleLines>,
 ) -> Taint {
-    return_taint_generic(cfg, result, specs, source, source_lines, lower_node_to_ir)
-}
-
-/// Generic variant of [`return_taint`], parameterized by the
-/// per-node CFG→IR lowering (`lower_node_to_ir`) — Rust mirror of the
-/// `language: str` parameter of `summary.py::return_taint`. Used by
-/// `return_taint` (Python) and by `compute_summary_from_cfg_generic`
-/// (Python AND Java, cf. `java_summary.rs`).
-pub(crate) fn return_taint_generic<'tree, FNode>(
-    cfg: &super::cfg::Cfg<'tree>,
-    result: &super::worklist::AnalysisResult,
-    specs: &RuleSpecs,
-    source: &'tree [u8],
-    source_lines: Option<&[String]>,
-    lower_node_to_ir: FNode,
-) -> Taint
-where
-    FNode: Fn(&super::cfg::Cfg<'tree>, usize, &'tree [u8]) -> Vec<IrStmt> + Copy,
-{
     let mut total = Taint::Clean;
-    for &nid in cfg.nodes.keys() {
-        let ir = lower_node_to_ir(cfg, nid, source);
+    for (nid, ir) in return_nodes {
         let mut state: State = result
             .state_in
-            .get(&nid)
+            .get(nid)
             .cloned()
             .unwrap_or_else(empty_state);
         let mut scratch: Vec<Finding> = Vec::new();
-        for stmt in &ir {
+        for stmt in ir {
             if let IrStmt::Return { value, lineno } = stmt {
                 if let Some(v) = value {
                     total = join(&total, &eval_rhs(v, &state, specs, &mut scratch, *lineno));
@@ -614,7 +605,7 @@ where
                     &return_line_source_taint(*lineno, source_lines, specs),
                 );
             } else {
-                state = transfer_stmt(stmt, &state, specs, &mut scratch, source_lines);
+                transfer_stmt(stmt, &mut state, specs, &mut scratch, source_lines);
             }
         }
     }
@@ -622,7 +613,12 @@ where
 }
 
 /// Language-neutral core of summary computation (probing
-/// sub-analyses).
+/// sub-analyses), on a function body already prepared once
+/// ([`PreparedCfg`], ticket #192). Port of
+/// `summary.py::compute_summary_from_cfg`; every language's
+/// `compute_*_summary_with` delegates here, as every language's summary
+/// delegates to the shared `compute_summary_from_cfg` on the Python
+/// side.
 ///
 /// Method:
 ///   - "all parameters clean" pass: a tainted return ⇒ an internal
@@ -631,169 +627,28 @@ where
 ///     tainted: a new sink triggered ⇒ the parameter reaches a sink;
 ///     a tainted return ⇒ the parameter contributes to the return
 ///     value.
-pub fn compute_summary_from_cfg<'tree>(
-    cfg: &super::cfg::Cfg<'tree>,
+///
+/// All these passes read the same preparation: none of them lowers the
+/// body again.
+pub fn compute_summary_prepared(
+    body: &PreparedCfg,
     name: &str,
     params: &[String],
     specs: &RuleSpecs,
-    source: &'tree [u8],
-    source_lines: Option<&[String]>,
+    source_lines: Option<&RuleLines>,
     fn_lineno: usize,
 ) -> FunctionSummary {
-    compute_summary_from_cfg_generic(
-        cfg,
-        name,
-        params,
-        specs,
-        source,
-        source_lines,
-        fn_lineno,
-        analyze,
-        lower_node_to_ir,
-    )
-}
-
-/// Java equivalent of [`compute_summary_from_cfg`] — same probing
-/// algorithm, `analyze_java`/`java_lowering::lower_node_to_ir`.
-/// Used by `java_summary.rs::compute_java_summary`.
-pub(crate) fn compute_java_summary_from_cfg<'tree>(
-    cfg: &super::cfg::Cfg<'tree>,
-    name: &str,
-    params: &[String],
-    specs: &RuleSpecs,
-    source: &'tree [u8],
-    source_lines: Option<&[String]>,
-    fn_lineno: usize,
-) -> FunctionSummary {
-    compute_summary_from_cfg_generic(
-        cfg,
-        name,
-        params,
-        specs,
-        source,
-        source_lines,
-        fn_lineno,
-        super::worklist::analyze_java,
-        super::java_lowering::lower_node_to_ir,
-    )
-}
-
-/// JavaScript equivalent of [`compute_summary_from_cfg`] — same
-/// probing algorithm, `analyze_js`/`js_lowering::lower_node_to_ir`.
-/// Used by `js_summary.rs::compute_js_summary`.
-pub(crate) fn compute_js_summary_from_cfg<'tree>(
-    cfg: &super::cfg::Cfg<'tree>,
-    name: &str,
-    params: &[String],
-    specs: &RuleSpecs,
-    source: &'tree [u8],
-    source_lines: Option<&[String]>,
-    fn_lineno: usize,
-) -> FunctionSummary {
-    compute_summary_from_cfg_generic(
-        cfg,
-        name,
-        params,
-        specs,
-        source,
-        source_lines,
-        fn_lineno,
-        super::worklist::analyze_js,
-        super::js_lowering::lower_node_to_ir,
-    )
-}
-
-/// PHP equivalent of [`compute_summary_from_cfg`] — same probing
-/// algorithm, `analyze_php`/`php_lowering::lower_node_to_ir`. Used by
-/// `php_summary.rs::compute_php_summary`.
-pub(crate) fn compute_php_summary_from_cfg<'tree>(
-    cfg: &super::cfg::Cfg<'tree>,
-    name: &str,
-    params: &[String],
-    specs: &RuleSpecs,
-    source: &'tree [u8],
-    source_lines: Option<&[String]>,
-    fn_lineno: usize,
-) -> FunctionSummary {
-    compute_summary_from_cfg_generic(
-        cfg,
-        name,
-        params,
-        specs,
-        source,
-        source_lines,
-        fn_lineno,
-        super::worklist::analyze_php,
-        super::php_lowering::lower_node_to_ir,
-    )
-}
-
-/// C# equivalent of [`compute_summary_from_cfg`] — same probing
-/// algorithm, `analyze_csharp`/`csharp_lowering::lower_node_to_ir`.
-/// Used by `csharp_summary.rs::compute_csharp_summary` (ticket
-/// #79/spec #77).
-pub(crate) fn compute_csharp_summary_from_cfg<'tree>(
-    cfg: &super::cfg::Cfg<'tree>,
-    name: &str,
-    params: &[String],
-    specs: &RuleSpecs,
-    source: &'tree [u8],
-    source_lines: Option<&[String]>,
-    fn_lineno: usize,
-) -> FunctionSummary {
-    compute_summary_from_cfg_generic(
-        cfg,
-        name,
-        params,
-        specs,
-        source,
-        source_lines,
-        fn_lineno,
-        super::worklist::analyze_csharp,
-        super::csharp_lowering::lower_node_to_ir,
-    )
-}
-
-/// Generic variant of [`compute_summary_from_cfg`], parameterized by
-/// the taint fixpoint (`analyze_fn`) and the per-node CFG→IR lowering
-/// (`lower_node_to_ir`) — Rust mirror of the `language: str` parameter
-/// of `summary.py::compute_summary_from_cfg` (runtime dispatch on the
-/// Python side; resolved at compile time here). It is this genericity
-/// that lets `java_summary.rs::compute_java_summary` reuse the probing
-/// algorithm WITHOUT DUPLICATION, exactly like
-/// `sca/dataflow/java_summary.py::compute_java_summary` delegates to
-/// the shared `compute_summary_from_cfg` on the Python side.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn compute_summary_from_cfg_generic<'tree, FAnalyze, FNode>(
-    cfg: &super::cfg::Cfg<'tree>,
-    name: &str,
-    params: &[String],
-    specs: &RuleSpecs,
-    source: &'tree [u8],
-    source_lines: Option<&[String]>,
-    fn_lineno: usize,
-    analyze_fn: FAnalyze,
-    lower_node_to_ir: FNode,
-) -> FunctionSummary
-where
-    FAnalyze: Fn(
-        &super::cfg::Cfg<'tree>,
-        &'tree [u8],
-        &RuleSpecs,
-        Option<&State>,
-        Option<&[String]>,
-    ) -> super::worklist::AnalysisResult,
-    FNode: Fn(&super::cfg::Cfg<'tree>, usize, &'tree [u8]) -> Vec<IrStmt> + Copy,
-{
     let probe_kinds = rule_source_kinds(specs);
 
-    let base = analyze_fn(cfg, source, specs, None, source_lines);
+    let return_nodes = body.ir().return_nodes();
+
+    let base = body.analyze(specs, None, source_lines);
     let base_keys: std::collections::HashSet<(String, usize, Option<usize>)> = base
         .findings
         .iter()
         .map(|f| (f.rule_id.clone(), f.line, f.source_line))
         .collect();
-    let ret_base = return_taint_generic(cfg, &base, specs, source, source_lines, lower_node_to_ir);
+    let ret_base = return_taint_generic(return_nodes, &base, specs, source_lines);
     let mut uncond = ret_base.is_tainted();
     let mut ret_kind: Option<String> = None;
     if let Taint::Tainted { source: src, .. } = &ret_base {
@@ -819,12 +674,12 @@ where
                 probe_kinds.clone(),
                 SourceInfo {
                     line: fn_lineno,
-                    expr: format!("param:{pname}"),
+                    expr: format!("param:{pname}").into(),
                     kind: first_kind.clone(),
                 },
             ),
         );
-        let res = analyze_fn(cfg, source, specs, Some(&init), source_lines);
+        let res = body.analyze(specs, Some(&init), source_lines);
         if let Some(f) = res
             .findings
             .iter()
@@ -832,7 +687,7 @@ where
         {
             sink_findings.insert(i, f.clone());
         }
-        let ret_i = return_taint_generic(cfg, &res, specs, source, source_lines, lower_node_to_ir);
+        let ret_i = return_taint_generic(return_nodes, &res, specs, source_lines);
         if ret_i.is_tainted() && !uncond {
             return_params.insert(i);
         }
@@ -849,32 +704,79 @@ where
 }
 
 /// Computes the summary of a Python function (probing
-/// sub-analyses). Builds the CFG from `fn_info.body_node` then
-/// delegates to `compute_summary_from_cfg`. `None` if the body is
-/// absent (malformed tree — robustness, cf. `compute_file_summaries`).
-pub fn compute_summary(
-    fn_info: &FunctionInfo,
+/// sub-analyses): prepares its body, then [`compute_summary_with`].
+/// `None` if the body is absent (malformed tree — robustness, cf.
+/// `compute_file_summaries`). A caller that already holds the prepared
+/// body (the call graph, ticket #192) calls [`compute_summary_with`].
+pub fn compute_summary<'tree>(
+    fn_info: &FunctionInfo<'tree>,
     specs: &RuleSpecs,
-    source: &[u8],
-    source_lines: Option<&[String]>,
+    source: &'tree [u8],
+    source_lines: Option<&RuleLines>,
 ) -> Option<FunctionSummary> {
-    let body = fn_info.body_node?;
+    let body = prepare_python_body(fn_info, source)?;
+    Some(compute_summary_with(fn_info, &body, specs, source_lines))
+}
+
+/// Summary of a Python function whose body is already prepared
+/// ([`prepare_python_file`]). `self`/`cls` are not probed: the caller
+/// never passes a tainted receiver through them.
+pub fn compute_summary_with(
+    fn_info: &FunctionInfo,
+    body: &PreparedCfg,
+    specs: &RuleSpecs,
+    source_lines: Option<&RuleLines>,
+) -> FunctionSummary {
     let params: Vec<String> = fn_info
         .params
         .iter()
         .map(|(n, _)| n.clone())
         .filter(|n| n != "self" && n != "cls")
         .collect();
-    let cfg = build_cfg_from_block(source, body);
-    Some(compute_summary_from_cfg(
-        &cfg,
+    compute_summary_prepared(
+        body,
         &fn_info.name,
         &params,
         specs,
-        source,
         source_lines,
         fn_info.lineno,
+    )
+}
+
+/// Prepared CFG of a Python function body; `None` when the body is
+/// missing from a malformed tree.
+fn prepare_python_body<'tree>(
+    fn_info: &FunctionInfo<'tree>,
+    source: &'tree [u8],
+) -> Option<PreparedCfg<'tree>> {
+    let body = fn_info.body_node?;
+    Some(PreparedCfg::new(
+        build_cfg_from_block(source, body),
+        source,
+        prepare_ir,
     ))
+}
+
+/// Prepares a Python file for every taint rule of the scan (ticket
+/// #192): the module top level and every collected function.
+pub fn prepare_python_file<'tree>(
+    root: Node<'tree>,
+    source: &'tree [u8],
+) -> PreparedFile<'tree, FunctionInfo<'tree>> {
+    PreparedFile {
+        module: Some(PreparedCfg::new(
+            build_cfg_from_block(source, root),
+            source,
+            prepare_ir,
+        )),
+        functions: collect_functions(root, source)
+            .into_iter()
+            .map(|info| PreparedFunction {
+                body: prepare_python_body(&info, source),
+                info,
+            })
+            .collect(),
+    }
 }
 
 /// Computes the summaries of all functions in a module. A function
@@ -886,9 +788,10 @@ pub fn compute_file_summaries(
     specs: &RuleSpecs,
     source_lines: Option<&[String]>,
 ) -> BTreeMap<String, FunctionSummary> {
+    let rule_lines = source_lines.map(|lines| RuleLines::new(lines, specs));
     let mut out = BTreeMap::new();
     for fn_info in collect_functions(root, source) {
-        if let Some(summary) = compute_summary(&fn_info, specs, source, source_lines) {
+        if let Some(summary) = compute_summary(&fn_info, specs, source, rule_lines.as_ref()) {
             out.insert(fn_info.name.clone(), summary);
         }
     }
@@ -1085,6 +988,40 @@ mod tests {
         let summary = compute_summary(&fns[0], &specs, &src, None).unwrap();
         assert!(summary.return_taint_params.contains(&0));
         assert!(!summary.return_tainted_uncond);
+    }
+
+    /// Ticket #192: the base pass and the three parameter probes share
+    /// one preparation of the function's CFG (four before the fix).
+    #[test]
+    fn test_compute_summary_prepares_its_function_once() {
+        let specs = specs_with(vec![], vec![SinkSpec::new("os.system")]);
+        let (tree, src) = build("def run(a, b, c):\n    os.system(b)\n    return c\n");
+        let fns = collect_functions(tree.root_node(), &src);
+        let before = super::super::worklist::IR_PREPARATIONS.with(|count| count.get());
+        let summary = compute_summary(&fns[0], &specs, &src, None).unwrap();
+        let after = super::super::worklist::IR_PREPARATIONS.with(|count| count.get());
+        assert_eq!(after - before, 1);
+        assert!(summary.sink_param_findings.contains_key(&1));
+        assert_eq!(
+            summary.return_taint_params,
+            std::collections::BTreeSet::from([2])
+        );
+    }
+
+    /// Ticket #192: the return taint only replays the CFG nodes holding
+    /// a `Return`; the assignment made in an earlier node still reaches
+    /// it through that node's `state_in`.
+    #[test]
+    fn test_compute_summary_return_in_later_node_sees_earlier_assignment() {
+        let specs = specs_with(vec![], vec![]);
+        let (tree, src) =
+            build("def f(x, flag):\n    y = x\n    if flag:\n        return y\n    return None\n");
+        let fns = collect_functions(tree.root_node(), &src);
+        let summary = compute_summary(&fns[0], &specs, &src, None).unwrap();
+        assert_eq!(
+            summary.return_taint_params,
+            std::collections::BTreeSet::from([0])
+        );
     }
 
     #[test]

@@ -21,10 +21,10 @@
 
 use tree_sitter::Node;
 
-use super::csharp_cfg::build_csharp_cfg;
-use super::csharp_summary::collect_csharp_functions;
+use super::csharp_summary::{CSharpFunctionInfo, prepare_csharp_file};
+use super::line_facts::RuleLines;
+use super::prepared::PreparedFile;
 use super::transfer::{Finding, RuleSpecs};
-use super::worklist::analyze_csharp;
 
 /// Runs a taint rule on an already-parsed C# file.
 ///
@@ -36,11 +36,24 @@ pub fn run_taint_rule_csharp<'tree>(
     specs: &RuleSpecs,
     source_lines: Option<&[String]>,
 ) -> Vec<Finding> {
+    run_taint_rule_csharp_prepared(&prepare_csharp_file(root, source), specs, source_lines)
+}
+
+/// [`run_taint_rule_csharp`] on a file already prepared by
+/// `csharp_summary::prepare_csharp_file`: the scan prepares each file
+/// once for all its rules (ticket #192).
+pub fn run_taint_rule_csharp_prepared(
+    file: &PreparedFile<CSharpFunctionInfo>,
+    specs: &RuleSpecs,
+    source_lines: Option<&[String]>,
+) -> Vec<Finding> {
+    // One per-line cache of the hybrid layer for every analysis of this
+    // rule on this file (ticket #190).
+    let rule_lines = source_lines.map(|lines| RuleLines::new(lines, specs));
     let mut all_findings: Vec<Finding> = Vec::new();
 
-    for fn_info in collect_csharp_functions(root, source) {
-        let cfg = build_csharp_cfg(fn_info.body_node, source);
-        let result = analyze_csharp(&cfg, source, specs, None, source_lines);
+    for prepared in file.functions.iter().filter_map(|f| f.body.as_ref()) {
+        let result = prepared.analyze(specs, None, rule_lines.as_ref());
         all_findings.extend(result.findings);
     }
 
@@ -254,7 +267,7 @@ mod tests {
                 severity: "HIGH".to_string(),
                 line: 1,
                 column: 0,
-                sink_text: "sink".to_string(),
+                sink_text: "sink".to_string().into(),
                 source_line: None,
                 message: String::new(),
                 cwe: None,
@@ -287,7 +300,7 @@ mod tests {
                 severity: "HIGH".to_string(),
                 line: 1,
                 column: 0,
-                sink_text: "sink".to_string(),
+                sink_text: "sink".to_string().into(),
                 source_line: None,
                 message: String::new(),
                 cwe: None,

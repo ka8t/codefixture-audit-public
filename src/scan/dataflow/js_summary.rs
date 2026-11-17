@@ -1,11 +1,12 @@
 //! Discovery of JS functions and summaries for interprocedural
 //! analysis — direct template of `java_summary.rs`.
 //!
-//! **Maximal reuse, not a port**: `compute_summary_from_cfg_generic`
+//! **Maximal reuse, not a port**: `compute_summary_prepared`
 //! (`summary.rs`) already carries 100% of the probing algorithm —
-//! language-neutral. `compute_js_summary` below only builds the JS CFG
-//! and then delegates to `summary::compute_js_summary_from_cfg`; no
-//! duplicated logic.
+//! language-neutral. `compute_js_summary` below only builds and
+//! prepares the JS CFG (`prepare_js_file` for a whole file, once per
+//! scan, ticket #192) and then delegates to
+//! `summary::compute_summary_prepared`; no duplicated logic.
 //!
 //! **Interprocedural resolution wired in on 08/30** (`js_call_graph.rs`,
 //! orchestrator): `js_call_graph.rs::JsCallGraph::build` builds its
@@ -40,7 +41,10 @@
 //! calibration reveals this pattern is common in practice (would
 //! require a synthetic single-node CFG, not built here for now).
 
+use super::line_facts::RuleLines;
+use super::prepared::{PreparedCfg, PreparedFile, PreparedFunction};
 use super::transfer::{FunctionSummary, RuleSpecs};
+use super::worklist::prepare_js_ir;
 use tree_sitter::Node;
 
 /// Metadata of a JS function (function declaration/expression, block-
@@ -48,11 +52,14 @@ use tree_sitter::Node;
 ///
 /// `name`: best available name for debugging/future summaries — the
 /// declaration's name, the name of the carrying variable/property for
-/// an anonymous function that is assigned, or `"<anonymous>:<line>"` as
+/// an anonymous function that is assigned, or `"<anonymous>:<line>:<column>"` as
 /// a last resort (callback passed directly as a call argument, e.g.
 /// `app.get('/x', (req, res) => {...})`). NOT qualified by an enclosing
 /// class in v1 (unlike Java's `Class.method`) — not needed as long as
 /// no interprocedural resolution consumes this name.
+// Clone: the call graph keeps a copy as its node, next to the
+// prepared function that owns the original (ticket #192).
+#[derive(Clone)]
 pub struct JsFunctionInfo<'tree> {
     pub name: String,
     pub body_node: Node<'tree>,
@@ -172,33 +179,80 @@ fn function_name(node: Node, source: &[u8]) -> String {
     if let Some(inferred) = inferred_name_from_context(node, source) {
         return inferred;
     }
-    format!("<anonymous>:{}", node.start_position().row + 1)
+    // Line AND column (ticket #193): two anonymous functions on the same
+    // line (`a.then(function () {...}).catch(function () {...})`) must not
+    // share a name, or the call graph, which keys its nodes by
+    // (file, name), would merge them into one node. Deliberate deviation
+    // from the line-only name: no call ever resolves to this synthetic
+    // name, it only has to be unique within the file.
+    let pos = node.start_position();
+    format!("<anonymous>:{}:{}", pos.row + 1, pos.column + 1)
 }
 
 // ============================================================================
 // Summary computation (Phase 3 groundwork, not yet consumed)
 // ============================================================================
 
-/// Computes the summary of a JS function. Builds the CFG from
-/// `fn_info.body_node` then delegates to
-/// `summary::compute_js_summary_from_cfg` (no duplication of the
-/// probing algorithm).
+/// Computes the summary of a JavaScript/TypeScript function: prepares its body,
+/// then [`compute_js_summary_with`]. A caller that already holds the prepared
+/// body (the call graph, ticket #192) calls [`compute_js_summary_with`].
 pub fn compute_js_summary<'tree>(
     fn_info: &JsFunctionInfo<'tree>,
     specs: &RuleSpecs,
     source: &'tree [u8],
-    source_lines: Option<&[String]>,
+    source_lines: Option<&RuleLines>,
 ) -> FunctionSummary {
-    let cfg = super::js_cfg::build_js_cfg(fn_info.body_node, source);
-    super::summary::compute_js_summary_from_cfg(
-        &cfg,
+    let body = PreparedCfg::new(
+        super::js_cfg::build_js_cfg(fn_info.body_node, source),
+        source,
+        prepare_js_ir,
+    );
+    compute_js_summary_with(fn_info, &body, specs, source_lines)
+}
+
+/// Summary of a JavaScript/TypeScript function whose body is already prepared
+/// ([`prepare_js_file`]); delegates to the shared
+/// probing algorithm (`summary::compute_summary_prepared`).
+pub fn compute_js_summary_with(
+    fn_info: &JsFunctionInfo,
+    body: &PreparedCfg,
+    specs: &RuleSpecs,
+    source_lines: Option<&RuleLines>,
+) -> FunctionSummary {
+    super::summary::compute_summary_prepared(
+        body,
         &fn_info.name,
         &fn_info.param_names,
         specs,
-        source,
         source_lines,
         fn_info.lineno,
     )
+}
+
+/// Prepares a JavaScript/TypeScript file for every taint rule of the scan (ticket
+/// #192): the module top level and every collected function.
+pub fn prepare_js_file<'tree>(
+    root: Node<'tree>,
+    source: &'tree [u8],
+) -> PreparedFile<'tree, JsFunctionInfo<'tree>> {
+    PreparedFile {
+        module: Some(PreparedCfg::new(
+            super::js_cfg::build_js_cfg(root, source),
+            source,
+            prepare_js_ir,
+        )),
+        functions: collect_js_functions(root, source)
+            .into_iter()
+            .map(|info| PreparedFunction {
+                body: Some(PreparedCfg::new(
+                    super::js_cfg::build_js_cfg(info.body_node, source),
+                    source,
+                    prepare_js_ir,
+                )),
+                info,
+            })
+            .collect(),
+    }
 }
 
 /// Computes the summaries of every function in a JS file. Mirror of
@@ -211,9 +265,12 @@ pub fn compute_js_file_summaries<'tree>(
     source: &'tree [u8],
     source_lines: Option<&[String]>,
 ) -> std::collections::BTreeMap<String, FunctionSummary> {
+    // One per-line cache of the hybrid layer for every summary of this
+    // rule on this file (ticket #190).
+    let rule_lines = source_lines.map(|lines| RuleLines::new(lines, specs));
     let mut summaries = std::collections::BTreeMap::new();
     for fn_info in collect_js_functions(root, source) {
-        let summary = compute_js_summary(&fn_info, specs, source, source_lines);
+        let summary = compute_js_summary(&fn_info, specs, source, rule_lines.as_ref());
         summaries.insert(fn_info.name.clone(), summary);
     }
     summaries
@@ -259,6 +316,17 @@ mod tests {
         let functions = collect_js_functions(tree.root_node(), src.as_bytes());
         assert_eq!(functions.len(), 1);
         assert!(functions[0].name.starts_with("<anonymous>:"));
+    }
+
+    #[test]
+    fn test_two_anonymous_callbacks_on_one_line_get_distinct_names() {
+        // Ticket #193: the synthetic name carries the column, so two
+        // callbacks written on the same line stay two functions.
+        let src = "p.then(function (a) { f(a); }).catch(function (e) { g(e); });";
+        let tree = parse_js(src);
+        let functions = collect_js_functions(tree.root_node(), src.as_bytes());
+        let names: Vec<&str> = functions.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, vec!["<anonymous>:1:8", "<anonymous>:1:38"]);
     }
 
     #[test]

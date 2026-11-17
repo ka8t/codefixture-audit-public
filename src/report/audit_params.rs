@@ -14,13 +14,19 @@
 //!     (mirroring `SourceLanguage::from_extension`, `orchestrator.rs`)
 //!     from the detected languages — not from a configurable
 //!     `self._py_exts`/`_js_exts` as on the Python side.
-//!   - **CLI options**: only the options that ACTUALLY exist
-//!     in `codefixture-audit scan` are listed (`--quick`/
-//!     `--only-category`/`--disable-rule`/`--severity`/`--with-tests`/
-//!     `--with-deps`/`--lang`) — not `--fail-on-high`/`--sarif`/
-//!     `--sbom`/`--debug` (Python), which have no Rust equivalent as
-//!     of today (`--format sarif` exists, but as a value of
-//!     `--format`, not a separate boolean).
+//!   - **CLI options**: only the options of the binary that wrote the
+//!     report are listed (ticket #188). The shared binary has seven scan
+//!     options since 4e976cd; the report shows its `--quick`,
+//!     `--only-category` and `--lang`. The private binary adds
+//!     `--disable-rule`/`--severity`/`--with-tests`/`--with-deps`/
+//!     `--db-host`, rendered from a private block the export
+//!     removes. Not `--fail-on-high`/`--sarif`/`--sbom`/`--debug`
+//!     (Python), which have no Rust equivalent as of today
+//!     (`--format sarif` exists, but as a value of `--format`).
+//!   - **Dependencies**: what the dependencies phase did is a scope row
+//!     ("checked", "versions not checked", "not checked"), never an
+//!     option name: a pack with version rules runs the phase without any
+//!     option (ADR-0043), and the shared binary has no `--with-deps`.
 
 use serde_json::Value;
 
@@ -43,10 +49,40 @@ pub struct AuditParamsInfo {
     pub only_category: Option<String>,
     pub disabled_rules: Vec<String>,
     pub with_tests: bool,
+    /// `--with-deps` typed on the command line (private binary). Not
+    /// whether the phase ran: see `dependencies`.
     pub with_deps: bool,
+    /// What the dependencies phase did in this scan.
+    pub dependencies: DependencyCheck,
     pub database_configured: bool,
     pub severity_levels: Option<Vec<String>>,
     pub report_lang: String,
+}
+
+/// What the dependencies phase did, for the "Dependencies" row of the
+/// audit scope (ticket #188). Derived from `ScanReport::version_rules`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DependencyCheck {
+    /// The phase did not run (no manifest, `--quick`, or no version
+    /// rules and no `--with-deps`).
+    NotRun,
+    /// Versions checked against the version rules of the rule pack.
+    Checked,
+    /// The phase ran (unpinned versions reported) but the rule pack
+    /// carries no readable version rules: published vulnerabilities were
+    /// not checked.
+    VersionsNotChecked,
+}
+
+impl DependencyCheck {
+    /// Locale key of the row's value (`audit_params.dependencies_*`).
+    fn i18n_key(self) -> &'static str {
+        match self {
+            DependencyCheck::NotRun => "audit_params.dependencies_not_run",
+            DependencyCheck::Checked => "audit_params.dependencies_checked",
+            DependencyCheck::VersionsNotChecked => "audit_params.dependencies_versions_not_checked",
+        }
+    }
 }
 
 /// File extensions recognized per language — static mirror of
@@ -103,83 +139,56 @@ fn category_badges(only_category: Option<&str>, report_locale: &Value) -> String
     html
 }
 
-fn cli_options_html(info: &AuditParamsInfo, report_locale: &Value) -> String {
-    let item_tpl = load_template("cli-option-item.html");
-    let render = |active: bool, flag_display: String, desc: String| -> String {
-        item_tpl
-            .replace(
-                "{{option_class}}",
-                if active { "active" } else { "inactive" },
-            )
-            .replace("{{option_check}}", if active { "✅" } else { "⬜" })
-            .replace("{{option_flag}}", &escape(&flag_display))
-            .replace("{{option_desc}}", &escape(&desc))
-    };
+/// One line of the options checklist (`cli-option-item.html`).
+fn render_option(active: bool, flag_display: &str, desc: &str) -> String {
+    load_template("cli-option-item.html")
+        .replace(
+            "{{option_class}}",
+            if active { "active" } else { "inactive" },
+        )
+        .replace("{{option_check}}", if active { "✅" } else { "⬜" })
+        .replace("{{option_flag}}", &escape(flag_display))
+        .replace("{{option_desc}}", &escape(desc))
+}
 
+/// Options checklist: the options both binaries have, then (private
+/// binary only) its own options. The export removes the private block,
+/// so the shared report never names an option its binary does not have
+/// (ticket #188).
+fn cli_options_html(info: &AuditParamsInfo, report_locale: &Value) -> String {
+    #[allow(unused_mut)] // appended to by the private block only.
+    let mut html = shared_cli_options_html(info, report_locale);
+    html
+}
+
+/// Options of the shared binary's `scan` shown in the report: `--quick`,
+/// `--only-category`, `--lang`. Its other options (`--no-cache`,
+/// `--format`, `--rules`, `--exclude`) are shown elsewhere in the
+/// section or change nothing in its content.
+fn shared_cli_options_html(info: &AuditParamsInfo, report_locale: &Value) -> String {
     let mut html = String::new();
-    html.push_str(&render(
+    html.push_str(&render_option(
         info.quick_mode,
-        "--quick".to_string(),
-        t(report_locale, "cli_options_desc.quick"),
+        "--quick",
+        &t(report_locale, "cli_options_desc.quick"),
     ));
     let only_cat_flag = match &info.only_category {
         Some(c) => format!("--only-category {c}"),
         None => "--only-category".to_string(),
     };
-    html.push_str(&render(
+    html.push_str(&render_option(
         info.only_category.is_some(),
-        only_cat_flag,
-        t(report_locale, "cli_options_desc.only_category"),
+        &only_cat_flag,
+        &t(report_locale, "cli_options_desc.only_category"),
     ));
-    let disable_flag = if info.disabled_rules.is_empty() {
-        "--disable-rule".to_string()
-    } else {
-        format!("--disable-rule ({})", info.disabled_rules.len())
-    };
-    html.push_str(&render(
-        !info.disabled_rules.is_empty(),
-        disable_flag,
-        t(report_locale, "cli_options_desc.disable_rule"),
-    ));
-    let severity_flag = match &info.severity_levels {
-        Some(levels) => format!("--severity {}", levels.join(",")),
-        None => "--severity".to_string(),
-    };
-    let severity_desc = t(report_locale, "cli_options_desc.severity").replace(
-        "{levels}",
-        &info
-            .severity_levels
-            .as_ref()
-            .map(|l| l.join(", "))
-            .unwrap_or_default(),
-    );
-    html.push_str(&render(
-        info.severity_levels.is_some(),
-        severity_flag,
-        severity_desc,
-    ));
-    html.push_str(&render(
-        info.with_tests,
-        "--with-tests".to_string(),
-        t(report_locale, "cli_options_desc.with_tests"),
-    ));
-    html.push_str(&render(
-        info.with_deps,
-        "--with-deps".to_string(),
-        t(report_locale, "cli_options_desc.with_deps"),
-    ));
-    html.push_str(&render(
-        info.database_configured,
-        "--db-host".to_string(),
-        t(report_locale, "cli_options_desc.with_database"),
-    ));
-    html.push_str(&render(
+    html.push_str(&render_option(
         true,
-        format!("--lang {}", info.report_lang),
-        t(report_locale, "cli_options_desc.report_lang"),
+        &format!("--lang {}", info.report_lang),
+        &t(report_locale, "cli_options_desc.report_lang"),
     ));
     html
 }
+
 
 /// Generates the complete "audit parameters" section. The project
 /// identity comes from `ctx` (which already carries these fields for
@@ -341,6 +350,14 @@ pub fn render_audit_params_html(
         )
         .replace("{{disabled_rules}}", &disabled_html)
         .replace(
+            "{{i18n_dependencies}}",
+            &t(report_locale, "audit_params.dependencies"),
+        )
+        .replace(
+            "{{dependencies}}",
+            &escape(&t(report_locale, info.dependencies.i18n_key())),
+        )
+        .replace(
             "{{i18n_categories}}",
             &t(report_locale, "audit_params.categories"),
         )
@@ -375,6 +392,7 @@ mod tests {
             disabled_rules: vec![],
             with_tests: false,
             with_deps: false,
+            dependencies: DependencyCheck::NotRun,
             database_configured: false,
             severity_levels: None,
             report_lang: "en".to_string(),
@@ -502,20 +520,70 @@ mod tests {
         assert!(alpha_pos < zeta_pos, "triés alphabétiquement");
     }
 
+
+    /// Shared binary (ticket #188): its part of the checklist names only
+    /// options of its `scan --help`, whatever ran (here the dependencies
+    /// phase, started by a pack with version rules). The private binary
+    /// adds its own after it (`cli_options_html`).
     #[test]
-    fn test_cli_options_reflect_active_flags() {
+    fn test_shared_cli_options_name_only_shared_binary_options() {
         let en = load_report_locale("en");
+        let mut info = base_info();
+        info.dependencies = DependencyCheck::Checked;
+        info.with_tests = true;
+        info.disabled_rules = vec!["some_rule".to_string()];
+        info.severity_levels = Some(vec!["HIGH".to_string()]);
+        let html = shared_cli_options_html(&info, &en);
+        for absent in [
+            "--with-deps",
+            "--with-tests",
+            "--severity",
+            "--disable-rule",
+            "--db-host",
+        ] {
+            assert!(!html.contains(absent), "{absent} is not a shared option");
+        }
+        for present in ["--quick", "--only-category", "--lang en"] {
+            assert!(html.contains(present), "{present} is a shared option");
+        }
+    }
+
+    /// The "Dependencies" row says what the phase did, in the report
+    /// language, for each outcome (ticket #188).
+    #[test]
+    fn test_dependencies_row_says_what_ran() {
         let catalog = BTreeMap::new();
         let ctx = test_ctx("P", "", "", "", "/root", &catalog);
-        let mut info = base_info();
-        info.with_tests = true;
-        info.with_deps = true;
-        info.severity_levels = Some(vec!["HIGH".to_string(), "CRITICAL".to_string()]);
-        let html = render_audit_params_html(&info, &ctx, &en);
-        assert!(html.contains("--with-tests"));
-        assert!(html.contains("--with-deps"));
-        assert!(html.contains("--severity HIGH,CRITICAL"));
-        assert!(html.contains("option-item active"));
+        for lang in ["en", "fr", "es", "de"] {
+            let locale = load_report_locale(lang);
+            assert!(
+                render_audit_params_html(&base_info(), &ctx, &locale)
+                    .contains(&escape(&t(&locale, "audit_params.dependencies")))
+            );
+            for check in [
+                DependencyCheck::NotRun,
+                DependencyCheck::Checked,
+                DependencyCheck::VersionsNotChecked,
+            ] {
+                let mut info = base_info();
+                info.dependencies = check;
+                let html = render_audit_params_html(&info, &ctx, &locale);
+                let label = t(&locale, check.i18n_key());
+                assert_ne!(label, check.i18n_key(), "{lang}: missing locale key");
+                assert!(html.contains(&escape(&label)), "{lang} {check:?}");
+            }
+        }
+        // The three outcomes read differently.
+        let en = load_report_locale("en");
+        let labels: std::collections::BTreeSet<_> = [
+            DependencyCheck::NotRun,
+            DependencyCheck::Checked,
+            DependencyCheck::VersionsNotChecked,
+        ]
+        .iter()
+        .map(|c| t(&en, c.i18n_key()))
+        .collect();
+        assert_eq!(labels.len(), 3);
     }
 
     #[test]

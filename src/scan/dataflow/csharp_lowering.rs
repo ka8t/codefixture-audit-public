@@ -1001,8 +1001,8 @@ pub fn lower_stmt<'src>(source: &'src [u8], stmt: Node<'src>) -> Vec<IrStmt> {
 // ============================================================================
 // Lowering a CFG node into IR — C# mirror of
 // `java_lowering.rs::lower_node_to_ir`/`lower_all_nodes`, the entry
-// point consumed by `worklist::analyze_generic` to instantiate
-// `worklist::analyze_csharp`.
+// point consumed by `worklist::prepare_ir_generic` to instantiate
+// `worklist::prepare_csharp_ir`.
 // ============================================================================
 
 /// Lowers the statements/condition of a C# CFG node into IR.

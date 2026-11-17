@@ -861,8 +861,8 @@ pub fn lower_condition_switch_case<'src>(
 // ============================================================================
 // Lowering a CFG node into IR — JS mirror of
 // `java_lowering::lower_node_to_ir`, entry point consumed by
-// `worklist::analyze_generic` to instantiate a future
-// `worklist::analyze_js`.
+// `worklist::prepare_ir_generic` to instantiate
+// `worklist::prepare_js_ir`.
 // ============================================================================
 
 /// Lowers the statements/condition of a JS CFG node into IR.

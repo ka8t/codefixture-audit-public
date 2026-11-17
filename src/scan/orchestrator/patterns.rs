@@ -223,7 +223,11 @@ mod tests {
     fn run(root: &Path, files: &[&str], rules: &[serde_json::Value], suppress: &str, cached: bool) -> PassRun {
         let parsed: Vec<_> = files
             .iter()
-            .map(|f| parse_file(root, &root.join(f)).expect("parsable fixture").1)
+            .map(|f| {
+                parse_file(root, &root.join(f))
+                    .into_parsed()
+                    .expect("parsable fixture")
+            })
             .collect();
         let config = ScanConfig { root: root.to_path_buf(), ..ScanConfig::default() };
         let suppressions = Suppressions::load_from_json(suppress);

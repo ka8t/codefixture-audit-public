@@ -9,22 +9,29 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use rayon::prelude::*;
+
 use super::{TaintFindings, TaintLanguage};
 use crate::scan::dataflow::call_graph::{NodeKey, ResolvedSummaries, SummaryReuse};
 use crate::scan::dataflow::csharp_summary::{
-    collect_csharp_field_types, collect_csharp_local_types, compute_csharp_file_summaries,
+    CSharpFunctionInfo, collect_csharp_field_types, collect_csharp_local_types,
+    compute_csharp_file_summaries_prepared, prepare_csharp_file,
 };
-use crate::scan::dataflow::csharp_taint_scan::run_taint_rule_csharp;
+use crate::scan::dataflow::csharp_taint_scan::run_taint_rule_csharp_prepared;
+use crate::scan::dataflow::prepared::PreparedFile;
 use crate::scan::dataflow::transfer::RuleSpecs;
 use crate::scan::orchestrator::{ParsedFile, SourceLanguage};
 
 /// C# files of the scan, each with its declared types.
-pub(in crate::scan::orchestrator) struct CSharpTaint {
+pub(in crate::scan::orchestrator) struct CSharpTaint<'a> {
     /// Variable or field name → declared class, per file.
     type_maps: BTreeMap<String, BTreeMap<String, String>>,
+    /// Every file prepared once for all the rules of the scan (ticket
+    /// #192); C# has no call graph to hold them.
+    prepared: BTreeMap<String, PreparedFile<'a, CSharpFunctionInfo<'a>>>,
 }
 
-impl<'a> TaintLanguage<'a> for CSharpTaint {
+impl<'a> TaintLanguage<'a> for CSharpTaint<'a> {
     const NAME: &'static str = "csharp";
     const FILE_LANGUAGES: &'static [SourceLanguage] = &[SourceLanguage::CSharp];
     const RULE_LANGUAGE: SourceLanguage = SourceLanguage::CSharp;
@@ -41,7 +48,20 @@ impl<'a> TaintLanguage<'a> for CSharpTaint {
                 (pf.rel_path.clone(), type_map)
             })
             .collect();
-        CSharpTaint { type_maps }
+        // In parallel: a file only reads its own tree.
+        let prepared = files
+            .par_iter()
+            .map(|pf| {
+                (
+                    pf.rel_path.clone(),
+                    prepare_csharp_file(pf.tree.root_node(), &pf.source_bytes),
+                )
+            })
+            .collect();
+        CSharpTaint {
+            type_maps,
+            prepared,
+        }
     }
 
     /// A file resolves nothing from the others.
@@ -66,20 +86,25 @@ impl<'a> TaintLanguage<'a> for CSharpTaint {
         specs: &mut RuleSpecs,
         _resolved: &ResolvedSummaries,
     ) -> TaintFindings {
-        let root = file.tree.root_node();
         // Back to the rule's own specs (no summaries, no types) before
         // computing this file's summaries, as fresh specs would be: the
         // previous file left its own in `specs`.
         specs.summaries = Default::default();
         specs.type_map = Default::default();
-        let summaries = compute_csharp_file_summaries(
-            root,
-            specs,
-            &file.source_bytes,
-            Some(&file.source_lines_plain),
-        );
-        specs.summaries = summaries;
+        // The file was prepared once for all the rules, in `build`; a
+        // file it does not know cannot happen, it would only be prepared
+        // again here.
+        let fresh;
+        let prepared = match self.prepared.get(&file.rel_path) {
+            Some(prepared) => prepared,
+            None => {
+                fresh = prepare_csharp_file(file.tree.root_node(), &file.source_bytes);
+                &fresh
+            }
+        };
+        let lines = Some(file.source_lines_plain.as_slice());
+        specs.summaries = compute_csharp_file_summaries_prepared(prepared, specs, lines);
         specs.type_map = self.type_maps.get(&file.rel_path).cloned().unwrap_or_default();
-        run_taint_rule_csharp(root, &file.source_bytes, specs, Some(&file.source_lines_plain))
+        run_taint_rule_csharp_prepared(prepared, specs, lines)
     }
 }

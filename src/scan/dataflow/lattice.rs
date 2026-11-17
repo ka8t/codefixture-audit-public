@@ -7,6 +7,15 @@
 //! ```
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
+
+/// Text carried by a taint, a finding or a flow step (source expression,
+/// sink text, step text and code). Shared rather than owned: the hybrid
+/// layer stores the whole source line there, which on minified code is
+/// several MB, and the dataflow state, the findings and the function
+/// summaries are cloned at every statement. A clone of a `SharedText` only
+/// bumps a reference count (ticket #191). Serialized as a plain string.
+pub type SharedText = Arc<str>;
 
 /// Metadata of a taint's source — allows reconstructing the
 /// flow (source → sink) for reports.
@@ -15,7 +24,7 @@ pub struct SourceInfo {
     /// Line where the taint was introduced (source).
     pub line: usize,
     /// Textual representation of the source (for reports).
-    pub expr: String,
+    pub expr: SharedText,
     /// Nature of the taint (http, cli, env, etc.).
     pub kind: String,
 }
@@ -165,15 +174,27 @@ pub fn state_get(state: &State, key: &str) -> Taint {
     state.get(key).cloned().unwrap_or(Taint::Clean)
 }
 
-/// Functional update: returns a new state with `key` updated.
-/// If `taint` is `Clean`, the key is removed.
+/// In-place update: sets the taint of `key`; a `Clean` taint removes
+/// the key. What the transfer functions use: the state is updated at
+/// every statement, and copying it each time made a basic block of N
+/// assignments cost N² (a minified line holds thousands of them, ticket
+/// #191).
+pub fn state_put(state: &mut State, key: &str, taint: Taint) {
+    if taint.is_clean() {
+        state.remove(key);
+    } else if let Some(slot) = state.get_mut(key) {
+        *slot = taint;
+    } else {
+        state.insert(key.to_string(), taint);
+    }
+}
+
+/// Functional update: returns a new state with `key` updated (see
+/// [`state_put`]). Copies the whole state: kept for the places that
+/// build an initial state once, not for the transfer functions.
 pub fn state_set(state: &State, key: &str, taint: Taint) -> State {
     let mut new_state = state.clone();
-    if taint.is_clean() {
-        new_state.remove(key);
-    } else {
-        new_state.insert(key.to_string(), taint);
-    }
+    state_put(&mut new_state, key, taint);
     new_state
 }
 
@@ -225,7 +246,7 @@ mod tests {
     fn src(line: usize) -> SourceInfo {
         SourceInfo {
             line,
-            expr: String::new(),
+            expr: String::new().into(),
             kind: "http".to_string(),
         }
     }
