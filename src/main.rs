@@ -1107,7 +1107,8 @@ impl Default for ScanExtraArgs {
 #[allow(clippy::large_enum_variant)]
 enum Command {
     /// Scans a project (Python, Java, JavaScript/TypeScript, PHP, C#,
-    /// HTML templates, YAML, Dockerfile). Minified files (a `.min.` name,
+    /// HTML templates, YAML, Dockerfile), and its `pom.xml`, `web.config`
+    /// and `package.json` for the rules written for them. Minified files (a `.min.` name,
     /// or JavaScript, TypeScript and HTML written on very long lines) are
     /// skipped and listed after the scan, and so are web pages saved from
     /// a browser (a `<!-- saved from url=` mark, and their `<name>_files/`

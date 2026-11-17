@@ -10546,7 +10546,7 @@
       "severity": "HIGH",
       "category": "security",
       "language": "java",
-      "risk": "A <repository> block uses an http:// address, so libraries are downloaded without encryption. Someone on the network can swap a .jar for a malicious one, which then runs inside your build and your application.",
+      "risk": "A <repository> block uses an http:// address, so libraries are downloaded or published without encryption. Someone on the network can swap a .jar for a malicious one, which then runs inside your build and your application.",
       "steps": [
         {
           "order": 1,

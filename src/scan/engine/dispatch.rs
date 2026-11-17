@@ -44,12 +44,28 @@ fn is_truthy(v: Option<&Value>) -> bool {
 /// `hook`/`ast_patterns`/`mode`). `location` carries both the
 /// project-relative and the on-disk path of the scanned file: the
 /// `file_contains` conditions read one or the other (see `FileLocation`).
+///
+/// `syntax` is the language whose comment syntax the file is written in,
+/// for the comment stripping of `pattern-not`/`with`: the rule's own
+/// language for source code, another one for a configuration file read
+/// by a code rule (XML comments for a `pom.xml` read by a Java rule,
+/// ADR-0047). A deliberate addition to the Audit, which strips by rule
+/// language only because it never reads such files.
 pub fn dispatch_rule(
     rule_json: &Value,
     location: FileLocation<'_>,
     all_lines: &[(usize, String)],
     content: &str,
+    syntax: &str,
 ) -> DispatchOutcome {
+    let regex_findings = || {
+        compile_regex_rule_from_json(rule_json)
+            .map(|mut r| {
+                r.language = syntax.to_string();
+                execute_regex_rule(&r, all_lines)
+            })
+            .unwrap_or_default()
+    };
     let mode = rule_json.get("mode").and_then(|v| v.as_str()).unwrap_or("");
     let has_patterns = is_truthy(rule_json.get("patterns"));
     let has_fc = is_truthy(rule_json.get("file_contains"));
@@ -81,19 +97,11 @@ pub fn dispatch_rule(
         ) {
             return DispatchOutcome::Findings(Vec::new());
         }
-        return DispatchOutcome::Findings(
-            compile_regex_rule_from_json(rule_json)
-                .map(|r| execute_regex_rule(&r, all_lines))
-                .unwrap_or_default(),
-        );
+        return DispatchOutcome::Findings(regex_findings());
     }
     // Regex only.
     if has_patterns {
-        return DispatchOutcome::Findings(
-            compile_regex_rule_from_json(rule_json)
-                .map(|r| execute_regex_rule(&r, all_lines))
-                .unwrap_or_default(),
-        );
+        return DispatchOutcome::Findings(regex_findings());
     }
     // file_contains only (file-level finding).
     if has_fc {
@@ -130,21 +138,21 @@ mod tests {
     #[test]
     fn test_dispatch_ast_mode_returns_ast_outcome() {
         let rule = json!({"id": "r", "mode": "ast", "ast_patterns": [{}]});
-        let out = dispatch_rule(&rule, f_py(), &[], "");
+        let out = dispatch_rule(&rule, f_py(), &[], "", "python");
         assert_eq!(out, DispatchOutcome::Ast);
     }
 
     #[test]
     fn test_dispatch_ast_patterns_present_without_mode() {
         let rule = json!({"id": "r", "ast_patterns": [{"pattern": "x"}]});
-        let out = dispatch_rule(&rule, f_py(), &[], "");
+        let out = dispatch_rule(&rule, f_py(), &[], "", "python");
         assert_eq!(out, DispatchOutcome::Ast);
     }
 
     #[test]
     fn test_dispatch_taint_mode_without_patterns_returns_taint() {
         let rule = json!({"id": "r", "mode": "taint", "sources": [{"pattern": "input"}], "sinks": [{"pattern": "eval"}]});
-        let out = dispatch_rule(&rule, f_py(), &[], "");
+        let out = dispatch_rule(&rule, f_py(), &[], "", "python");
         assert_eq!(out, DispatchOutcome::Taint);
     }
 
@@ -166,6 +174,7 @@ mod tests {
             f_py(),
             &lines("x = eval(y)\n"),
             "x = eval(y)\n",
+            "python",
         );
         assert!(matches!(out, DispatchOutcome::Findings(_)));
     }
@@ -173,7 +182,7 @@ mod tests {
     #[test]
     fn test_dispatch_hook_returns_hook_outcome() {
         let rule = json!({"id": "r", "hook": "some_custom_hook"});
-        let out = dispatch_rule(&rule, f_py(), &[], "");
+        let out = dispatch_rule(&rule, f_py(), &[], "", "python");
         assert_eq!(out, DispatchOutcome::Hook);
     }
 
@@ -181,7 +190,7 @@ mod tests {
     fn test_dispatch_regex_only_produces_findings() {
         let rule = json!({"id": "eval_usage", "category": "Injection", "severity": "HIGH", "patterns": [{"pattern": r"eval\(", "match": "line"}]});
         let content = "x = eval(y)\n";
-        let out = dispatch_rule(&rule, f_py(), &lines(content), content);
+        let out = dispatch_rule(&rule, f_py(), &lines(content), content, "python");
         match out {
             DispatchOutcome::Findings(f) => assert_eq!(f.len(), 1),
             other => panic!("attendu Findings, eu {other:?}"),
@@ -195,7 +204,7 @@ mod tests {
             "file_contains": {"has": [], "not_has": ["forbidden_word"], "scope": "file"},
         });
         let content = "safe content\n";
-        let out = dispatch_rule(&rule, f_py(), &lines(content), content);
+        let out = dispatch_rule(&rule, f_py(), &lines(content), content, "python");
         match out {
             DispatchOutcome::Findings(f) => assert_eq!(f.len(), 1),
             other => panic!("attendu Findings, eu {other:?}"),
@@ -210,7 +219,7 @@ mod tests {
             "file_contains": {"has": ["must_be_present_marker"], "not_has": [], "scope": "file"},
         });
         let content = "x = eval(y)\n"; // doesn't contain the required marker
-        let out = dispatch_rule(&rule, f_py(), &lines(content), content);
+        let out = dispatch_rule(&rule, f_py(), &lines(content), content, "python");
         match out {
             DispatchOutcome::Findings(f) => assert!(
                 f.is_empty(),
@@ -228,7 +237,7 @@ mod tests {
             "file_contains": {"has": ["must_be_present_marker"], "not_has": [], "scope": "file"},
         });
         let content = "must_be_present_marker\nx = eval(y)\n";
-        let out = dispatch_rule(&rule, f_py(), &lines(content), content);
+        let out = dispatch_rule(&rule, f_py(), &lines(content), content, "python");
         match out {
             DispatchOutcome::Findings(f) => assert_eq!(f.len(), 1),
             other => panic!("attendu Findings, eu {other:?}"),
@@ -238,7 +247,7 @@ mod tests {
     #[test]
     fn test_dispatch_neither_patterns_nor_fc_returns_empty_findings() {
         let rule = json!({"id": "r"});
-        let out = dispatch_rule(&rule, f_py(), &[], "");
+        let out = dispatch_rule(&rule, f_py(), &[], "", "python");
         assert_eq!(out, DispatchOutcome::Findings(Vec::new()));
     }
 }

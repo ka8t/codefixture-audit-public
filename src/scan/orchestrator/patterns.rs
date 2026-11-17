@@ -138,20 +138,42 @@ fn run_file(
 
 /// Runs the rules of the file's language on it, in rule order. Each
 /// finding carries the index of its rule in `rule_jsons`.
+///
+/// A configuration file (`pom.xml`, `web.config`, `package.json`,
+/// ADR-0047) is read only by the rules that name a path with
+/// `path_contains`: a Java rule written for `.java` code has no business
+/// on a `pom.xml`. Its comments are stripped with its own syntax (XML or
+/// none), not with the rule language's.
 fn rules_on_file(pf: &ParsedFile, rule_jsons: &[serde_json::Value]) -> Vec<(usize, Finding)> {
     let mut findings = Vec::new();
+    let syntax = pf.language.comment_syntax();
     for (index, rule_json) in rule_jsons.iter().enumerate() {
         if rule_json.get("language").and_then(|v| v.as_str()) != Some(pf.language.rule_tag()) {
             continue;
         }
+        if pf.language.is_config_file() && !names_a_path(rule_json) {
+            continue;
+        }
         let DispatchOutcome::Findings(found) =
-            dispatch_rule(rule_json, pf.location(), &pf.all_lines, &pf.source_text)
+            dispatch_rule(rule_json, pf.location(), &pf.all_lines, &pf.source_text, syntax)
         else {
             continue; // Taint/Ast/Hook: handled elsewhere (phase C) or out of scope.
         };
         findings.extend(found.into_iter().map(|f| (index, f)));
     }
     findings
+}
+
+/// `true` when the rule restricts itself to some paths
+/// (`requires` … `path_contains`): the only rules a configuration file
+/// is given to (ADR-0047). Whether this file's path matches is left to
+/// the rule's own `requires` check in `dispatch_rule`.
+fn names_a_path(rule_json: &serde_json::Value) -> bool {
+    rule_json
+        .get("file_contains")
+        .and_then(|fc| fc.get("path_contains"))
+        .and_then(|v| v.as_array())
+        .is_some_and(|paths| !paths.is_empty())
 }
 
 /// The findings of one file that go into the report: those the user did
@@ -264,6 +286,54 @@ mod tests {
         let rules = [line_rule("py_eval", "python", r"eval\("), line_rule("java_eval", "java", r"eval\(")];
         let run = run(&root, &["app.py", "App.java"], &rules, NO_SUPPRESSION, false);
         assert_eq!(run.findings, ["app.py:1:py_eval", "App.java:1:java_eval"]);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A line rule restricted to the paths holding `path` (`requires` …
+    /// `path_contains`), with an optional `pattern-not`.
+    fn path_rule(id: &str, language: &str, pattern: &str, not: Option<&str>, path: &str) -> serde_json::Value {
+        let mut block = json!({"pattern": pattern, "match": "line"});
+        if let Some(not) = not {
+            block["pattern-not"] = json!(not);
+        }
+        json!({
+            "id": id, "language": language, "category": "security", "severity": "HIGH",
+            "patterns": [block],
+            "file_contains": {"path_contains": [path]},
+        })
+    }
+
+    #[test]
+    fn test_a_config_file_is_read_only_by_the_rules_that_name_it() {
+        // ADR-0047: a Java rule written for code never runs on a pom.xml;
+        // the rule naming pom.xml does, and no longer runs on .java code.
+        let root = project();
+        write(&root, "pom.xml", "<url>http://repo.example.com/</url>\n");
+        write(&root, "App.java", "String u = \"<url>http://repo.example.com/</url>\";\n");
+        let rules = [
+            line_rule("java_any_http", "java", r"http://"),
+            path_rule("maven_http", "java", r"<url>http://", None, "pom.xml"),
+        ];
+        let run = run(&root, &["pom.xml", "App.java"], &rules, NO_SUPPRESSION, false);
+        assert_eq!(run.findings, ["pom.xml:1:maven_http", "App.java:1:java_any_http"]);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn test_a_config_file_keeps_its_own_comment_syntax() {
+        // `//` is not a comment in XML: the Java stripping would cut the
+        // `pattern-not` text after `http://` and raise a wrong finding;
+        // an XML comment, on the other hand, no longer counts.
+        let root = project();
+        write(
+            &root,
+            "Web.config",
+            "<system.webServer> <add url=\"http://x\" name=\"X-Frame-Options\" />\n\
+             <system.webServer> <!-- X-Frame-Options -->\n",
+        );
+        let rules = [path_rule("xfo", "csharp", r"<system\.webServer>", Some("X-Frame-Options"), "web.config")];
+        let run = run(&root, &["Web.config"], &rules, NO_SUPPRESSION, false);
+        assert_eq!(run.findings, ["Web.config:2:xfo"]);
         std::fs::remove_dir_all(&root).ok();
     }
 

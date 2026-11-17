@@ -151,7 +151,11 @@ fn walk_detect(
             walk_detect(root, &path, languages, top_level_dirs, has_root_level_files);
             continue;
         }
-        let Some(lang) = SourceLanguage::from_path(&path) else {
+        // A configuration file (`package.json`, `pom.xml`, `web.config`,
+        // ADR-0047) does not make the project a project of that language
+        // nor its folder a code root: a root `package.json` of tooling
+        // would otherwise widen the proposed `paths.include` to `.`.
+        let Some(lang) = SourceLanguage::from_path(&path).filter(|l| !l.is_config_file()) else {
             continue;
         };
         languages.insert(language_label(lang).to_string());
@@ -181,6 +185,11 @@ fn language_label(lang: SourceLanguage) -> &'static str {
         SourceLanguage::Html => "html",
         SourceLanguage::Yaml => "yaml",
         SourceLanguage::Dockerfile => "dockerfile",
+        // Never reached from `walk_detect`, which skips configuration
+        // files; named after the rules that read them for completeness.
+        SourceLanguage::MavenPom => "java",
+        SourceLanguage::WebConfig => "csharp",
+        SourceLanguage::PackageJson => "javascript",
     }
 }
 
@@ -619,6 +628,28 @@ mod tests {
             vec!["web".to_string()]
         );
         assert!(has_root_level_files);
+    }
+
+    /// ADR-0047: a root `package.json` (or `pom.xml`) neither adds a
+    /// language nor counts as a root-level code file, so the proposed
+    /// `paths.include` stays the code folders.
+    #[test]
+    fn test_walk_detect_ignores_configuration_files() {
+        let dir = std::env::temp_dir().join(format!("sast-pc-walk-config-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        write_file(&dir, "package.json", "{}\n");
+        write_file(&dir, "pom.xml", "<project/>\n");
+        write_file(&dir, "src/app.py", "x = 1\n");
+
+        let mut languages = BTreeSet::new();
+        let mut top_level_dirs = BTreeSet::new();
+        let mut has_root_level_files = false;
+        walk_detect(&dir, &dir, &mut languages, &mut top_level_dirs, &mut has_root_level_files);
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        assert_eq!(languages.into_iter().collect::<Vec<_>>(), ["python".to_string()]);
+        assert_eq!(top_level_dirs.into_iter().collect::<Vec<_>>(), ["src".to_string()]);
+        assert!(!has_root_level_files);
     }
 
     #[test]

@@ -39,6 +39,17 @@ tree-sitter-yaml = "0.7.2"
 which = "8.0.0"
 
 
+# The delivered binary: whole-program optimization across all crates
+# (`lto = "fat"`, one codegen unit) for the regex and tree-sitter hot paths,
+# and no symbol table (`strip`), which only debuggers read. `panic` stays
+# `unwind`: `main.rs` catches a panic to print a readable error and exit
+# with its own code instead of aborting.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = true
+panic = "unwind"
+
 # `build.rs` compiles `rules/builtin` into the encrypted catalog pack
 # (ADR-0040) with the library's own `pack_format.rs`.
 [build-dependencies]

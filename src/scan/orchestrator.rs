@@ -97,6 +97,18 @@ pub(crate) enum SourceLanguage {
     /// goes through [`SourceLanguage::from_path`], never through
     /// [`SourceLanguage::from_extension`] alone.
     Dockerfile,
+    /// `pom.xml`, the Maven build file of a Java project — a
+    /// [configuration file](SourceLanguage::is_config_file) read by the
+    /// Java rules that name it (ADR-0047).
+    MavenPom,
+    /// `web.config`, the IIS / ASP.NET configuration file — a
+    /// [configuration file](SourceLanguage::is_config_file) read by the
+    /// C# rules that name it (ADR-0047).
+    WebConfig,
+    /// `package.json`, the npm manifest — a
+    /// [configuration file](SourceLanguage::is_config_file) read by the
+    /// JavaScript rules that name it (ADR-0047).
+    PackageJson,
 }
 
 impl SourceLanguage {
@@ -115,17 +127,61 @@ impl SourceLanguage {
     pub(crate) const DOCKERFILE_FILENAMES: [&'static str; 3] =
         ["Dockerfile", "Dockerfile.dev", "Dockerfile.prod"];
 
-    /// Value expected in `rule_json["language"]` for this language.
+    /// Configuration files recognized by EXACT NAME (case-insensitive:
+    /// `Web.config` is the usual spelling) — ADR-0047, a deliberate
+    /// superset of the Audit, which never reads them although three of its
+    /// rules target them (`insecure_maven_dependency`,
+    /// `missing_x_frame_options_csharp`, `npm_lifecycle_script`). The sole
+    /// authoritative list, shared by [`SourceLanguage::from_path`] and the
+    /// discovery `filenames` of `run_scan`, like
+    /// [`SourceLanguage::DOCKERFILE_FILENAMES`].
+    pub(crate) const CONFIG_FILENAMES: [(&'static str, SourceLanguage); 3] = [
+        ("pom.xml", SourceLanguage::MavenPom),
+        ("web.config", SourceLanguage::WebConfig),
+        ("package.json", SourceLanguage::PackageJson),
+    ];
+
+    /// Value expected in `rule_json["language"]` for this language. A
+    /// configuration file takes the tag of the language whose rules
+    /// target it.
     fn rule_tag(self) -> &'static str {
         match self {
             SourceLanguage::Python => "python",
-            SourceLanguage::Java => "java",
-            SourceLanguage::JavaScript | SourceLanguage::TypeScript => "javascript",
+            SourceLanguage::Java | SourceLanguage::MavenPom => "java",
+            SourceLanguage::JavaScript | SourceLanguage::TypeScript | SourceLanguage::PackageJson => {
+                "javascript"
+            }
             SourceLanguage::Php => "php",
-            SourceLanguage::CSharp => "csharp",
+            SourceLanguage::CSharp | SourceLanguage::WebConfig => "csharp",
             SourceLanguage::Html => "html",
             SourceLanguage::Yaml => "yaml",
             SourceLanguage::Dockerfile => "dockerfile",
+        }
+    }
+
+    /// `true` for a configuration file (`pom.xml`, `web.config`,
+    /// `package.json`): it is not code of its rule language, so only the
+    /// pattern rules that name it with `path_contains` read it, no taint
+    /// pass takes it, and it never shapes the proposed project
+    /// configuration (ADR-0047).
+    pub(crate) fn is_config_file(self) -> bool {
+        matches!(
+            self,
+            SourceLanguage::MavenPom | SourceLanguage::WebConfig | SourceLanguage::PackageJson
+        )
+    }
+
+    /// The language whose comment syntax the file is written in, for the
+    /// comment stripping of the pattern rules: the rule tag for code, XML
+    /// comments (`html`) for `pom.xml` and `web.config`, none for
+    /// `package.json` (JSON has no comments; `json` is a tag no stripping
+    /// knows). Without it, the Java `//` marker cut every
+    /// `<url>http://…` of a `pom.xml`.
+    pub(crate) fn comment_syntax(self) -> &'static str {
+        match self {
+            SourceLanguage::MavenPom | SourceLanguage::WebConfig => "html",
+            SourceLanguage::PackageJson => "json",
+            other => other.rule_tag(),
         }
     }
 
@@ -200,17 +256,25 @@ impl SourceLanguage {
     /// Detects the language of a real file on disk: EXACT NAME first
     /// (formats without a standard extension), then extension
     /// ([`SourceLanguage::from_extension`]) — ticket #69/spec #68.
-    /// Mechanism deliberately reusable for a future extension-less
-    /// format (only one case today: `Dockerfile`).
+    /// Mechanism shared by the extension-less formats: `Dockerfile` and
+    /// the configuration files of [`SourceLanguage::CONFIG_FILENAMES`]
+    /// (whose `.xml`/`.config`/`.json` extensions are not source code).
     /// Entry point to use everywhere a real file path is inspected
     /// (file discovery, scan Phase A).
     pub(crate) fn from_path(path: &Path) -> Option<Self> {
-        if let Some(name) = path.file_name().and_then(|n| n.to_str())
-            && Self::DOCKERFILE_FILENAMES
+        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+            if Self::DOCKERFILE_FILENAMES
                 .iter()
                 .any(|d| name.eq_ignore_ascii_case(d))
-        {
-            return Some(SourceLanguage::Dockerfile);
+            {
+                return Some(SourceLanguage::Dockerfile);
+            }
+            if let Some((_, lang)) = Self::CONFIG_FILENAMES
+                .iter()
+                .find(|(n, _)| name.eq_ignore_ascii_case(n))
+            {
+                return Some(*lang);
+            }
         }
         Self::from_extension(path)
     }
@@ -1232,6 +1296,12 @@ fn read_and_parse(root: &Path, filepath: &Path) -> Option<FileOutcome> {
         // `tree_sitter::Language` — no `LanguageFn`/`.into()`
         // like the 8 other grammars in this match.
         SourceLanguage::Dockerfile => tree_sitter_dockerfile_updated::language(),
+        // Configuration files (ADR-0047): only line rules read them, the
+        // tree only counts their comment lines. XML goes through the
+        // error-tolerant HTML grammar (same `<!-- -->` comment node), JSON
+        // through the JavaScript one (a JSON document is a JS expression).
+        SourceLanguage::MavenPom | SourceLanguage::WebConfig => tree_sitter_html::LANGUAGE.into(),
+        SourceLanguage::PackageJson => tree_sitter_javascript::LANGUAGE.into(),
     };
     parser.set_language(&ts_lang).ok()?;
     let tree = parser.parse(&source_text, None)?;
@@ -1251,7 +1321,10 @@ fn read_and_parse(root: &Path, filepath: &Path) -> Option<FileOutcome> {
         | SourceLanguage::CSharp
         | SourceLanguage::Html
         | SourceLanguage::Yaml
-        | SourceLanguage::Dockerfile => count_js_loc(&source_bytes, &tree),
+        | SourceLanguage::Dockerfile
+        | SourceLanguage::MavenPom
+        | SourceLanguage::WebConfig
+        | SourceLanguage::PackageJson => count_js_loc(&source_bytes, &tree),
     };
     Some(FileOutcome::Parsed(
         loc,
@@ -1293,7 +1366,8 @@ fn file_kind(pf: &ParsedFile) -> String {
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default()
     };
-    if pf.language == SourceLanguage::Dockerfile {
+    // A configuration file too: `pom.xml` says more than `xml`.
+    if pf.language == SourceLanguage::Dockerfile || pf.language.is_config_file() {
         return by_name();
     }
     pf.filepath
@@ -1406,10 +1480,18 @@ pub fn run_scan(config: &ScanConfig) -> ScanReport {
         // 2026-09-01 to cover the same 3 names as Python), not via
         // `extensions` above. See `SourceLanguage::
         // DOCKERFILE_FILENAMES`, the sole authoritative list.
+        // The configuration files (ADR-0047) are found the same way,
+        // under the rule language that reads them.
         filenames: SourceLanguage::DOCKERFILE_FILENAMES
             .iter()
             .filter(|_| reads_language_files(config, SourceLanguage::Dockerfile.rule_tag()))
             .map(|s| s.to_string())
+            .chain(
+                SourceLanguage::CONFIG_FILENAMES
+                    .iter()
+                    .filter(|(_, lang)| reads_language_files(config, lang.rule_tag()))
+                    .map(|(name, _)| name.to_string()),
+            )
             .collect(),
         exclude_patterns: config.exclude_patterns.clone(),
         prune_excludes: config.exclude_patterns.clone(),
@@ -3456,6 +3538,66 @@ mod tests {
             "single-kind group keeps the plain form: {phase_a_label:?}"
         );
 
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// ADR-0047: the three configuration files are recognized by exact
+    /// name, whatever the case (`Web.config` is the usual spelling), and
+    /// only by exact name: any other `.xml`/`.json`/`.config` stays out.
+    #[test]
+    fn test_config_files_are_recognized_by_exact_name() {
+        let lang = |p: &str| SourceLanguage::from_path(Path::new(p));
+        assert_eq!(lang("app/pom.xml"), Some(SourceLanguage::MavenPom));
+        assert_eq!(lang("Site/Web.config"), Some(SourceLanguage::WebConfig));
+        assert_eq!(lang("web/package.json"), Some(SourceLanguage::PackageJson));
+        for other in ["settings.xml", "package-lock.json", "Web.Release.config", "tsconfig.json"] {
+            assert_eq!(lang(other), None, "{other}");
+        }
+        assert_eq!(SourceLanguage::MavenPom.rule_tag(), "java");
+        assert_eq!(SourceLanguage::WebConfig.comment_syntax(), "html");
+        assert!(SourceLanguage::PackageJson.is_config_file());
+        assert!(!SourceLanguage::JavaScript.is_config_file());
+    }
+
+    /// ADR-0047, end to end: a scan finds a `pom.xml`, counts it under
+    /// `java` by its name, and gives it to the rule that names it only.
+    #[test]
+    fn test_scan_reads_a_pom_with_the_rule_that_names_it() {
+        use std::sync::Mutex;
+        static CAPTURED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+        fn capture(label: &str, _elapsed: std::time::Duration) {
+            CAPTURED.lock().unwrap().push(label.to_string());
+        }
+        let root = temp_dir();
+        let rules_dir = root.join("rules");
+        write(
+            &rules_dir,
+            "java/security/maven_http.sca",
+            "rule maven_http\n  language  java\n  severity  HIGH\n  category  security\n  match\n    pattern  <url>http://\n  end\n  requires\n    path_contains  pom.xml\n  end\nend\n",
+        );
+        write(
+            &rules_dir,
+            "java/security/any_http.sca",
+            "rule any_http\n  language  java\n  severity  LOW\n  category  security\n  match\n    pattern  http://\n  end\nend\n",
+        );
+        write(&root, "pom.xml", "<project>\n  <url>http://repo.example.com/</url>\n</project>\n");
+        write(&root, "Main.java", "class Main {}\n");
+        CAPTURED.lock().unwrap().clear();
+        let config = ScanConfig {
+            root: root.clone(),
+            rules_path: rules_dir,
+            on_phase_complete: Some(capture),
+            ..ScanConfig::default()
+        };
+        let report = run_scan(&config);
+        let found: Vec<String> =
+            report.findings.iter().map(|f| format!("{}:{}:{}", f.file, f.line, f.rule_key)).collect();
+        assert_eq!(found, ["pom.xml:2:maven_http"]);
+        let labels = CAPTURED.lock().unwrap().clone();
+        assert!(
+            labels.iter().any(|l| l.contains("java: 2 (java 1, pom.xml 1)")),
+            "pom.xml counted under java by its name: {labels:?}"
+        );
         std::fs::remove_dir_all(&root).ok();
     }
 
