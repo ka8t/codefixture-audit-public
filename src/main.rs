@@ -690,7 +690,7 @@ mod tests {
         );
         let (warning, line) = version_rules_line(&VersionRulesStatus::Missing, say);
         assert!(
-            warning && line.contains("not checked") && !line.contains("sadb"),
+            warning && line.contains("not checked") && !line.contains("cfdb"),
             "{line}"
         );
         let (warning, line) = version_rules_line(

@@ -1,5 +1,5 @@
 //! The advisory container (ADR-0042, ticket #177; role changed by
-//! ADR-0043): the layout of the editor's database `advisories.sadb` and
+//! ADR-0043): the layout of the editor's database `advisories.cfdb` and
 //! of the version rules section of a rule pack.
 //!
 //! `tools/codefixture-audit-advisories` writes the editor's database at the root of
@@ -13,7 +13,7 @@
 //! Layout, all integers little-endian:
 //!
 //! ```text
-//! b"SADB"            magic bytes
+//! b"CFDB"            magic bytes
 //! u32                container format (FORMAT_VERSION)
 //! u32                header length in bytes
 //! header             JSON, UTF-8: Header below
@@ -43,8 +43,13 @@ use flate2::Compression;
 use flate2::read::GzDecoder;
 use serde::{Deserialize, Serialize};
 
-/// First bytes of every database file.
-pub const MAGIC: &[u8; 4] = b"SADB";
+/// First bytes of every database file (`CFDB`, for CodeFixture database,
+/// since ADR-0052).
+pub const MAGIC: &[u8; 4] = b"CFDB";
+
+/// First bytes of the same layout before ADR-0052 (`.sadb` files), refused
+/// with a reason rather than as an unknown file.
+const LEGACY_MAGIC: &[u8; 4] = b"SADB";
 
 /// Container layout version. A reader refuses any other value rather
 /// than misreading the file.
@@ -53,7 +58,7 @@ pub const FORMAT_VERSION: u32 = 1;
 /// File name of the editor's database (ADR-0043): `codefixture-audit-advisories`
 /// writes it in its current folder by default, the root of the private
 /// repository, where `build.rs` reads it. The engine never looks for it.
-pub const FILE_NAME: &str = "advisories.sadb";
+pub const FILE_NAME: &str = "advisories.cfdb";
 
 /// Longest header accepted when reading, against a corrupted length.
 const MAX_HEADER_BYTES: u32 = 1 << 20;
@@ -311,7 +316,7 @@ fn newest_date<'a>(dates: impl Iterator<Item = &'a str>) -> Option<&'a str> {
 /// the new file, never half of one.
 pub fn write(path: &Path, contents: &Contents<'_>) -> std::io::Result<()> {
     let bytes = encode(contents)?;
-    let tmp = path.with_extension("sadb.tmp");
+    let tmp = path.with_extension("cfdb.tmp");
     std::fs::write(&tmp, bytes)?;
     std::fs::rename(&tmp, path)
 }
@@ -319,8 +324,13 @@ pub fn write(path: &Path, contents: &Contents<'_>) -> std::io::Result<()> {
 /// Parses database bytes read from `path` (named in the errors).
 pub fn decode(path: &Path, bytes: Vec<u8>) -> Result<DatabaseFile, String> {
     let fail = |what: &str| format!("{}: {what}", path.display());
+    if bytes.starts_with(LEGACY_MAGIC) {
+        return Err(fail(
+            "advisory database in the former .sadb format, which this engine no longer reads: rebuild it as a .cfdb database (ADR-0052)",
+        ));
+    }
     if bytes.len() < 12 || &bytes[..4] != MAGIC {
-        return Err(fail("not an advisory database (sadb) file"));
+        return Err(fail("not an advisory database (cfdb) file"));
     }
     let format = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
     if format != FORMAT_VERSION {
@@ -389,7 +399,7 @@ mod tests {
             payload("npm", 5, "2026-11-11T00:00:00Z"),
         ];
         let bytes = encode(&plain("OSV", &a)).unwrap();
-        let db = decode(Path::new("x.sadb"), bytes.clone()).unwrap();
+        let db = decode(Path::new("x.cfdb"), bytes.clone()).unwrap();
         assert_eq!(db.header.created, "2026-11-11T00:00:00Z");
         assert_eq!(db.header.source, "OSV");
         assert_eq!(db.header.ecosystems.len(), 2);
@@ -424,16 +434,29 @@ mod tests {
         let good = encode(&plain("OSV", &[payload("PyPI", 1, "2026-01-01T00:00:00Z")])).unwrap();
         let mut newer = good.clone();
         newer[4..8].copy_from_slice(&2u32.to_le_bytes());
-        let err = decode(Path::new("db.sadb"), newer).unwrap_err();
-        assert!(err.contains("db.sadb") && err.contains("format 2"), "{err}");
+        let err = decode(Path::new("db.cfdb"), newer).unwrap_err();
+        assert!(err.contains("db.cfdb") && err.contains("format 2"), "{err}");
         assert!(decode(Path::new("x"), b"{\"format\":1}".to_vec()).is_err());
         assert!(decode(Path::new("x"), good[..14].to_vec()).is_err());
         let mut cut = good.clone();
         cut.truncate(good.len() - 5);
         let db = decode(Path::new("x"), cut).unwrap();
         assert!(db.ecosystem_json("PyPI").unwrap().is_err());
-        let dir = std::env::temp_dir().join(format!("sadb-missing-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("cfdb-missing-{}", std::process::id()));
         assert!(read(&dir.join(FILE_NAME)).unwrap().is_none());
+    }
+
+    /// ADR-0052: a database of the former `.sadb` format is refused with
+    /// a reason, not read and not reported as an unknown file.
+    #[test]
+    fn test_former_sadb_database_is_refused_with_a_clear_reason() {
+        let mut old = encode(&plain("OSV", &[payload("PyPI", 1, "2026-01-01T00:00:00Z")])).unwrap();
+        old[..4].copy_from_slice(b"SADB");
+        let err = decode(Path::new("advisories.sadb"), old).unwrap_err();
+        assert!(
+            err.contains("former .sadb format") && err.contains(".cfdb"),
+            "{err}"
+        );
     }
 
     /// Security regression (2026-11-15): one gzip member is bounded when
@@ -461,7 +484,7 @@ mod tests {
             payload("PyPI", 1, "2026-11-07T10:00:00Z"),
             payload("npm", 1, "2026-11-07T10:00:00.5Z"),
         ];
-        let db = decode(Path::new("x.sadb"), encode(&plain("OSV", &a)).unwrap()).unwrap();
+        let db = decode(Path::new("x.cfdb"), encode(&plain("OSV", &a)).unwrap()).unwrap();
         assert_eq!(db.header.created, "2026-11-07T10:00:00.5Z");
         assert_eq!(
             newest_date(["garbage", "2026-01-01T00:00:00+02:00"].into_iter()),
@@ -472,7 +495,7 @@ mod tests {
 
     #[test]
     fn test_write_is_atomic_and_readable() {
-        let dir = std::env::temp_dir().join(format!("sadb-write-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("cfdb-write-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(FILE_NAME);
         write(
@@ -482,7 +505,7 @@ mod tests {
         .unwrap();
         let db = read(&path).unwrap().unwrap();
         assert_eq!(db.header.ecosystems[0].name, "NuGet");
-        assert!(!dir.join("advisories.sadb.tmp").exists());
+        assert!(!dir.join("advisories.cfdb.tmp").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -509,7 +532,7 @@ mod tests {
             ecosystems: &ecosystems,
             tables: &tables,
         };
-        let db = decode(Path::new("x.sadb"), encode(&contents).unwrap()).unwrap();
+        let db = decode(Path::new("x.cfdb"), encode(&contents).unwrap()).unwrap();
         assert_eq!(db.header.sources, sources);
         assert_eq!(db.header.tables[0].rows, 1);
         assert_eq!(db.table_json("kev").unwrap().unwrap(), tables[0].json);
@@ -520,7 +543,7 @@ mod tests {
         );
 
         let old = decode(
-            Path::new("x.sadb"),
+            Path::new("x.cfdb"),
             encode(&plain("OSV", &ecosystems)).unwrap(),
         )
         .unwrap();

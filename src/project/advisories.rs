@@ -3,7 +3,7 @@
 //!
 //! **No network here.** `tools/codefixture-audit-advisories` downloads published
 //! vulnerabilities (OSV) on its own schedule; this module only reads the
-//! database file it writes (`advisories.sadb`, container in
+//! database file it writes (`advisories.cfdb`, container in
 //! `advisory_file.rs`, per-ecosystem payload in
 //! `tools/codefixture-audit-advisories/src/format.rs`). This keeps the 2026-08-25
 //! decision that the engine never queries a public database while it
@@ -659,7 +659,7 @@ mod tests {
             ecosystems: &payloads,
             tables: &tables,
         };
-        decode(Path::new("test.sadb"), encode(&contents).unwrap()).unwrap()
+        decode(Path::new("test.cfdb"), encode(&contents).unwrap()).unwrap()
     }
 
     fn db_from(ecosystem: &str, json: &str) -> AdvisoryDb {

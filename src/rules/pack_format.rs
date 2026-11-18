@@ -18,7 +18,7 @@
 //! - The **version rules section** (ADR-0043) holds the published
 //!   vulnerabilities the dependencies are checked against: package,
 //!   ecosystem, affected versions, CVE ids. Its content is an advisory
-//!   container (`advisories.sadb` layout, `project::advisory_file`), kept
+//!   container (`advisories.cfdb` layout, `project::advisory_file`), kept
 //!   as bytes here: this module neither compresses nor reads it, so
 //!   `build.rs` only copies the editor's file into the pack. Encrypted
 //!   apart from the rules, so a scan decrypts it only when its
@@ -69,12 +69,12 @@ pub const DEMO_PACK_NAME: &str = "demo";
 /// Version rules of the full catalog (ADR-0043): the editor's advisory
 /// database, at the root of the private repository, written by
 /// `codefixture-audit-advisories update` and never committed nor delivered.
-pub const FULL_VERSION_RULES_FILE: &str = "advisories.sadb";
+pub const FULL_VERSION_RULES_FILE: &str = "advisories.cfdb";
 
 /// Version rules of the demo pack (ADR-0043), relative to the rules
 /// folder: a small selection of well-known vulnerabilities, committed,
 /// written by `codefixture-audit-advisories demo` from the editor's database.
-pub const DEMO_VERSION_RULES_FILE: &str = "advisories/demo.sadb";
+pub const DEMO_VERSION_RULES_FILE: &str = "advisories/demo.cfdb";
 
 /// Magic bytes at the start of every pack, version included: a future
 /// incompatible layout gets a new magic rather than a guess.
@@ -700,7 +700,7 @@ mod tests {
 
     #[test]
     fn test_version_rules_round_trip_apart_from_the_rules() {
-        let container = b"SADB-container-bytes".to_vec();
+        let container = b"CFDB-container-bytes".to_vec();
         let pack = write_pack("builtin", &sample(), Some(&container));
         let header = read_header(&pack).unwrap();
         assert!(header.has_version_rules());
@@ -712,7 +712,7 @@ mod tests {
         let (_, files) = open_pack(&pack).unwrap();
         assert_eq!(files.len(), 2, "rules unchanged by the second section");
         assert!(
-            !String::from_utf8_lossy(&pack).contains("SADB-container"),
+            !String::from_utf8_lossy(&pack).contains("CFDB-container"),
             "encrypted"
         );
     }

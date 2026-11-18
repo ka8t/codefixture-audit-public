@@ -10,9 +10,9 @@
 //!   written apart as `rules-demo.cfpack` (ticket #153): what the shared
 //!   repository receives. The full pack is handed out by hand.
 //! - Version rules (ADR-0043): the full pack carries the editor's advisory
-//!   database `advisories.sadb`, at the repository root (written by
+//!   database `advisories.cfdb`, at the repository root (written by
 //!   `codefixture-audit-advisories update`, never committed); the demo pack carries
-//!   the committed selection `rules/advisories/demo.sadb`. Both files are
+//!   the committed selection `rules/advisories/demo.cfdb`. Both files are
 //!   copied into the pack as they are. Without them, the pack has no
 //!   version rules and the build says so.
 //! - In the shared repository there is no `.sca` file: the demo pack
