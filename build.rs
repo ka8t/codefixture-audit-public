@@ -90,12 +90,11 @@ fn export_build_version(manifest_dir: &str) {
     println!("cargo:rustc-env=CODEFIXTURE_AUDIT_BUILD_VERSION={version}");
 }
 
-/// Writes `rules.cfpack` in the directory of the compiled binary.
-/// `OUT_DIR` is `<target>/<profile>/build/<crate>-<hash>/out`, so that
-/// directory is three levels up; it follows `CARGO_TARGET_DIR` and
-/// `--target` on its own. Writing outside `OUT_DIR` is unusual for a build
-/// script, but the binary looks for its pack next to itself, exactly as it
-/// does once copied elsewhere.
+/// Writes `rules.cfpack` in the directory of the compiled binary, the
+/// parent of the `build` folder that holds `OUT_DIR` ([`profile_dir`]).
+/// Writing outside `OUT_DIR` is unusual for a build script, but the binary
+/// looks for its pack next to itself, exactly as it does once copied
+/// elsewhere.
 ///
 /// Source: the `.sca` files of `rules/builtin` when there are any, else
 /// the committed `rules/rules.cfpack`. With `.sca` files it also writes
@@ -104,6 +103,24 @@ fn export_build_version(manifest_dir: &str) {
 /// binary then stops at the first scan and names the missing pack. The
 /// pack is deterministic (`pack_format::write_pack`), so a build with
 /// unchanged rules rewrites the same bytes.
+/// Folder of the compiled binary, found from `OUT_DIR`: the parent of
+/// its nearest `build` ancestor.
+///
+/// Counting levels is not enough: up to Cargo 1.99 `OUT_DIR` is
+/// `<target>/<profile>/build/<crate>-<hash>/out`, and from Cargo 1.100
+/// (November 2026) `<target>/<profile>/build/<crate>/<hash>/out`. The
+/// fixed "three levels up" of the first layout put the pack in `build/`
+/// with the second one, and a fresh install got an engine without its
+/// pack. Both follow `CARGO_TARGET_DIR` and `--target` on their own.
+fn profile_dir(out_dir: &str) -> &Path {
+    Path::new(out_dir)
+        .ancestors()
+        .skip(1)
+        .find(|dir| dir.file_name().is_some_and(|name| name == "build"))
+        .and_then(Path::parent)
+        .unwrap_or_else(|| panic!("OUT_DIR is not under <target>/<profile>/build: {out_dir}"))
+}
+
 fn write_catalog_pack(manifest_dir: &str, out_dir: &str) {
     let rules = Path::new(manifest_dir).join("rules");
     let builtin = rules.join("builtin");
@@ -118,10 +135,7 @@ fn write_catalog_pack(manifest_dir: &str, out_dir: &str) {
     println!("cargo:rerun-if-changed={}", full_versions.display());
     println!("cargo:rerun-if-changed={}", demo_versions.display());
 
-    let profile_dir = Path::new(out_dir)
-        .ancestors()
-        .nth(3)
-        .expect("OUT_DIR is <target>/<profile>/build/<crate>/out");
+    let profile_dir = profile_dir(out_dir);
     let dest = profile_dir.join(pack_format::PACK_FILE_NAME);
 
     let files = pack_format::collect_sca_sources(&builtin).unwrap_or_else(|e| panic!("{e}"));

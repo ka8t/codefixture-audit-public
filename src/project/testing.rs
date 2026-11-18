@@ -364,6 +364,10 @@ mod tests {
         assert_eq!(r.failed_tests, vec!["tests/test_a.py::test_x".to_string()]);
     }
 
+    /// A Python project with a `tests/` folder gets pytest when a Python
+    /// interpreter is installed, and no command otherwise: the detection
+    /// looks for `python3`/`python` on the machine, so the expected result
+    /// depends on it (a fresh Linux container has none).
     #[test]
     fn test_auto_detect_python_pytest_dir() {
         let tmp = std::env::temp_dir().join(format!(
@@ -372,9 +376,12 @@ mod tests {
         ));
         std::fs::create_dir_all(tmp.join("tests")).unwrap();
         let cmd = auto_detect_test_command(&tmp, &["python".to_string()]);
-        assert!(cmd.is_some());
-        assert!(cmd.unwrap().contains("pytest"));
         std::fs::remove_dir_all(&tmp).ok();
+        if which::which("python3").is_ok() || which::which("python").is_ok() {
+            assert!(cmd.is_some_and(|c| c.contains("pytest")));
+        } else {
+            assert_eq!(cmd, None);
+        }
     }
 
     #[test]

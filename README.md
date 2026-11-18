@@ -10,7 +10,7 @@ Read this before you start: these are the cases where the engine may not behave 
 
 | Limit | What it means for you |
 |---|---|
-| **Tested on macOS only** | Windows and Linux have not been tested yet. The Windows commands are given but have never been run; please report any problem. |
+| **Tested on macOS and Linux** | Linux was checked on Ubuntu 24.04. Windows has not been tested yet: the Windows commands are given but have never been run; please report any problem. |
 | **The first analysis takes two runs** | The first command asks 2 or 3 questions (press Enter to keep the defaults), writes `audit.config.json` in your project, then stops and asks you to run the same command again. The second run produces the report. |
 | **The demo rules give a thin report** | This repository ships 38 demonstration rules, a small part of the catalog. Without the full rule pack, most findings may come from a few rules (for example JavaScript written in HTML attributes). |
 | **The demo pack knows few published vulnerabilities** | Your dependencies are compared with the 21 well-known vulnerabilities this repository's pack carries (Log4Shell, Spring4Shell, lodash, lxml…). A dependency not reported may still be affected by another one. The full pack carries every published vulnerability of the five ecosystems. |

@@ -16,15 +16,15 @@ This guide takes you, step by step, from nothing installed to a complete analysi
 | [10](#step-10-fix-and-analyse-again) | Fix and analyse again | — |
 | [11](#step-11-update-the-engine) | Update the engine | 2 min |
 
-Read [Known limits](#known-limits) first: the engine is tested on macOS only, and the first analysis of a project takes two runs.
+Read [Known limits](#known-limits) first: the engine is tested on macOS and Linux, not yet on Windows, and the first analysis of a project takes two runs.
 
-Commands are given for macOS (Terminal) and Windows (PowerShell). Replace `/path/to/your/project` (or `C:\path\to\your\project`) with the folder of the code you want to analyse.
+Commands are given for macOS and Linux (Terminal) and Windows (PowerShell). Replace `/path/to/your/project` (or `C:\path\to\your\project`) with the folder of the code you want to analyse.
 
 ## Known limits
 
 These are the cases where the engine may not behave as you expect, with what to do.
 
-- **Tested on macOS only.** Every step of this guide was run on macOS. Windows (part of steps 2 to 11) and Linux have not been tested: the commands are given, but you may be the first to run them. If a step fails, note the command and the full message it printed, and send them to CodeFixture.
+- **Not yet tested on Windows.** Every step of this guide was run on macOS, and on Linux (Ubuntu 24.04). The Windows commands are given, but you may be the first to run them. If a step fails, note the command and the full message it printed, and send them to CodeFixture.
 - **The first analysis takes two runs.** The first time you analyse a project, the engine asks what to analyse (step 7), writes `audit.config.json`, and stops without a report. This is expected: run the same command again. In a script or a CI job there are no questions and the first run produces the report.
 - **The demo rules give a thin report.** The 38 demonstration rules of this repository cover a small part of what the engine detects. On a real project their findings may come mostly from a few rules, such as JavaScript written in HTML attributes (`onclick=…`). The full rule pack (step 6) gives the complete report.
 - **The demo pack knows few published vulnerabilities.** Your dependencies are compared with the published vulnerabilities the rule pack carries: 21 well-known ones in this repository's pack (Log4Shell, Spring4Shell, lodash, lxml…). A dependency the report does not name may still be affected by another one. The full pack (step 6) carries every published vulnerability of the five ecosystems, as of the day it was built: ask for a new one from time to time.
@@ -34,7 +34,7 @@ These are the cases where the engine may not behave as you expect, with what to 
 
 ## Step 1: check what you need
 
-- macOS 12 or later, or Windows 10/11.
+- macOS 12 or later, Linux (tested on Ubuntu 24.04), or Windows 10/11.
 - About 6 GB of free disk space: the build writes about 5 GB of intermediate files into `target/`.
 - An internet connection for steps 2, 3 and 11 only. The analysis itself makes no network call.
 
@@ -51,6 +51,15 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
 `xcode-select` installs `git` with the Apple developer tools. The `curl` line installs Rust: press Enter when it asks which installation to use.
 
+**Linux** (Debian, Ubuntu), in a terminal:
+
+```bash
+sudo apt install build-essential git curl
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
+
+`build-essential` brings the C compiler the build needs: without it, step 4 stops on `linker 'cc' not found`. On another distribution, install its C compiler package (`gcc`), `git` and `curl`.
+
 **Windows**, in **PowerShell**:
 
 ```powershell
@@ -61,7 +70,7 @@ winget install Microsoft.VisualStudio.2022.BuildTools --override "--wait --passi
 
 The third line installs the C++ build tools Rust needs on Windows.
 
-Then **close and reopen** the Terminal or PowerShell, so that it finds the new tools. Check:
+Then **close and reopen** the terminal or PowerShell, so that it finds the new tools. Check:
 
 ```bash
 git --version
@@ -90,7 +99,7 @@ The first build downloads the Rust libraries the engine uses and compiles everyt
 
 ## Step 5: check the build
 
-macOS:
+macOS and Linux:
 
 ```bash
 ./target/release/codefixture-audit --version
@@ -114,7 +123,7 @@ With the 38 demonstration rules, the analysis works at once but covers a small p
 
 Keep it in a folder of its own, outside `codefixture-audit-public`, so that updates (step 11) never meet a modified file. Then copy it next to the engine.
 
-macOS:
+macOS and Linux:
 
 ```bash
 mkdir -p ~/codefixture-audit-rules
@@ -138,7 +147,7 @@ copy ~\codefixture-audit-rules\rules.cfpack target\release\
 
 The first time you analyse a project, the engine asks you what to analyse and writes the answer into `audit.config.json`, at the root of the project:
 
-macOS:
+macOS and Linux:
 
 ```bash
 cd ~/codefixture-audit-public
@@ -169,7 +178,7 @@ The questions are asked only in an interactive terminal. In a script or a CI job
 
 For a complete analysis, in English:
 
-macOS:
+macOS and Linux:
 
 ```bash
 cd ~/codefixture-audit-public
@@ -300,6 +309,7 @@ The engine and `rules.cfpack` are all an analysis needs: copy them together to a
 | Message or symptom | What to do |
 |---|---|
 | `cargo: command not found` | close and reopen the terminal (step 2); on Windows, restart the session |
+| `linker 'cc' not found` (Linux) | the C compiler is missing: install `build-essential` (step 2) |
 | `linker 'link.exe' not found` (Windows) | the C++ build tools are missing: run the third `winget` line of step 2 |
 | the engine stops and names a missing `rules.cfpack` | run `cargo build --release` again, or copy the pack next to the engine (step 6) |
 | dependencies are never checked | the project declares none in a file the engine reads (`requirements.txt`, `package.json`, `pom.xml`, `composer.json`, `.csproj`…), or `--quick` was given |

@@ -1377,10 +1377,13 @@ fn run_list_rules_command(lang: &str, rules: Option<PathBuf>) -> ExitCode {
     let rules_label = codefixture_audit::i18n::t(&script_locale, "rules_count");
     // `writeln!` with ignored errors rather than `println!`: the latter
     // panics on a closed pipe (`list-rules | head`).
+    // The count is on the very first line, with no blank line before it
+    // (deviation from Python's leading newline): the install guide reads
+    // it with `list-rules | head -1` (`Select-Object -First 1`).
     let mut out = std::io::stdout().lock();
     let _ = writeln!(
         out,
-        "\n📋 {} ({} {rules_label}):\n",
+        "📋 {} ({} {rules_label}):\n",
         codefixture_audit::i18n::t(&script_locale, "available_rules"),
         listing.len()
     );
