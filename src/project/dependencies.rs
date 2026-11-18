@@ -17,6 +17,8 @@ use std::path::{Path, PathBuf};
 
 use regex::Regex;
 
+use crate::project::lockfiles::{self, Lock};
+
 #[derive(Debug, Clone)]
 pub struct Dependency {
     pub name: String,
@@ -46,12 +48,25 @@ pub enum VersionSource {
     /// The lockfile `file`, next to the manifest, records the installed
     /// version.
     Lockfile { file: String },
+    /// The manifest gives the version through `property` (`${…}` in a
+    /// `pom.xml`, a variable in a Gradle script), which it does not
+    /// define: no version to check (ticket #212); `version` is `None`.
+    UnresolvedProperty { property: String },
     /// The manifest declares the range `constraint`, and `lock` says why
     /// no lockfile gave the installed version: the lowest version the
     /// range allows is checked.
     DeclaredMinimum {
         constraint: String,
         lock: LockStatus,
+    },
+    /// A package the lockfile `file` installs that no direct dependency
+    /// is (ticket #211): `via` names the direct dependencies that bring
+    /// it in, empty when `graph` is false (the lockfile does not say,
+    /// `Pipfile.lock`) or when none does (a leftover of an older install).
+    Transitive {
+        file: String,
+        via: Vec<String>,
+        graph: bool,
     },
 }
 
@@ -67,35 +82,15 @@ pub enum LockStatus {
     NotAVersion { file: String, value: String },
     /// The lockfile `file` cannot be read, for `reason`.
     Unreadable { file: String, reason: String },
-    /// The lockfile `file` has a format this engine does not read yet.
-    NotRead { file: String },
+    /// The lockfile `file` is binary (`bun.lockb`, ticket #210): Bun
+    /// writes its text form, `bun.lock`, with
+    /// `bun install --save-text-lockfile`.
+    Binary { file: String },
 }
 
-/// The lockfile next to a manifest, as read.
-enum Lock {
-    /// None of the ecosystem's lockfiles is there.
-    Absent,
-    /// A lockfile this engine does not read yet.
-    NotRead(String),
-    /// A lockfile that cannot be read, with the reason.
-    Unreadable(String, String),
-    /// The installed versions it records, by package name.
-    Read {
-        file: String,
-        versions: BTreeMap<String, String>,
-    },
-}
-
-/// The lockfiles of npm, in the order npm itself prefers them, then those
-/// of the other JavaScript package managers, not read yet.
-const NPM_LOCKFILES: [&str; 2] = ["npm-shrinkwrap.json", "package-lock.json"];
-const NPM_OTHER_LOCKFILES: [&str; 4] = ["yarn.lock", "pnpm-lock.yaml", "bun.lock", "bun.lockb"];
-/// The lockfiles of the Python package managers, not read yet.
-const PYTHON_LOCKFILES: [&str; 4] = ["poetry.lock", "Pipfile.lock", "uv.lock", "pdm.lock"];
-
-/// Every lockfile name this module looks for next to a manifest, for the
-/// fingerprint of an unchanged project (ADR-0050): a lockfile change must
-/// trigger a new scan, since it changes the versions checked.
+/// Every lockfile name `lockfiles.rs` looks for next to a manifest, for
+/// the fingerprint of an unchanged project (ADR-0050): a lockfile change
+/// must trigger a new scan, since it changes the versions checked.
 pub const LOCKFILE_NAMES: [&str; 11] = [
     "npm-shrinkwrap.json",
     "package-lock.json",
@@ -110,106 +105,13 @@ pub const LOCKFILE_NAMES: [&str; 11] = [
     "pdm.lock",
 ];
 
-/// The npm lockfile in `dir`. `package-lock.json` and
-/// `npm-shrinkwrap.json` share a format: version 1 lists the packages
-/// under `dependencies`, versions 2 and 3 under `packages`, keyed by their
-/// folder (`node_modules/<name>`, the top-level one being the installed
-/// direct dependency).
-fn npm_lock(dir: &Path) -> Lock {
-    let Some(name) = NPM_LOCKFILES.iter().find(|n| dir.join(n).is_file()) else {
-        return match NPM_OTHER_LOCKFILES.iter().find(|n| dir.join(n).is_file()) {
-            Some(other) => Lock::NotRead(other.to_string()),
-            None => Lock::Absent,
-        };
-    };
-    let json = match read_lock_json(&dir.join(name)) {
-        Ok(json) => json,
-        Err(e) => return Lock::Unreadable(name.to_string(), e),
-    };
-    let mut versions = BTreeMap::new();
-    if let Some(serde_json::Value::Object(packages)) = json.get("packages") {
-        for (folder, entry) in packages {
-            if let Some(package) = folder.strip_prefix("node_modules/")
-                && !package.contains("/node_modules/")
-                && let Some(version) = entry.get("version").and_then(|v| v.as_str())
-            {
-                versions.insert(package.to_string(), version.to_string());
-            }
-        }
-    } else if let Some(serde_json::Value::Object(dependencies)) = json.get("dependencies") {
-        for (package, entry) in dependencies {
-            if let Some(version) = entry.get("version").and_then(|v| v.as_str()) {
-                versions.insert(package.clone(), version.to_string());
-            }
-        }
-    } else {
-        return Lock::Unreadable(
-            name.to_string(),
-            "neither `packages` nor `dependencies`".into(),
-        );
-    }
-    Lock::Read {
-        file: name.to_string(),
-        versions,
-    }
-}
-
-/// `composer.lock` in `dir`: the installed packages under `packages` and
-/// `packages-dev`, names in lower case as Composer compares them.
-fn composer_lock(dir: &Path) -> Lock {
-    const NAME: &str = "composer.lock";
-    if !dir.join(NAME).is_file() {
-        return Lock::Absent;
-    }
-    let json = match read_lock_json(&dir.join(NAME)) {
-        Ok(json) => json,
-        Err(e) => return Lock::Unreadable(NAME.to_string(), e),
-    };
-    let mut versions = BTreeMap::new();
-    let mut sections = 0;
-    for section in ["packages", "packages-dev"] {
-        let Some(serde_json::Value::Array(packages)) = json.get(section) else {
-            continue;
-        };
-        sections += 1;
-        for package in packages {
-            if let (Some(name), Some(version)) = (
-                package.get("name").and_then(|v| v.as_str()),
-                package.get("version").and_then(|v| v.as_str()),
-            ) {
-                versions.insert(name.to_lowercase(), version.to_string());
-            }
-        }
-    }
-    if sections == 0 {
-        return Lock::Unreadable(NAME.to_string(), "no `packages` list".into());
-    }
-    Lock::Read {
-        file: NAME.to_string(),
-        versions,
-    }
-}
-
-/// A Python lockfile in `dir`, none of which is read yet.
-fn python_lock(dir: &Path) -> Lock {
-    match PYTHON_LOCKFILES.iter().find(|n| dir.join(n).is_file()) {
-        Some(name) => Lock::NotRead(name.to_string()),
-        None => Lock::Absent,
-    }
-}
-
-fn read_lock_json(path: &Path) -> Result<serde_json::Value, String> {
-    let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-    serde_json::from_str(&text).map_err(|e| e.to_string())
-}
-
-/// The version to check for the package `key` (its name as `lock` keys
-/// it) declared with `spec`, read by `constraint`, and where it comes
-/// from: the lockfile's version first, then the manifest's exact version,
-/// then the declared minimum. `None` when the constraint has no minimum
-/// and no lockfile gives a version: the dependency is then unpinned.
+/// The version to check for the direct dependency `name` declared with
+/// `spec`, read by `constraint`, and where it comes from: the version the
+/// lockfile installed first, then the manifest's exact version, then the
+/// declared minimum. `None` when the constraint has no minimum and no
+/// lockfile gives a version: the dependency is then unpinned.
 fn resolve_version(
-    key: &str,
+    name: &str,
     spec: &str,
     constraint: crate::project::version_constraint::Constraint,
     lock: &Lock,
@@ -217,26 +119,31 @@ fn resolve_version(
     use crate::project::version_constraint::Constraint;
     let status = match lock {
         Lock::Absent => LockStatus::Absent,
-        Lock::NotRead(file) => LockStatus::NotRead { file: file.clone() },
+        Lock::Binary(file) => LockStatus::Binary { file: file.clone() },
         Lock::Unreadable(file, reason) => LockStatus::Unreadable {
             file: file.clone(),
             reason: reason.clone(),
         },
-        Lock::Read { file, versions } => match versions.get(key) {
-            Some(value) => {
+        Lock::Read(lockfile) => match lockfile.installed(name, spec) {
+            Some(package) => {
+                let value = &package.version;
                 let version = value.strip_prefix('v').unwrap_or(value);
                 if version.starts_with(|c: char| c.is_ascii_digit()) {
                     return (
                         Some(version.to_string()),
-                        VersionSource::Lockfile { file: file.clone() },
+                        VersionSource::Lockfile {
+                            file: lockfile.file.clone(),
+                        },
                     );
                 }
                 LockStatus::NotAVersion {
-                    file: file.clone(),
+                    file: lockfile.file.clone(),
                     value: value.clone(),
                 }
             }
-            None => LockStatus::NotListed { file: file.clone() },
+            None => LockStatus::NotListed {
+                file: lockfile.file.clone(),
+            },
         },
     };
     match constraint {
@@ -250,6 +157,51 @@ fn resolve_version(
         ),
         Constraint::NoMinimum => (None, VersionSource::Manifest),
     }
+}
+
+/// The packages the lockfile `lock`, next to `manifest`, installs that
+/// none of `direct` (name and spec, as the manifest declares them) is
+/// (ticket #211, the maintainer's decision of 2026-11-18): one dependency each,
+/// on the line of its entry in the lockfile, naming the direct
+/// dependencies that bring it in. A package whose version is not a
+/// version (a git address) is left to the lockfile's own direct entry.
+fn transitive_dependencies(
+    lock: &Lock,
+    manifest: &Path,
+    ecosystem: &str,
+    direct: &[(String, String)],
+) -> Vec<Dependency> {
+    let Lock::Read(lockfile) = lock else {
+        return Vec::new();
+    };
+    let file = manifest
+        .parent()
+        .map_or_else(|| PathBuf::from(&lockfile.file), |d| d.join(&lockfile.file));
+    lockfile
+        .transitive(direct)
+        .into_iter()
+        .filter_map(|(package, via)| {
+            let version = package
+                .version
+                .strip_prefix('v')
+                .unwrap_or(&package.version);
+            version
+                .starts_with(|c: char| c.is_ascii_digit())
+                .then(|| Dependency {
+                    name: package.name.clone(),
+                    version: Some(version.to_string()),
+                    ecosystem: ecosystem.to_string(),
+                    file: file.clone(),
+                    line: package.line,
+                    raw_line: format!("{} {}", package.name, package.version),
+                    version_source: VersionSource::Transitive {
+                        file: lockfile.file.clone(),
+                        via,
+                        graph: lockfile.has_graph,
+                    },
+                })
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -376,25 +328,24 @@ pub fn parse_requirements_txt(path: &Path) -> Vec<Dependency> {
     // Name, optional extras, then the version specifiers (ticket #209):
     // the whole specification is read with PEP 440, not the first number
     // after an operator, which made `<2.0` a version 2.0.
-    let requirement_re = Regex::new(r"^([a-zA-Z0-9_.-]+)\s*(?:\[[^\]]*\])?\s*(.*)$").unwrap();
-    let lock = path.parent().map_or(Lock::Absent, python_lock);
+    let lock = path.parent().map_or(Lock::Absent, lockfiles::python);
 
     let mut deps = Vec::new();
+    let mut direct: Vec<(String, String)> = Vec::new();
     for (line_num, line) in read_lines(path) {
         let stripped = line.trim();
         if stripped.is_empty() || stripped.starts_with('#') || stripped.starts_with('-') {
             continue;
         }
-        let Some(caps) = requirement_re.captures(stripped) else {
+        let Some((name, spec)) = split_requirement(stripped) else {
             continue;
         };
-        // An inline comment and an environment marker end the specifiers.
-        let spec = caps[2].split([';', '#']).next().unwrap_or_default().trim();
-        let name = caps[1].to_lowercase();
+        let name = name.to_lowercase();
+        direct.push((name.clone(), spec.clone()));
         let (version, version_source) = resolve_version(
             &name,
-            spec,
-            crate::project::version_constraint::pep440(spec),
+            &spec,
+            crate::project::version_constraint::pep440(&spec),
             &lock,
         );
         deps.push(Dependency {
@@ -407,59 +358,151 @@ pub fn parse_requirements_txt(path: &Path) -> Vec<Dependency> {
             version_source,
         });
     }
+    deps.extend(transitive_dependencies(&lock, path, "PyPI", &direct));
     deps
 }
 
 /// Port of `_parse_pyproject_toml` (simplified extraction, not a
 /// real TOML parser — same choice as Python).
+///
+/// Ticket #210 (2026-11-18): the port read the PEP 621 `dependencies`
+/// array only, and only written over several lines. Read now, each
+/// requirement on its own line: `[project]` `dependencies` (inline or
+/// not) and `[project.optional-dependencies]`, PEP 735
+/// `[dependency-groups]`, uv's `dev-dependencies` and PDM's
+/// `[tool.pdm.dev-dependencies]` (requirement strings, PEP 508), and
+/// Poetry's `[tool.poetry.dependencies]`, `dev-dependencies` and group
+/// tables (`name = "^1.2"` or `{ version = … }`, read with Composer's
+/// grammar, which Poetry's constraints share). Without them a Poetry or
+/// uv project's lockfile showed every package as brought in by nothing.
 pub fn parse_pyproject_toml(path: &Path) -> Vec<Dependency> {
-    let deps_section_re = Regex::new(r"^dependencies\s*=\s*\[").unwrap();
-    // A quoted requirement: name, optional extras, the specifiers up to
-    // the marker or the closing quote (ticket #209).
-    let requirement_re =
-        Regex::new(r#"^\s*"([a-zA-Z0-9_.-]+)\s*(?:\[[^\]]*\])?\s*([^";]*)"#).unwrap();
-    let lock = path.parent().map_or(Lock::Absent, python_lock);
+    let string_re = Regex::new(r#""((?:[^"\\]|\\.)*)"|'([^']*)'"#).unwrap();
+    let key_re = Regex::new(r#"^("[^"]+"|'[^']+'|[A-Za-z0-9_.-]+)\s*=\s*(.*)$"#).unwrap();
+    let version_re = Regex::new(r#"version\s*=\s*"([^"]*)""#).unwrap();
+    let lock = path.parent().map_or(Lock::Absent, lockfiles::python);
+
+    // Whether `key` of `table` is an array of PEP 508 requirements.
+    let requirement_array = |table: &str, key: &str| match table {
+        "project" => key == "dependencies",
+        "project.optional-dependencies" | "dependency-groups" | "tool.pdm.dev-dependencies" => true,
+        "tool.uv" => key == "dev-dependencies",
+        _ => false,
+    };
+    let poetry_table = |table: &str| {
+        table == "tool.poetry.dependencies"
+            || table == "tool.poetry.dev-dependencies"
+            || (table.starts_with("tool.poetry.group.") && table.ends_with(".dependencies"))
+    };
 
     let mut deps = Vec::new();
-    let mut in_deps_section = false;
-    for (line_num, line) in read_lines(path) {
-        let stripped = line.trim();
-        if deps_section_re.is_match(stripped) {
-            in_deps_section = true;
-            continue;
-        }
-        if !in_deps_section {
-            continue;
-        }
-        if stripped == "]" {
-            in_deps_section = false;
-            continue;
-        }
-        let Some(caps) = requirement_re.captures(stripped) else {
-            continue;
-        };
-        let spec = caps[2].trim();
-        let name = caps[1].to_lowercase();
-        let (version, version_source) = resolve_version(
-            &name,
-            spec,
-            crate::project::version_constraint::pep440(spec),
-            &lock,
-        );
+    let mut direct: Vec<(String, String)> = Vec::new();
+    let mut push = |name: &str, spec: &str, constraint, line: usize, raw: &str| {
+        let name = name.to_lowercase();
+        direct.push((name.clone(), spec.to_string()));
+        let (version, version_source) = resolve_version(&name, spec, constraint, &lock);
         deps.push(Dependency {
             name,
             version,
             ecosystem: "PyPI".to_string(),
             file: path.to_path_buf(),
-            line: line_num,
-            raw_line: stripped
-                .trim_matches(|c| c == '"' || c == ',')
-                .trim()
-                .to_string(),
+            line,
+            raw_line: raw.to_string(),
             version_source,
         });
+    };
+    let mut table = String::new();
+    let mut in_array = false;
+    for (line_num, line) in read_lines(path) {
+        let stripped = line.trim();
+        if stripped.is_empty() || stripped.starts_with('#') {
+            continue;
+        }
+        let items = if in_array {
+            Some(stripped)
+        } else if stripped.starts_with('[') {
+            table = stripped
+                .trim_matches(|c| c == '[' || c == ']')
+                .trim()
+                .to_string();
+            continue;
+        } else if let Some(caps) = key_re.captures(stripped) {
+            let key = caps[1].trim_matches(|c| c == '"' || c == '\'');
+            let value = caps.get(2).map_or("", |m| m.as_str()).trim();
+            if requirement_array(&table, key) && value.starts_with('[') {
+                in_array = true;
+                Some(value)
+            } else if poetry_table(&table) && key != "python" {
+                // `"^1.2"`, `{ version = "^1.2", … }`, or a list of them
+                // for several Python versions (their lowest is checked).
+                let versions: Vec<String> = if value.starts_with('"') || value.starts_with('\'') {
+                    string_re
+                        .captures(value)
+                        .map(|c| {
+                            c.get(1)
+                                .or_else(|| c.get(2))
+                                .map_or("", |m| m.as_str())
+                                .to_string()
+                        })
+                        .into_iter()
+                        .collect()
+                } else {
+                    version_re
+                        .captures_iter(value)
+                        .map(|c| c[1].to_string())
+                        .collect()
+                };
+                let spec = versions.join(" || ");
+                push(
+                    key,
+                    &spec,
+                    crate::project::version_constraint::composer(&spec),
+                    line_num,
+                    stripped,
+                );
+                None
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let Some(items) = items else {
+            continue;
+        };
+        for caps in string_re.captures_iter(items) {
+            let text = caps
+                .get(1)
+                .or_else(|| caps.get(2))
+                .map_or("", |m| m.as_str());
+            if let Some((name, spec)) = split_requirement(text) {
+                push(
+                    &name,
+                    &spec,
+                    crate::project::version_constraint::pep440(&spec),
+                    line_num,
+                    text,
+                );
+            }
+        }
+        // The array ends at a `]` outside its strings.
+        if string_re.replace_all(items, "").contains(']') {
+            in_array = false;
+        }
     }
+    deps.extend(transitive_dependencies(&lock, path, "PyPI", &direct));
     deps
+}
+
+/// The name and version specifiers of a PEP 508 requirement
+/// (`requests[socks]>=2.0 ; python_version > "3"`): extras dropped, the
+/// environment marker and a comment cut. `None` for text that does not
+/// start with a package name.
+fn split_requirement(text: &str) -> Option<(String, String)> {
+    let requirement_re =
+        Regex::new(r"^\s*([A-Za-z0-9][A-Za-z0-9_.-]*)\s*(?:\[[^\]]*\])?\s*(.*)$").ok()?;
+    let caps = requirement_re.captures(text)?;
+    let spec = caps[2].split([';', '#']).next().unwrap_or_default().trim();
+    Some((caps[1].to_string(), spec.to_string()))
 }
 
 /// Line of every key of the objects `sections` at the top level of the
@@ -558,8 +601,10 @@ pub fn parse_package_json(path: &Path) -> Vec<Dependency> {
     };
 
     let line_map = json_section_key_lines(&content, &["dependencies", "devDependencies"]);
-    let lock = path.parent().map_or(Lock::Absent, npm_lock);
+    let lock = path.parent().map_or(Lock::Absent, lockfiles::npm);
+    const ECOSYSTEM: &str = "npm";
     let mut deps = Vec::new();
+    let mut direct: Vec<(String, String)> = Vec::new();
     for section in ["dependencies", "devDependencies"] {
         let Some(serde_json::Value::Object(section_deps)) = pkg.get(section) else {
             continue;
@@ -583,13 +628,28 @@ pub fn parse_package_json(path: &Path) -> Vec<Dependency> {
                 raw_line: format!("\"{name}\": \"{version_spec_str}\""),
                 version_source,
             });
+            direct.push((name.clone(), version_spec_str.to_string()));
         }
     }
+    deps.extend(transitive_dependencies(&lock, path, ECOSYSTEM, &direct));
     deps
 }
 
 /// Port of `_parse_pom_xml` (regex over raw text, not an
 /// XML parser — same choice as Python).
+///
+/// Ticket #212 (2026-11-18): a version written `${log4j.version}` is
+/// resolved with the `<properties>` of the same file, chained properties
+/// included, and `${project.version}` / `${project.parent.version}` with
+/// the project's and the parent's `<version>`. A dependency without
+/// `<version>` takes the one the file's `<dependencyManagement>` gives
+/// it. The port reported all of them as unpinned and checked none, while
+/// Maven projects commonly write their versions this way. A property the
+/// file does not define (parent pom, BOM, command line) leaves the
+/// dependency unpinned, with the property named in the finding.
+/// Each dependency also gets the line of its own block: the port took
+/// the first line holding its artifact id, so a managed dependency and
+/// its use shared one line.
 pub fn parse_pom_xml(path: &Path) -> Vec<Dependency> {
     let lines = read_lines(path);
     let content = lines
@@ -603,31 +663,34 @@ pub fn parse_pom_xml(path: &Path) -> Vec<Dependency> {
     let artifact_id_re = Regex::new(r"<artifactId>(.*?)</artifactId>").unwrap();
     let version_re = Regex::new(r"<version>(.*?)</version>").unwrap();
     let pinned_re = Regex::new(r"^[0-9][0-9a-zA-Z._-]*$").unwrap();
+    let properties = pom_properties(&content);
+    let managed = pom_managed_versions(&content);
 
     let mut deps = Vec::new();
     for block_caps in dep_block_re.captures_iter(&content) {
-        let block = &block_caps[1];
-        let Some(artifact_id) = artifact_id_re.captures(block) else {
+        let block_match = block_caps.get(1).expect("block group");
+        let block = block_match.as_str();
+        let Some(artifact_caps) = artifact_id_re.captures(block) else {
             continue;
         };
-        let artifact_id = artifact_id[1].to_string();
+        let artifact_id = artifact_caps[1].to_string();
         let group_id = group_id_re.captures(block).map(|c| c[1].to_string());
         let name = match &group_id {
             Some(g) => format!("{g}:{artifact_id}"),
             None => artifact_id.clone(),
         };
         let raw_version = version_re.captures(block).map(|c| c[1].trim().to_string());
+        let artifact_offset = block_match.start() + artifact_caps.get(0).expect("group 0").start();
+        let line_num = content[..artifact_offset].matches('\n').count() + 1;
 
-        let line_num = lines
-            .iter()
-            .find(|(_, l)| l.contains(&artifact_id))
-            .map(|(n, _)| *n)
-            .unwrap_or(0);
-
-        let is_pinned = raw_version
-            .as_deref()
-            .is_some_and(|v| pinned_re.is_match(v) && !v.contains("${"));
-        let version = if is_pinned { raw_version.clone() } else { None };
+        let declared = raw_version.clone().or_else(|| managed.get(&name).cloned());
+        let (version, version_source) =
+            match declared.map(|v| resolve_placeholders(&v, &properties)) {
+                None => (None, VersionSource::Manifest),
+                Some(Err(property)) => (None, VersionSource::UnresolvedProperty { property }),
+                Some(Ok(v)) if pinned_re.is_match(&v) => (Some(v), VersionSource::Manifest),
+                Some(Ok(_)) => (None, VersionSource::Manifest),
+            };
         deps.push(Dependency {
             name,
             version,
@@ -639,10 +702,129 @@ pub fn parse_pom_xml(path: &Path) -> Vec<Dependency> {
                 deps_name_placeholder(&group_id, &artifact_id),
                 raw_version.as_deref().unwrap_or("(no version)")
             ),
-            version_source: VersionSource::Manifest,
+            version_source,
         });
     }
     deps
+}
+
+/// The properties a `pom.xml` defines for its own use: its top-level
+/// `<properties>` (those of a `<profile>` apply only when the profile is
+/// active, so they are left to the parent-less case), plus
+/// `project.version`, `version`, `pom.version` and
+/// `project.parent.version`.
+fn pom_properties(content: &str) -> BTreeMap<String, String> {
+    let without = |text: &str, tags: &[&str]| -> String {
+        let mut text = text.to_string();
+        for tag in tags {
+            let re = Regex::new(&format!(r"(?s)<{tag}>.*?</{tag}>")).expect("valid");
+            text = re.replace_all(&text, "").into_owned();
+        }
+        text
+    };
+    let mut properties = BTreeMap::new();
+    let top = without(content, &["profiles"]);
+    let block_re = Regex::new(r"(?s)<properties>(.*?)</properties>").expect("valid");
+    let entry_re =
+        Regex::new(r"(?s)<([A-Za-z0-9_.\-]+)>\s*([^<]*?)\s*</([A-Za-z0-9_.\-]+)>").expect("valid");
+    for block in block_re.captures_iter(&top) {
+        for entry in entry_re.captures_iter(&block[1]) {
+            if entry[1] == entry[3] {
+                properties.insert(entry[1].to_string(), entry[2].to_string());
+            }
+        }
+    }
+    let version_re = Regex::new(r"<version>\s*([^<]*?)\s*</version>").expect("valid");
+    let own = without(
+        &top,
+        &[
+            "parent",
+            "dependencies",
+            "dependencyManagement",
+            "build",
+            "reporting",
+            "plugins",
+        ],
+    );
+    if let Some(caps) = version_re.captures(&own) {
+        for key in ["project.version", "version", "pom.version"] {
+            properties.insert(key.to_string(), caps[1].to_string());
+        }
+    }
+    let parent_re = Regex::new(r"(?s)<parent>(.*?)</parent>").expect("valid");
+    if let Some(parent) = parent_re.captures(&top)
+        && let Some(caps) = version_re.captures(&parent[1])
+    {
+        properties.insert("project.parent.version".to_string(), caps[1].to_string());
+    }
+    properties
+}
+
+/// The versions the `<dependencyManagement>` of a `pom.xml` gives, by
+/// `groupId:artifactId`, as written (placeholders not resolved yet).
+fn pom_managed_versions(content: &str) -> BTreeMap<String, String> {
+    let section_re =
+        Regex::new(r"(?s)<dependencyManagement>(.*?)</dependencyManagement>").expect("valid");
+    let block_re = Regex::new(r"(?s)<dependency>(.*?)</dependency>").expect("valid");
+    let field = |name: &str, block: &str| {
+        Regex::new(&format!(r"<{name}>\s*(.*?)\s*</{name}>"))
+            .expect("valid")
+            .captures(block)
+            .map(|c| c[1].to_string())
+    };
+    let mut managed = BTreeMap::new();
+    for section in section_re.captures_iter(content) {
+        for block in block_re.captures_iter(&section[1]) {
+            if let (Some(group), Some(artifact), Some(version)) = (
+                field("groupId", &block[1]),
+                field("artifactId", &block[1]),
+                field("version", &block[1]),
+            ) {
+                managed.insert(format!("{group}:{artifact}"), version);
+            }
+        }
+    }
+    managed
+}
+
+/// `value` with each `${name}` (and, for Gradle, `$name`) replaced by
+/// its property, chains included; the first property not defined when
+/// one is missing. Ten rounds at most: a property that refers to itself
+/// stays unresolved and is named.
+fn resolve_placeholders(
+    value: &str,
+    properties: &BTreeMap<String, String>,
+) -> Result<String, String> {
+    let placeholder = Regex::new(r"\$\{([^}]+)\}|\$([A-Za-z_][A-Za-z0-9_]*)").expect("valid");
+    let mut value = value.to_string();
+    for _ in 0..10 {
+        let Some(caps) = placeholder.captures(&value) else {
+            return Ok(value);
+        };
+        let whole = caps.get(0).expect("group 0");
+        let name = caps
+            .get(1)
+            .or_else(|| caps.get(2))
+            .expect("a name")
+            .as_str();
+        let Some(replacement) = properties.get(name) else {
+            return Err(name.to_string());
+        };
+        value = format!(
+            "{}{replacement}{}",
+            &value[..whole.start()],
+            &value[whole.end()..]
+        );
+    }
+    match placeholder.captures(&value) {
+        Some(caps) => Err(caps
+            .get(1)
+            .or_else(|| caps.get(2))
+            .expect("a name")
+            .as_str()
+            .to_string()),
+        None => Ok(value),
+    }
 }
 
 fn deps_name_placeholder(group_id: &Option<String>, artifact_id: &str) -> String {
@@ -653,6 +835,15 @@ fn deps_name_placeholder(group_id: &Option<String>, artifact_id: &str) -> String
 }
 
 /// Port of `_parse_build_gradle`.
+///
+/// Ticket #212 (2026-11-18): a version written `$log4jVersion` or
+/// `${springVersion}` is resolved with the variables of the same script
+/// (`def`, `val`, `var`, `ext.x =`, a plain assignment in an `ext { }`
+/// block, `extra["x"] =`, `set("x", …)`) and with the `gradle.properties`
+/// next to it. The port reported these dependencies as unpinned and
+/// checked none. A reference it cannot resolve (a version catalog
+/// `libs.versions…`, a root project's `ext`) leaves the dependency
+/// unpinned, with the reference named in the finding.
 pub fn parse_build_gradle(path: &Path) -> Vec<Dependency> {
     let quoted_re = Regex::new(
         r#"(?:implementation|api|compileOnly|runtimeOnly|testImplementation)\s+['"]([^'"]+:[^'"]+):([^'"]+)['"]"#,
@@ -663,29 +854,73 @@ pub fn parse_build_gradle(path: &Path) -> Vec<Dependency> {
     )
     .unwrap();
     let pinned_re = Regex::new(r"^[0-9][0-9a-zA-Z._-]*$").unwrap();
+    let lines = read_lines(path);
+    let variables = gradle_variables(&lines, path.parent());
 
     let mut deps = Vec::new();
-    for (line_num, line) in read_lines(path) {
+    for (line_num, line) in &lines {
         let stripped = line.trim();
         let caps = quoted_re
             .captures(stripped)
             .or_else(|| paren_re.captures(stripped));
         if let Some(caps) = caps {
             let name = caps[1].to_string();
-            let version = caps[2].trim().to_string();
-            let is_pinned = pinned_re.is_match(&version);
+            let declared = caps[2].trim().to_string();
+            let (version, version_source) = match resolve_placeholders(&declared, &variables) {
+                Err(property) => (None, VersionSource::UnresolvedProperty { property }),
+                Ok(v) if pinned_re.is_match(&v) => (Some(v), VersionSource::Manifest),
+                Ok(_) => (None, VersionSource::Manifest),
+            };
             deps.push(Dependency {
                 name,
-                version: if is_pinned { Some(version) } else { None },
+                version,
                 ecosystem: "Maven".to_string(),
                 file: path.to_path_buf(),
-                line: line_num,
+                line: *line_num,
                 raw_line: stripped.to_string(),
-                version_source: VersionSource::Manifest,
+                version_source,
             });
         }
     }
     deps
+}
+
+/// The string variables a Gradle script defines for itself, and those of
+/// the `gradle.properties` in `dir`; the script's win over the file's.
+fn gradle_variables(lines: &[(usize, String)], dir: Option<&Path>) -> BTreeMap<String, String> {
+    let mut variables = BTreeMap::new();
+    if let Some(dir) = dir {
+        let property_re = Regex::new(r"^\s*([A-Za-z0-9_.\-]+)\s*[=:]\s*(.*?)\s*$").expect("valid");
+        for (_, line) in read_lines(&dir.join("gradle.properties")) {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with('#') || trimmed.starts_with('!') {
+                continue;
+            }
+            if let Some(caps) = property_re.captures(&line) {
+                variables.insert(caps[1].to_string(), caps[2].to_string());
+            }
+        }
+    }
+    let assignment_re = Regex::new(
+        r#"^\s*(?:def\s+|val\s+|var\s+|ext\.|project\.ext\.)?([A-Za-z_][A-Za-z0-9_]*)\s*(?::\s*String\s*)?=\s*['"]([^'"$]+)['"]"#,
+    )
+    .expect("valid");
+    let extra_re =
+        Regex::new(r#"(?:extra\[\s*"([A-Za-z_][A-Za-z0-9_]*)"\s*\]\s*=|set\(\s*"([A-Za-z_][A-Za-z0-9_]*)"\s*,)\s*"([^"$]+)""#)
+            .expect("valid");
+    for (_, line) in lines {
+        if let Some(caps) = assignment_re.captures(line) {
+            variables.insert(caps[1].to_string(), caps[2].to_string());
+        } else if let Some(caps) = extra_re.captures(line) {
+            let name = caps
+                .get(1)
+                .or_else(|| caps.get(2))
+                .expect("a name")
+                .as_str();
+            variables.insert(name.to_string(), caps[3].to_string());
+        }
+    }
+    variables
 }
 
 /// Port of `_parse_csproj`.
@@ -729,9 +964,10 @@ pub fn parse_composer_json(path: &Path) -> Vec<Dependency> {
     };
 
     let line_map = json_section_key_lines(&content, &["require", "require-dev"]);
-    let lock = path.parent().map_or(Lock::Absent, composer_lock);
-
+    let lock = path.parent().map_or(Lock::Absent, lockfiles::composer);
+    const ECOSYSTEM: &str = "Packagist";
     let mut deps = Vec::new();
+    let mut direct: Vec<(String, String)> = Vec::new();
     for section in ["require", "require-dev"] {
         let Some(serde_json::Value::Object(section_deps)) = data.get(section) else {
             continue;
@@ -746,7 +982,7 @@ pub fn parse_composer_json(path: &Path) -> Vec<Dependency> {
             // numbers, `v` or `=` allowed), and the version installed
             // according to `composer.lock` first.
             let (version, version_source) = resolve_version(
-                &name.to_lowercase(),
+                name,
                 version_spec_str,
                 crate::project::version_constraint::composer(version_spec_str),
                 &lock,
@@ -760,8 +996,10 @@ pub fn parse_composer_json(path: &Path) -> Vec<Dependency> {
                 raw_line: format!("\"{name}\": \"{version_spec_str}\""),
                 version_source,
             });
+            direct.push((name.clone(), version_spec_str.to_string()));
         }
     }
+    deps.extend(transitive_dependencies(&lock, path, ECOSYSTEM, &direct));
     deps
 }
 
@@ -791,10 +1029,43 @@ pub fn parse_dependency_file(path: &Path, file_type: DepFileType) -> Vec<Depende
 /// (a leftover from before `ScanConfig::include_paths` existed), so a
 /// `package.json` under an included subfolder (e.g. `frontend/`) was
 /// never seen, unlike Python which walks `paths.include`.
+///
+/// Ticket #211: two manifests of one folder (`requirements.txt` and
+/// `pyproject.toml`) share its lockfile, so each lists its transitive
+/// packages. Each is kept once, and a package one manifest declares
+/// directly is not also listed as another's transitive one.
 pub fn collect_dependencies(root_dir: &Path, include_paths: &[String]) -> Vec<Dependency> {
-    find_dependency_files(root_dir, include_paths)
+    let all: Vec<Dependency> = find_dependency_files(root_dir, include_paths)
         .iter()
         .flat_map(|(path, file_type)| parse_dependency_file(path, *file_type))
+        .collect();
+    let key = |dep: &Dependency, dir: Option<&Path>| {
+        let name = match dep.ecosystem.as_str() {
+            "PyPI" => lockfiles::pep503(&dep.name),
+            "Packagist" => dep.name.to_lowercase(),
+            _ => dep.name.clone(),
+        };
+        (
+            dep.ecosystem.clone(),
+            dir.map(Path::to_path_buf),
+            name,
+            dep.version.clone(),
+        )
+    };
+    let declared: std::collections::BTreeSet<_> = all
+        .iter()
+        .filter(|d| !matches!(d.version_source, VersionSource::Transitive { .. }))
+        .map(|d| key(d, d.file.parent()))
+        .collect();
+    let mut seen = std::collections::BTreeSet::new();
+    all.into_iter()
+        .filter(|d| {
+            if !matches!(d.version_source, VersionSource::Transitive { .. }) {
+                return true;
+            }
+            let k = key(d, d.file.parent());
+            !declared.contains(&k) && seen.insert(k)
+        })
         .collect()
 }
 
@@ -889,6 +1160,65 @@ mod tests {
         assert_eq!(deps.len(), 2);
         assert_eq!(deps[0].version, Some("4.2.1".to_string()));
         assert_eq!(deps[1].version, None);
+    }
+
+    /// Ticket #210: every place a `pyproject.toml` declares dependencies —
+    /// PEP 621 (inline or multi-line, and its optional ones), PEP 735
+    /// groups, uv and PDM development ones, Poetry's tables — each on its
+    /// own line; `python` and comments are not dependencies.
+    #[test]
+    fn test_parse_pyproject_toml_reads_every_declaration() {
+        let path = write_tmp(
+            "pyproject-all.toml",
+            r#"[project]
+name = "demo"
+dependencies = ["django==4.2.1", "requests>=2.0 ; python_version > '3'"]
+
+[project.optional-dependencies]
+# a comment
+webui = [
+    "open-webui==0.10.2",
+]
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.uv]
+dev-dependencies = ["ruff==0.4.0"]
+
+[tool.pdm.dev-dependencies]
+lint = ["black>=24"]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+fastapi = "^0.110.0"
+pydantic = { version = "2.6.1", extras = ["email"] }
+local = { path = "../local" }
+
+[tool.poetry.group.test.dependencies]
+"Pytest-Cov" = "*"
+"#,
+        );
+        let deps: Vec<(String, Option<String>, usize)> = parse_pyproject_toml(&path)
+            .into_iter()
+            .map(|d| (d.name, d.version, d.line))
+            .collect();
+        let s = |n: &str, v: Option<&str>, l: usize| (n.to_string(), v.map(str::to_string), l);
+        assert_eq!(
+            deps,
+            vec![
+                s("django", Some("4.2.1"), 3),
+                s("requests", Some("2.0"), 3),
+                s("open-webui", Some("0.10.2"), 8),
+                s("pytest", Some("8"), 12),
+                s("ruff", Some("0.4.0"), 15),
+                s("black", Some("24"), 18),
+                s("fastapi", Some("0.110.0"), 22),
+                s("pydantic", Some("2.6.1"), 23),
+                s("local", None, 24),
+                s("pytest-cov", None, 27),
+            ]
+        );
     }
 
     #[test]
@@ -1036,10 +1366,32 @@ mod tests {
                 "node_modules/a/node_modules/left-pad": {"version": "1.3.0"},
                 "node_modules/local": {"version": "file:../local"}}}"#,
         );
-        let deps: BTreeMap<String, Dependency> = parse_package_json(&dir.join("package.json"))
-            .into_iter()
-            .map(|d| (d.name.clone(), d))
+        let parsed = parse_package_json(&dir.join("package.json"));
+        let deps: BTreeMap<String, Dependency> = parsed
+            .iter()
+            .filter(|d| !matches!(d.version_source, VersionSource::Transitive { .. }))
+            .map(|d| (d.name.clone(), d.clone()))
             .collect();
+        // Ticket #211: the nested left-pad 1.3.0 is a transitive package,
+        // brought in by `a`, which the lockfile installs but the manifest
+        // does not declare.
+        let transitive: Vec<(&str, Option<&str>, &VersionSource)> = parsed
+            .iter()
+            .filter(|d| matches!(d.version_source, VersionSource::Transitive { .. }))
+            .map(|d| (d.name.as_str(), d.version.as_deref(), &d.version_source))
+            .collect();
+        assert_eq!(
+            transitive,
+            vec![(
+                "left-pad",
+                Some("1.3.0"),
+                &VersionSource::Transitive {
+                    file: "package-lock.json".to_string(),
+                    via: vec![],
+                    graph: true
+                }
+            )]
+        );
         assert_eq!(deps["lodash"].version.as_deref(), Some("4.17.21"));
         assert_eq!(
             deps["lodash"].version_source,
@@ -1094,7 +1446,8 @@ mod tests {
             }
         ));
 
-        // A yarn project: not read yet, said so.
+        // A yarn project is read too (ticket #210): lodash is not in this
+        // empty yarn.lock, said so.
         std::fs::remove_file(dir.join("package-lock.json")).unwrap();
         write("yarn.lock", "# yarn lockfile v1\n");
         let lodash = parse_package_json(&dir.join("package.json"))
@@ -1105,11 +1458,26 @@ mod tests {
             lodash.version_source,
             VersionSource::DeclaredMinimum {
                 constraint: "^4.17.0".to_string(),
-                lock: LockStatus::NotRead {
+                lock: LockStatus::NotListed {
                     file: "yarn.lock".to_string()
                 }
             }
         );
+        // `bun.lockb` is binary: named, with the minimum checked.
+        std::fs::remove_file(dir.join("yarn.lock")).unwrap();
+        write("bun.lockb", "\u{0}binary");
+        let lodash = parse_package_json(&dir.join("package.json"))
+            .into_iter()
+            .find(|d| d.name == "lodash")
+            .unwrap();
+        assert!(matches!(
+            lodash.version_source,
+            VersionSource::DeclaredMinimum {
+                lock: LockStatus::Binary { .. },
+                ..
+            }
+        ));
+        std::fs::remove_file(dir.join("bun.lockb")).unwrap();
 
         // composer.lock: names compared in lower case, `v` dropped.
         write(
@@ -1185,6 +1553,151 @@ mod tests {
                 ("x/z".to_string(), 7),
             ]
         );
+    }
+
+    /// Ticket #212: a Maven version given by a property of the same
+    /// `pom.xml` is resolved, chained properties and `${project.version}`
+    /// included, and a dependency without version takes the one its
+    /// `dependencyManagement` gives; a property defined elsewhere leaves
+    /// the dependency unpinned, with the property named.
+    #[test]
+    fn test_parse_pom_xml_resolves_properties() {
+        let path = write_tmp(
+            "pom-properties.xml",
+            r#"<project>
+  <groupId>d</groupId><artifactId>app</artifactId><version>3.1.0</version>
+  <parent><groupId>p</groupId><artifactId>parent</artifactId><version>9.9</version></parent>
+  <properties>
+    <log4j.version>2.14.1</log4j.version>
+    <jackson-version>${jackson.base}</jackson-version>
+    <jackson.base>2.9.8</jackson.base>
+  </properties>
+  <dependencyManagement><dependencies>
+    <dependency><groupId>m</groupId><artifactId>managed</artifactId><version>1.4.0</version></dependency>
+  </dependencies></dependencyManagement>
+  <dependencies>
+    <dependency><groupId>org.apache.logging.log4j</groupId><artifactId>log4j-core</artifactId><version>${log4j.version}</version></dependency>
+    <dependency><groupId>j</groupId><artifactId>jackson</artifactId><version>${jackson-version}</version></dependency>
+    <dependency><groupId>d</groupId><artifactId>sibling</artifactId><version>${project.version}</version></dependency>
+    <dependency><groupId>m</groupId><artifactId>managed</artifactId></dependency>
+    <dependency><groupId>s</groupId><artifactId>spring</artifactId><version>${spring.version}</version></dependency>
+  </dependencies>
+</project>"#,
+        );
+        let deps = parse_pom_xml(&path);
+        let found: Vec<(&str, Option<&str>)> = deps
+            .iter()
+            .map(|d| (d.name.as_str(), d.version.as_deref()))
+            .collect();
+        assert_eq!(
+            found,
+            vec![
+                ("m:managed", Some("1.4.0")),
+                ("org.apache.logging.log4j:log4j-core", Some("2.14.1")),
+                ("j:jackson", Some("2.9.8")),
+                ("d:sibling", Some("3.1.0")),
+                ("m:managed", Some("1.4.0")),
+                ("s:spring", None),
+            ]
+        );
+        assert_eq!(
+            deps[5].version_source,
+            VersionSource::UnresolvedProperty {
+                property: "spring.version".to_string()
+            }
+        );
+    }
+
+    /// Ticket #212: a Gradle version given by a variable of the same
+    /// script or of the `gradle.properties` next to it is resolved; one
+    /// defined elsewhere leaves the dependency unpinned, named.
+    #[test]
+    fn test_parse_build_gradle_resolves_variables() {
+        let dir = std::env::temp_dir().join(format!(
+            "codefixture-audit-deps-gradle-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("gradle.properties"),
+            "jacksonVersion=2.9.8\n# comment\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("build.gradle"),
+            "def log4jVersion = '2.14.1'\next {\n    springVersion = \"5.3.1\"\n}\n\
+             dependencies {\n\
+             implementation \"org.apache.logging.log4j:log4j-core:$log4jVersion\"\n\
+             implementation \"org.springframework:spring-core:${springVersion}\"\n\
+             implementation \"com.fasterxml.jackson.core:jackson-databind:${jacksonVersion}\"\n\
+             implementation \"x:y:${libs.versions.y.get()}\"\n}\n",
+        )
+        .unwrap();
+        let deps = parse_build_gradle(&dir.join("build.gradle"));
+        let found: Vec<(&str, Option<&str>)> = deps
+            .iter()
+            .map(|d| (d.name.as_str(), d.version.as_deref()))
+            .collect();
+        assert_eq!(
+            found,
+            vec![
+                ("org.apache.logging.log4j:log4j-core", Some("2.14.1")),
+                ("org.springframework:spring-core", Some("5.3.1")),
+                ("com.fasterxml.jackson.core:jackson-databind", Some("2.9.8")),
+                ("x:y", None),
+            ]
+        );
+        assert_eq!(
+            deps[3].version_source,
+            VersionSource::UnresolvedProperty {
+                property: "libs.versions.y.get()".to_string()
+            }
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Ticket #211: `requirements.txt` and `pyproject.toml` of one folder
+    /// share its `poetry.lock`; each transitive package is listed once,
+    /// and one manifest's direct dependency is not another's transitive.
+    #[test]
+    fn test_collect_dependencies_lists_each_transitive_package_once() {
+        let dir = std::env::temp_dir().join(format!(
+            "codefixture-audit-deps-collect-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("requirements.txt"), "requests>=2\n").unwrap();
+        std::fs::write(
+            dir.join("pyproject.toml"),
+            "[project]\ndependencies = [\n  \"urllib3>=2\",\n]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("poetry.lock"),
+            "[[package]]\nname = \"requests\"\nversion = \"2.31.0\"\n\n[package.dependencies]\nurllib3 = \">=1\"\nidna = \">=2\"\n\n[[package]]\nname = \"urllib3\"\nversion = \"2.0.7\"\n\n[[package]]\nname = \"idna\"\nversion = \"3.6\"\n",
+        )
+        .unwrap();
+        let deps = collect_dependencies(&dir, &[]);
+        let listed: Vec<(String, Option<String>, bool)> = deps
+            .iter()
+            .map(|d| {
+                (
+                    d.name.clone(),
+                    d.version.clone(),
+                    matches!(d.version_source, VersionSource::Transitive { .. }),
+                )
+            })
+            .collect();
+        assert_eq!(
+            listed,
+            vec![
+                ("requests".to_string(), Some("2.31.0".to_string()), false),
+                ("idna".to_string(), Some("3.6".to_string()), true),
+                ("urllib3".to_string(), Some("2.0.7".to_string()), false),
+            ]
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

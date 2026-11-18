@@ -333,8 +333,10 @@ pub fn find_vulnerable(deps: &[Dependency], db: &AdvisoryDb) -> Vec<VulnerableDe
 /// and the finding states it.
 pub fn exact_version(dep: &Dependency) -> Option<&str> {
     match dep.version_source {
-        VersionSource::DeclaredMinimum { .. } => None,
-        VersionSource::Manifest | VersionSource::Lockfile { .. } => dep.version.as_deref(),
+        VersionSource::DeclaredMinimum { .. } | VersionSource::UnresolvedProperty { .. } => None,
+        VersionSource::Manifest
+        | VersionSource::Lockfile { .. }
+        | VersionSource::Transitive { .. } => dep.version.as_deref(),
     }
 }
 

@@ -386,7 +386,7 @@
   "scan_cache_line": "Cache ({language}): {dirty}/{files} Datei(en) seit dem letzten Scan geändert, {analysed}/{total} Datenflussanalysen neu ausgeführt.",
   "scan_cache_patterns_line": "Cache (Musterregeln): {analysed}/{files} Datei(en) neu analysiert, die übrigen seit dem letzten Scan unverändert.",
   "scan_lockfile_unreadable": "Unlesbare Lock-Datei: {file} ({reason}). Die Bereiche ihres Manifests werden an ihrem angegebenen Minimum geprüft.",
-  "scan_lockfile_not_read": "Lock-Datei noch nicht gelesen: {file}. Die Bereiche ihres Manifests werden an ihrem angegebenen Minimum geprüft.",
+  "scan_lockfile_binary": "Binäre Lock-Datei nicht gelesen: {file}. Führen Sie „bun install --save-text-lockfile“ aus, um bun.lock zu schreiben; bis dahin werden die Bereiche ihres Manifests an ihrem angegebenen Minimum geprüft.",
   "scan_cache_full_line": "Cache ({language}): vollständige Analyse der {files} Datei(en), {reason}; {analysed}/{total} Datenflussanalysen ausgeführt.",
   "scan_cache_patterns_full_line": "Cache (Musterregeln): vollständige Analyse der {files} Datei(en), {reason}.",
   "scan_cache_reason_missing": "kein früherer Scan mit dieser Engine-Version",

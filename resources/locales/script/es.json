@@ -386,7 +386,7 @@
   "scan_cache_line": "Caché ({language}): {dirty}/{files} archivo(s) modificado(s) desde el último análisis, {analysed}/{total} análisis de flujo rehechos.",
   "scan_cache_patterns_line": "Caché (reglas de patrón): {analysed}/{files} archivo(s) analizado(s) de nuevo, los demás sin cambios desde el último análisis.",
   "scan_lockfile_unreadable": "Archivo de bloqueo ilegible: {file} ({reason}). Los rangos de su manifiesto se comprueban en su mínimo declarado.",
-  "scan_lockfile_not_read": "Archivo de bloqueo aún no leído: {file}. Los rangos de su manifiesto se comprueban en su mínimo declarado.",
+  "scan_lockfile_binary": "Archivo de bloqueo binario no leído: {file}. Ejecute «bun install --save-text-lockfile» para escribir bun.lock; mientras tanto, los rangos de su manifiesto se comprueban en su mínimo declarado.",
   "scan_cache_full_line": "Caché ({language}): análisis completo de los {files} archivo(s), {reason}; {analysed}/{total} análisis de flujo realizados.",
   "scan_cache_patterns_full_line": "Caché (reglas de patrón): análisis completo de los {files} archivo(s), {reason}.",
   "scan_cache_reason_missing": "ningún análisis previo con esta versión del motor",

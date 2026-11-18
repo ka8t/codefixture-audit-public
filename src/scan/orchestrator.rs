@@ -568,10 +568,10 @@ pub struct ScanReport {
     /// in discovery order. Printed by the CLI for the same reason as
     /// `skipped_dirs`.
     pub skipped_saved_pages: Vec<String>,
-    /// The lockfiles next to a manifest that gave no version (ticket
-    /// #209): unreadable, or of a format the engine does not read yet,
-    /// as `(lockfile path relative to the project, reason)`, the reason
-    /// empty for a format not read. Their manifests' ranges are checked
+    /// The lockfiles next to a manifest that gave no version (tickets
+    /// #209, #210): unreadable, or binary (`bun.lockb`), as `(lockfile
+    /// path relative to the project, reason)`, the reason empty for a
+    /// binary one. Their manifests' ranges are checked
     /// at their declared minimum; the CLI names each one once.
     pub lockfiles_not_used: Vec<(String, Option<String>)>,
     /// Catalog of compiled rules, indexed by identity (language + name):
@@ -777,12 +777,37 @@ fn vulnerable_dependency_findings(
                 // CWE-1395: Dependency on Vulnerable Third-Party Component.
                 cwe.push("CWE-1395".to_string());
             }
-            let solution = match &hit.fixed_version {
-                Some(fixed) => texts
+            // Ticket #211: a transitive package is upgraded through the
+            // direct dependencies that bring it in, or forced when the
+            // lockfile does not say which do.
+            let transitive_via = match &dep.version_source {
+                crate::project::dependencies::VersionSource::Transitive { via, .. } => {
+                    Some(via.join(", "))
+                }
+                _ => None,
+            };
+            let solution = match (&hit.fixed_version, transitive_via.as_deref()) {
+                (Some(fixed), Some("")) => texts
+                    .get("vulnerable_solution_transitive_force")
+                    .replace("{name}", &dep.name)
+                    .replace("{fixed}", fixed),
+                (None, Some("")) => texts
+                    .get("vulnerable_solution_transitive_remove")
+                    .replace("{name}", &dep.name),
+                (Some(fixed), Some(via)) => texts
+                    .get("vulnerable_solution_transitive_upgrade")
+                    .replace("{name}", &dep.name)
+                    .replace("{fixed}", fixed)
+                    .replace("{via}", via),
+                (None, Some(via)) => texts
+                    .get("vulnerable_solution_transitive_replace")
+                    .replace("{name}", &dep.name)
+                    .replace("{via}", via),
+                (Some(fixed), None) => texts
                     .get("vulnerable_solution_upgrade")
                     .replace("{name}", &dep.name)
                     .replace("{fixed}", fixed),
-                None => texts
+                (None, None) => texts
                     .get("vulnerable_solution_replace")
                     .replace("{name}", &dep.name),
             };
@@ -841,11 +866,26 @@ fn checked_version_label(
 ) -> String {
     use crate::project::dependencies::{LockStatus, VersionSource};
     match &dep.version_source {
-        VersionSource::Manifest => version.to_string(),
+        // An unresolved property gives no version: never in a finding
+        // with one.
+        VersionSource::Manifest | VersionSource::UnresolvedProperty { .. } => version.to_string(),
         VersionSource::Lockfile { file } => texts
             .get("version_locked")
             .replace("{version}", version)
             .replace("{file}", file),
+        // Ticket #211: a package no direct dependency is.
+        VersionSource::Transitive { file, via, graph } => {
+            let key = match (via.is_empty(), graph) {
+                (false, _) => "version_transitive",
+                (true, true) => "version_transitive_unreached",
+                (true, false) => "version_transitive_no_graph",
+            };
+            texts
+                .get(key)
+                .replace("{version}", version)
+                .replace("{file}", file)
+                .replace("{via}", &via.join(", "))
+        }
         VersionSource::DeclaredMinimum { constraint, lock } => {
             let reason = match lock {
                 LockStatus::Absent => texts.get("lock_absent"),
@@ -859,7 +899,7 @@ fn checked_version_label(
                 LockStatus::Unreadable { file, .. } => {
                     texts.get("lock_unreadable").replace("{file}", file)
                 }
-                LockStatus::NotRead { file } => texts.get("lock_not_read").replace("{file}", file),
+                LockStatus::Binary { file } => texts.get("lock_binary").replace("{file}", file),
             };
             texts
                 .get("version_minimum")
@@ -871,8 +911,8 @@ fn checked_version_label(
 }
 
 /// The lockfiles of `deps` that gave no version because they cannot be
-/// read, or have a format the engine does not read yet, each once, with
-/// the reason for an unreadable one (ticket #209).
+/// read, or are binary (`bun.lockb`), each once, with the reason for an
+/// unreadable one (tickets #209, #210).
 fn lockfiles_not_used_by(
     deps: &[crate::project::dependencies::Dependency],
     root: &Path,
@@ -885,7 +925,7 @@ fn lockfiles_not_used_by(
         };
         let (file, reason) = match lock {
             LockStatus::Unreadable { file, reason } => (file, Some(reason.clone())),
-            LockStatus::NotRead { file } => (file, None),
+            LockStatus::Binary { file } => (file, None),
             _ => continue,
         };
         let path = dep.file.parent().unwrap_or(root).join(file);
@@ -1977,13 +2017,31 @@ pub fn run_scan(config: &ScanConfig) -> ScanReport {
                     rule_name: texts.get("unpinned_name"),
                     category: "DEPENDENCIES".to_string(),
                     severity: "HIGH".to_string(),
-                    risk: texts.get("unpinned_risk").replace("{name}", &dep.name),
-                    solution: Some(
-                        texts
+                    // Ticket #212: a version given by a property the
+                    // manifest does not define names that property.
+                    risk: match &dep.version_source {
+                        crate::project::dependencies::VersionSource::UnresolvedProperty {
+                            property,
+                        } => texts
+                            .get("unpinned_property_risk")
+                            .replace("{name}", &dep.name)
+                            .replace("{file}", &file)
+                            .replace("{property}", property),
+                        _ => texts.get("unpinned_risk").replace("{name}", &dep.name),
+                    },
+                    solution: Some(match &dep.version_source {
+                        crate::project::dependencies::VersionSource::UnresolvedProperty {
+                            property,
+                        } => texts
+                            .get("unpinned_property_solution")
+                            .replace("{name}", &dep.name)
+                            .replace("{file}", &file)
+                            .replace("{property}", property),
+                        _ => texts
                             .get("unpinned_solution")
                             .replace("{name}", &dep.name)
                             .replace("{file}", &file),
-                    ),
+                    }),
                     file,
                     line: dep.line,
                     cwe: vec![],
@@ -2341,10 +2399,52 @@ mod tests {
                 file: "composer.lock".into(),
                 reason: "EOF".into(),
             },
-            LockStatus::NotRead {
-                file: "yarn.lock".into(),
+            LockStatus::Binary {
+                file: "bun.lockb".into(),
             },
         ];
+        // Ticket #211: a transitive package names what brings it in.
+        assert_eq!(
+            label(VersionSource::Transitive {
+                file: "package-lock.json".into(),
+                via: vec!["express".into(), "koa".into()],
+                graph: true
+            }),
+            "4.17.0 (dépendance indirecte installée selon package-lock.json, via express, koa)"
+        );
+        for lang in ["en", "fr", "de", "es"] {
+            let texts = DependencyTexts::new(lang);
+            for (via, graph) in [
+                (vec!["express".to_string()], true),
+                (vec![], true),
+                (vec![], false),
+            ] {
+                let source = VersionSource::Transitive {
+                    file: "Pipfile.lock".into(),
+                    via,
+                    graph,
+                };
+                let text = checked_version_label(&dep(source), "4.17.0", &texts);
+                assert!(
+                    text.contains("Pipfile.lock")
+                        && !text.contains('{')
+                        && !text.contains("dependency_findings"),
+                    "{lang}: {text}"
+                );
+            }
+            for key in [
+                "vulnerable_solution_transitive_force",
+                "vulnerable_solution_transitive_remove",
+                "vulnerable_solution_transitive_upgrade",
+                "vulnerable_solution_transitive_replace",
+                "lock_binary",
+            ] {
+                assert!(
+                    !texts.get(key).contains("dependency_findings"),
+                    "{lang}: {key}"
+                );
+            }
+        }
         for lang in ["en", "fr", "de", "es"] {
             let texts = DependencyTexts::new(lang);
             for lock in &reasons {

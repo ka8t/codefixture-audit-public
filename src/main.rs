@@ -2062,7 +2062,7 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
             emit_progress(quiet, &format!("[codefixture-audit] {line}"));
         }
     }
-    // Ticket #209: a lockfile that gave no version is named once, as a
+    // Tickets #209, #210: a lockfile that gave no version is named once, as a
     // warning, never hidden by `--quiet`: the versions checked for its
     // manifest are declared minimums, not the installed ones.
     for (file, reason) in &report.lockfiles_not_used {
@@ -2070,7 +2070,7 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
             Some(reason) => codefixture_audit::i18n::t(&script_locale, "scan_lockfile_unreadable")
                 .replace("{reason}", reason)
                 .replace("{file}", file),
-            None => codefixture_audit::i18n::t(&script_locale, "scan_lockfile_not_read")
+            None => codefixture_audit::i18n::t(&script_locale, "scan_lockfile_binary")
                 .replace("{file}", file),
         };
         emit_warning(&format!("[codefixture-audit] {line}"));

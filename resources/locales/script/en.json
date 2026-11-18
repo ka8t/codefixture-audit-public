@@ -386,7 +386,7 @@
   "scan_cache_line": "Cache ({language}): {dirty}/{files} file(s) changed since the last scan, {analysed}/{total} taint analyses redone.",
   "scan_cache_patterns_line": "Cache (pattern rules): {analysed}/{files} file(s) analysed again, the others unchanged since the last scan.",
   "scan_lockfile_unreadable": "Unreadable lockfile: {file} ({reason}). The ranges of its manifest are checked at their declared minimum.",
-  "scan_lockfile_not_read": "Lockfile not read yet: {file}. The ranges of its manifest are checked at their declared minimum.",
+  "scan_lockfile_binary": "Binary lockfile not read: {file}. Run “bun install --save-text-lockfile” to write bun.lock; until then, the ranges of its manifest are checked at their declared minimum.",
   "scan_cache_full_line": "Cache ({language}): full analysis of the {files} file(s), {reason}; {analysed}/{total} taint analyses run.",
   "scan_cache_patterns_full_line": "Cache (pattern rules): full analysis of the {files} file(s), {reason}.",
   "scan_cache_reason_missing": "no previous scan by this engine version",
