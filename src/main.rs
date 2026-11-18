@@ -921,6 +921,24 @@ mod tests {
         );
     }
 
+    /// `--sbom` is a `scan` option of the shared build too (ticket #196):
+    /// the parse goes through the public `Scan` fields, so this test holds
+    /// in the private build and in the exported one.
+    #[test]
+    fn test_scan_accepts_sbom_in_every_build() {
+        let cli = Cli::try_parse_from(["codefixture-audit", "scan", "project", "--sbom"])
+            .expect("scan --sbom parses");
+        match cli.command {
+            Command::Scan { sbom, .. } => assert!(sbom),
+            _ => panic!("expected the scan command"),
+        }
+        let cli = Cli::try_parse_from(["codefixture-audit", "scan", "project"]).unwrap();
+        match cli.command {
+            Command::Scan { sbom, .. } => assert!(!sbom, "off by default"),
+            _ => panic!("expected the scan command"),
+        }
+    }
+
     #[test]
     fn test_write_sbom_writes_named_cyclonedx_file() {
         let root = std::env::temp_dir().join(format!("sast_sbom_{}", std::process::id()));
@@ -1061,11 +1079,6 @@ struct ScanExtraArgs {
     /// defaults).
     #[arg(long)]
     brand_file: Option<PathBuf>,
-    /// Also writes a CycloneDX SBOM of the statically detected
-    /// dependencies (`<PREFIX>-SBOM-<timestamp>.json` in the data
-    /// directory) (mirrors `--sbom`).
-    #[arg(long)]
-    sbom: bool,
     /// Writes a JSON file of scan metrics (files/LOC scanned,
     /// findings by severity, per-phase durations, exit code) to this
     /// path — opt-in, local file only (ticket #90).
@@ -1093,7 +1106,6 @@ impl Default for ScanExtraArgs {
             disable_rule: Vec::new(),
             severity: None,
             brand_file: None,
-            sbom: false,
             metrics_output: None,
         }
     }
@@ -1143,6 +1155,14 @@ enum Command {
         /// Scans only a single rule category (e.g. "security").
         #[arg(long)]
         only_category: Option<String>,
+        // In the shared build since 2026-11-18 (ticket #196); a private
+        // option before. The `///` text below is the `--help` line.
+        /// Also writes a CycloneDX SBOM of the project's declared
+        /// dependencies (`<PREFIX>-SBOM-<timestamp>.json` in
+        /// `audit-reports/audit-datas/`). A dependency declared with a
+        /// range has no version in it.
+        #[arg(long)]
+        sbom: bool,
     },
     /// Lists the builtin rules by category (mirrors `--list-rules`).
     ListRules {
@@ -1251,6 +1271,7 @@ fn dispatch(command: Command) -> ExitCode {
             exclude,
             quick,
             only_category,
+            sbom,
         } => run_scan_command(ScanArgs {
             path,
             rules,
@@ -1260,6 +1281,7 @@ fn dispatch(command: Command) -> ExitCode {
             exclude,
             quick,
             only_category,
+            sbom,
         }),
         Command::ListRules { lang, rules } => run_list_rules_command(&lang, rules),
     }
@@ -1441,6 +1463,7 @@ struct ScanArgs {
     exclude: Vec<String>,
     quick: bool,
     only_category: Option<String>,
+    sbom: bool,
 }
 
 fn run_scan_command(args: ScanArgs) -> ExitCode {
@@ -1453,6 +1476,7 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
         exclude,
         quick,
         only_category,
+        sbom,
     } = args;
     // The shared binary has none of these options: their defaults.
     let extra = ScanExtraArgs::default();
@@ -1474,7 +1498,6 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
         disable_rule,
         severity,
         brand_file,
-        sbom,
         metrics_output,
     } = extra;
     let t_command_start = std::time::Instant::now();

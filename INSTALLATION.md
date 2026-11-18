@@ -104,7 +104,7 @@ Windows:
 .\target\release\codefixture-audit.exe list-rules | Select-Object -First 1
 ```
 
-`--version` prints the build, for example `codefixture-audit 0.1.0+42.c5be809`: the commit count and short commit hash say exactly which code you built. Every analysis prints it on its first line too. `list-rules` prints the number of rules on its first line: 26 for the demonstration rules this repository ships.
+`--version` prints the build, for example `codefixture-audit 0.1.0+42.c5be809`: the commit count and short commit hash say exactly which code you built. Every analysis prints it on its first line too. `list-rules` prints the number of rules on its first line: 38 for the demonstration rules this repository ships.
 
 Every command below is run from the `codefixture-audit-public` folder, with the engine's full path.
 
@@ -132,7 +132,7 @@ copy ~\codefixture-audit-rules\rules.scapack target\release\
 .\target\release\codefixture-audit.exe list-rules | Select-Object -First 1
 ```
 
-`list-rules` must now print more than 600 rules. Each build (steps 4 and 11) puts the demonstration pack back next to the engine: copy the full pack again after every build. Instead of copying the rules, you can also add `--rules ~/codefixture-audit-rules/rules.scapack` to each analysis.
+`list-rules` must now print more than 700 rules. Each build (steps 4 and 11) puts the demonstration pack back next to the engine: copy the full pack again after every build. Instead of copying the rules, you can also add `--rules ~/codefixture-audit-rules/rules.scapack` to each analysis.
 
 ## Step 7: describe your project (first run)
 
@@ -187,6 +187,7 @@ For a report in French, Spanish or German, replace `--lang en` with `--lang fr`,
 
 - `--lang` sets the language of the report: `en`, `fr`, `es` or `de`.
 - When your project declares dependencies (`requirements.txt`, `package.json`, `pom.xml`, `composer.json`…), their pinned versions are compared with the published vulnerabilities the rule pack carries, offline; the output names the pack, the date of its data and its counts. A range such as `>=2.0` names no installed version and is not compared.
+- `--sbom` also writes the list of your declared dependencies as a CycloneDX file: see [SBOM export](#sbom-export).
 
 The terminal first shows what was loaded, then the progress and a summary:
 
@@ -273,6 +274,22 @@ Besides `node_modules/`, `vendor/`, `.venv/`, `__pycache__/`, `*.min.js` and the
 - documentation: `docs/`, `doc/`, `documentation/` and `wiki/`, at any depth and in any case.
 
 After the analysis, one line names each folder skipped this way and why. To analyse one of them anyway, name it in `paths.include` of `audit.config.json`: `"include": [".", "docs/"]`. To skip more folders, list them in `paths.exclude`.
+
+### SBOM export
+
+An SBOM (software bill of materials) lists the third-party packages a project uses, in a standard format that security and compliance tools read. Add `--sbom` to an analysis:
+
+```bash
+./target/release/codefixture-audit scan /path/to/your/project --lang en --sbom
+```
+
+Besides the report, the engine writes `SCA-SBOM-<date>.json` into `audit-reports/audit-datas/` of your project and prints its path on the `SBOM :` line. The file follows CycloneDX 1.6, the OWASP format:
+
+- one component per dependency declared in `requirements.txt`, `package.json`, `pom.xml`, `build.gradle`, `.csproj` or `composer.json`, with its package URL (`pkg:pypi/requests@2.31.0`);
+- a version only when the manifest pins it exactly: a dependency declared with a range (`flask>=2.0`, `"lodash": "^4.17.0"`) or without a version is listed without one, since the installed version is not known;
+- no vulnerabilities, hashes or licenses: the vulnerabilities of pinned versions are in the HTML report.
+
+The file prefix `SCA` follows `brand.json` when you customise it.
 
 ### Moving the engine
 

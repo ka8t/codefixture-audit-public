@@ -229,8 +229,10 @@ pub fn find_vulnerable(deps: &[Dependency], db: &AdvisoryDb) -> Vec<VulnerableDe
 /// `dependencies.rs` keeps the lower bound of a range in `version`
 /// (mirroring Python), so exactness is read back from the manifest line:
 /// `==` for PyPI, a bare version for npm/Packagist. The Maven and NuGet
-/// parsers only fill `version` for a pinned value already.
-fn exact_version(dep: &Dependency) -> Option<&str> {
+/// parsers only fill `version` for a pinned value already. Shared by the
+/// version rules and the SBOM export (ticket #196), so both treat a range
+/// the same way.
+pub fn exact_version(dep: &Dependency) -> Option<&str> {
     let version = dep.version.as_deref()?;
     let exact = match dep.ecosystem.as_str() {
         "PyPI" => dep.raw_line.contains("==") && !version.contains('*'),

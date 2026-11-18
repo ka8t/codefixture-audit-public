@@ -36,6 +36,7 @@ Windows (PowerShell):
 
 - `--lang` sets the report language: `en`, `fr`, `es` or `de`.
 - When your project declares dependencies (`requirements.txt`, `package.json`, `pom.xml`, `composer.json`, `.csproj`…), their pinned versions are compared with the published vulnerabilities the rule pack carries, offline.
+- `--sbom` also writes a CycloneDX SBOM (software bill of materials) of the dependencies your project declares: see [SBOM export](INSTALLATION.md#sbom-export).
 - The first run on a project asks what to analyse and writes `audit.config.json`; run the same command again for the analysis.
 - The report is written into your project, under `audit-reports/`: the terminal prints its path on the `Report generated` line. Open it in a browser.
 
