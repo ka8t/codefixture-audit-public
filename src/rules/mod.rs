@@ -1,4 +1,4 @@
-//! Where rules come from (ADR-0040): the catalog pack `rules.scapack`
+//! Where rules come from (ADR-0040): the catalog pack `rules.cfpack`
 //! next to the binary (or `--rules <PATH>`). The rule sources themselves
 //! live in `rules/builtin` of the private repository.
 

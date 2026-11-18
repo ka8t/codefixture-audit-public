@@ -1,4 +1,4 @@
-//! Puts the rule catalog pack `rules.scapack` next to the compiled
+//! Puts the rule catalog pack `rules.cfpack` next to the compiled
 //! binary (ADR-0040): the engine reads its rules at run time from that
 //! file, so `cargo build`/`cargo run`/the CLI tests need it beside
 //! `target/<profile>/codefixture-audit`. No rule is embedded in the binary, and
@@ -7,7 +7,7 @@
 //! - In the private repository, `rules/builtin` holds the full catalog as
 //!   plain `.sca` files: they are compiled into the pack, encrypted with
 //!   the public demo key (`pack_format`). The demo rules are also
-//!   written apart as `rules-demo.scapack` (ticket #153): what the shared
+//!   written apart as `rules-demo.cfpack` (ticket #153): what the shared
 //!   repository receives. The full pack is handed out by hand.
 //! - Version rules (ADR-0043): the full pack carries the editor's advisory
 //!   database `advisories.sadb`, at the repository root (written by
@@ -16,7 +16,7 @@
 //!   copied into the pack as they are. Without them, the pack has no
 //!   version rules and the build says so.
 //! - In the shared repository there is no `.sca` file: the demo pack
-//!   `rules/rules.scapack`, written by `scripts/export_public_repo.sh`, is
+//!   `rules/rules.cfpack`, written by `scripts/export_public_repo.sh`, is
 //!   copied as it is.
 //!
 //! Also exports `CODEFIXTURE_AUDIT_BUILD_VERSION` (ticket #149).
@@ -90,7 +90,7 @@ fn export_build_version(manifest_dir: &str) {
     println!("cargo:rustc-env=CODEFIXTURE_AUDIT_BUILD_VERSION={version}");
 }
 
-/// Writes `rules.scapack` in the directory of the compiled binary.
+/// Writes `rules.cfpack` in the directory of the compiled binary.
 /// `OUT_DIR` is `<target>/<profile>/build/<crate>-<hash>/out`, so that
 /// directory is three levels up; it follows `CARGO_TARGET_DIR` and
 /// `--target` on its own. Writing outside `OUT_DIR` is unusual for a build
@@ -98,8 +98,8 @@ fn export_build_version(manifest_dir: &str) {
 /// does once copied elsewhere.
 ///
 /// Source: the `.sca` files of `rules/builtin` when there are any, else
-/// the committed `rules/rules.scapack`. With `.sca` files it also writes
-/// `rules-demo.scapack`, the demo rules only (ticket #153), and adds the
+/// the committed `rules/rules.cfpack`. With `.sca` files it also writes
+/// `rules-demo.cfpack`, the demo rules only (ticket #153), and adds the
 /// version rules of each pack when their file exists (ADR-0043). Neither is a build error: the
 /// binary then stops at the first scan and names the missing pack. The
 /// pack is deterministic (`pack_format::write_pack`), so a build with
@@ -132,7 +132,7 @@ fn write_catalog_pack(manifest_dir: &str, out_dir: &str) {
     if !files.is_empty() {
         let full_rules = version_rules(&full_versions, "full");
         let pack = pack_format::write_pack("builtin", &files, full_rules.as_deref());
-        fs::write(&dest, pack).expect("writing rules.scapack next to the binary");
+        fs::write(&dest, pack).expect("writing rules.cfpack next to the binary");
         let demo = pack_format::demo_sources(&files);
         if demo.is_empty() {
             let _ = fs::remove_file(&demo_dest);
@@ -143,13 +143,13 @@ fn write_catalog_pack(manifest_dir: &str, out_dir: &str) {
         } else {
             let demo_rules = version_rules(&demo_versions, "demo");
             let pack = pack_format::write_pack(pack_format::DEMO_PACK_NAME, &demo, demo_rules.as_deref());
-            fs::write(&demo_dest, pack).expect("writing rules-demo.scapack next to the binary");
+            fs::write(&demo_dest, pack).expect("writing rules-demo.cfpack next to the binary");
         }
         return;
     }
     let _ = fs::remove_file(&demo_dest);
     if committed.is_file() {
-        fs::copy(&committed, &dest).expect("copying rules/rules.scapack next to the binary");
+        fs::copy(&committed, &dest).expect("copying rules/rules.cfpack next to the binary");
     } else {
         println!(
             "cargo:warning=no rule found: neither .sca files in {} nor {}",

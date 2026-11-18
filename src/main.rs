@@ -257,7 +257,7 @@ const RULE_FOLDERS_ACCEPTED: bool = false;
 
 /// Catalog for `scan` and `list-rules` (ADR-0040): the `--rules` value
 /// (a pack file, or a folder holding at least one `.sca` file), else
-/// `rules.scapack` next to the executable. Anything else stops the
+/// `rules.cfpack` next to the executable. Anything else stops the
 /// command with exit code 2 and names the path searched, rather than
 /// running with no rule.
 fn resolve_rules_path(
@@ -660,7 +660,7 @@ mod tests {
         let say = |k: &str| codefixture_audit::i18n::t(&en, k);
         let (warning, line) = version_rules_line(
             &VersionRulesStatus::Read {
-                pack: PathBuf::from("/x/rules.scapack"),
+                pack: PathBuf::from("/x/rules.cfpack"),
                 created: "2026-11-11T00:00:00Z".into(),
                 counts: vec![("PyPI".into(), 12), ("npm".into(), 30)],
             },
@@ -668,7 +668,7 @@ mod tests {
         );
         assert!(!warning);
         assert!(
-            line.contains("/x/rules.scapack") && line.contains("2026-11-11") && line.contains("PyPI 12, npm 30") && line.contains("42"),
+            line.contains("/x/rules.cfpack") && line.contains("2026-11-11") && line.contains("PyPI 12, npm 30") && line.contains("42"),
             "{line}"
         );
         let (warning, line) = version_rules_line(&VersionRulesStatus::Missing, say);
@@ -767,7 +767,7 @@ mod tests {
             std::env::temp_dir().join(format!("sast_resolve_rules_{}", std::process::id()));
         let empty = parent.join("empty");
         std::fs::create_dir_all(&empty).unwrap();
-        let pack = parent.join("rules.scapack");
+        let pack = parent.join("rules.cfpack");
         std::fs::write(&pack, b"any file: opened at scan time").unwrap();
         let locale = codefixture_audit::i18n::load_script_locale("en");
 
@@ -1128,8 +1128,8 @@ enum Command {
     Scan {
         /// Path of the project to scan.
         path: PathBuf,
-        /// Rules: a rule pack (`*.scapack`), ADR-0040 — default:
-        /// `rules.scapack` next to the executable. Only the rules of the
+        /// Rules: a rule pack (`*.cfpack`), ADR-0040 — default:
+        /// `rules.cfpack` next to the executable. Only the rules of the
         /// project's languages are kept.
         #[arg(long)]
         rules: Option<PathBuf>,
@@ -1169,7 +1169,7 @@ enum Command {
         /// Display language (`en`/`fr`/`es`/`de`).
         #[arg(long, default_value = "en")]
         lang: String,
-        /// Rules: a rule pack — default: `rules.scapack` next to the
+        /// Rules: a rule pack — default: `rules.cfpack` next to the
         /// executable (same as `scan --rules`). Every language is listed.
         #[arg(long)]
         rules: Option<PathBuf>,
@@ -1560,7 +1560,7 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
             }
         };
     }
-    // ADR-0040: `--rules <PATH>`, else `rules.scapack` next to the
+    // ADR-0040: `--rules <PATH>`, else `rules.cfpack` next to the
     // executable. A missing pack or a folder without any `.sca` file would
     // scan with no rule at all, so it stops here with the path searched.
     let rules_path = match resolve_rules_path(rules, &script_locale) {

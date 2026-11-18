@@ -71,7 +71,7 @@ cargo build --release
 
 [`INSTALLATION.md`](INSTALLATION.md) takes you step by step from download to a full analysis of your own code: installing the tools, building the engine, describing your project, running the analysis, reading the report (your code, the proposed fix, the data-flow path) and analysing again after a fix.
 
-The sample rules come compiled into one file, `rules/rules.scapack`: the engine you build uses it at once, and the two can be moved anywhere together. Each scan keeps only the rules of the scanned project's languages: see [step 7](INSTALLATION.md#step-7-describe-your-project-first-run).
+The sample rules come compiled into one file, `rules/rules.cfpack`: the engine you build uses it at once, and the two can be moved anywhere together. Each scan keeps only the rules of the scanned project's languages: see [step 7](INSTALLATION.md#step-7-describe-your-project-first-run).
 
 ## Already installed?
 
@@ -82,7 +82,7 @@ git pull
 cargo build --release
 ```
 
-With the full rule catalog, copy `rules.scapack` next to the engine again afterwards: see [step 11](INSTALLATION.md#step-11-update-the-engine).
+With the full rule catalog, copy `rules.cfpack` next to the engine again afterwards: see [step 11](INSTALLATION.md#step-11-update-the-engine).
 
 ## Full rule catalog
 

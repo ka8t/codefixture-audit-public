@@ -86,7 +86,7 @@ cd codefixture-audit-public
 cargo build --release
 ```
 
-The first build downloads the Rust libraries the engine uses and compiles everything: 3 to 10 minutes depending on the machine. It ends with a `Finished` line. The engine is then `target/release/codefixture-audit` (`target\release\codefixture-audit.exe` on Windows), next to the rule pack `target/release/rules.scapack`.
+The first build downloads the Rust libraries the engine uses and compiles everything: 3 to 10 minutes depending on the machine. It ends with a `Finished` line. The engine is then `target/release/codefixture-audit` (`target\release\codefixture-audit.exe` on Windows), next to the rule pack `target/release/rules.cfpack`.
 
 ## Step 5: check the build
 
@@ -110,7 +110,7 @@ Every command below is run from the `codefixture-audit-public` folder, with the 
 
 ## Step 6: add the full catalog (optional)
 
-With the 38 demonstration rules, the analysis works at once but covers a small part of what the engine detects. A client of [CodeFixture](https://codefixture.com) receives one file, `rules.scapack`: the full catalog, more than 700 rules, and every published vulnerability (CVE, GHSA) of the five ecosystems, against which your dependencies are checked.
+With the 38 demonstration rules, the analysis works at once but covers a small part of what the engine detects. A client of [CodeFixture](https://codefixture.com) receives one file, `rules.cfpack`: the full catalog, more than 700 rules, and every published vulnerability (CVE, GHSA) of the five ecosystems, against which your dependencies are checked.
 
 Keep it in a folder of its own, outside `codefixture-audit-public`, so that updates (step 11) never meet a modified file. Then copy it next to the engine.
 
@@ -118,8 +118,8 @@ macOS:
 
 ```bash
 mkdir -p ~/codefixture-audit-rules
-cp ~/Downloads/rules.scapack ~/codefixture-audit-rules/
-cp ~/codefixture-audit-rules/rules.scapack target/release/
+cp ~/Downloads/rules.cfpack ~/codefixture-audit-rules/
+cp ~/codefixture-audit-rules/rules.cfpack target/release/
 ./target/release/codefixture-audit list-rules | head -1
 ```
 
@@ -127,12 +127,12 @@ Windows:
 
 ```powershell
 mkdir ~\codefixture-audit-rules
-copy ~\Downloads\rules.scapack ~\codefixture-audit-rules\
-copy ~\codefixture-audit-rules\rules.scapack target\release\
+copy ~\Downloads\rules.cfpack ~\codefixture-audit-rules\
+copy ~\codefixture-audit-rules\rules.cfpack target\release\
 .\target\release\codefixture-audit.exe list-rules | Select-Object -First 1
 ```
 
-`list-rules` must now print more than 700 rules. Each build (steps 4 and 11) puts the demonstration pack back next to the engine: copy the full pack again after every build. Instead of copying the rules, you can also add `--rules ~/codefixture-audit-rules/rules.scapack` to each analysis.
+`list-rules` must now print more than 700 rules. Each build (steps 4 and 11) puts the demonstration pack back next to the engine: copy the full pack again after every build. Instead of copying the rules, you can also add `--rules ~/codefixture-audit-rules/rules.cfpack` to each analysis.
 
 ## Step 7: describe your project (first run)
 
@@ -195,7 +195,7 @@ The terminal first shows what was loaded, then the progress and a summary:
 [codefixture-audit] codefixture-audit 0.1.0+42.c5be809
 [codefixture-audit] Scope (audit.config.json): include src/; exclude 7 default patterns
 [codefixture-audit] Analysis in progress...
-[codefixture-audit] Rules: 166/708 rule file(s) kept for the project's languages, from the pack /…/target/release/rules.scapack
+[codefixture-audit] Rules: 166/708 rule file(s) kept for the project's languages, from the pack /…/target/release/rules.cfpack
 [codefixture-audit] 166 rule(s) loaded for languages: dockerfile, python
 …
 [codefixture-audit] Report generated : /path/to/your/project/audit-reports/SCA-REPORT-2026-11-14-09-47.html
@@ -259,7 +259,7 @@ git pull
 cargo build --release
 ```
 
-`git pull` downloads only the new commits; `cargo build --release` rebuilds the engine, faster than the first time. Check with `--version`: the commit count must have grown. With the full catalog, copy `rules.scapack` next to the engine again (step 6). Ask CodeFixture for a new pack from time to time: published vulnerabilities keep coming, and the pack knows those of the day it was built.
+`git pull` downloads only the new commits; `cargo build --release` rebuilds the engine, faster than the first time. Check with `--version`: the commit count must have grown. With the full catalog, copy `rules.cfpack` next to the engine again (step 6). Ask CodeFixture for a new pack from time to time: published vulnerabilities keep coming, and the pack knows those of the day it was built.
 
 If `git pull` refuses because of local changes, `git stash` sets them aside and `git pull` then works (`git stash pop` brings them back). To match GitHub exactly and drop your local edits for good: `git fetch origin` then `git reset --hard origin/main`.
 
@@ -293,7 +293,7 @@ The file prefix `SCA` follows `brand.json` when you customise it.
 
 ### Moving the engine
 
-The engine and `rules.scapack` are all an analysis needs: copy them together to another folder and run the engine from anywhere. Without the pack beside it, the engine stops and names the file it looked for.
+The engine and `rules.cfpack` are all an analysis needs: copy them together to another folder and run the engine from anywhere. Without the pack beside it, the engine stops and names the file it looked for.
 
 ### When something goes wrong
 
@@ -301,7 +301,7 @@ The engine and `rules.scapack` are all an analysis needs: copy them together to 
 |---|---|
 | `cargo: command not found` | close and reopen the terminal (step 2); on Windows, restart the session |
 | `linker 'link.exe' not found` (Windows) | the C++ build tools are missing: run the third `winget` line of step 2 |
-| the engine stops and names a missing `rules.scapack` | run `cargo build --release` again, or copy the pack next to the engine (step 6) |
+| the engine stops and names a missing `rules.cfpack` | run `cargo build --release` again, or copy the pack next to the engine (step 6) |
 | dependencies are never checked | the project declares none in a file the engine reads (`requirements.txt`, `package.json`, `pom.xml`, `composer.json`, `.csproj`…), or `--quick` was given |
 | a language of your project is never checked | add it to `languages` in `audit.config.json` (step 7) |
 | `git pull` refuses | see the end of step 11 |

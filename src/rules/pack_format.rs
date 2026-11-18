@@ -1,11 +1,11 @@
 //! Rule pack file format (ADR-0037, simplified by ADR-0040, version
 //! rules added by ADR-0043): how a catalog travels as one file,
-//! `rules.scapack`, and is opened at run time.
+//! `rules.cfpack`, and is opened at run time.
 //!
-//! Layout of a `.scapack` file (format 2):
+//! Layout of a `.cfpack` file (format 2):
 //!
 //! ```text
-//! b"SCAPACK2" | header length (u32, little endian) | header (JSON)
+//! b"CFPACK02" | header length (u32, little endian) | header (JSON)
 //!             | rules section | version rules section (optional)
 //! ```
 //!
@@ -32,8 +32,11 @@
 //!   the same file, so an unchanged catalog leaves the shared repository
 //!   unchanged.
 //!
-//! Format 1 (`SCAPACK1`, rules only) is refused with a message saying to
-//! rebuild the pack: a binary and its pack are always delivered together.
+//! Packs of the former `.scapack` name (magic `SCAPACK1`, format 1 with
+//! rules only, or `SCAPACK2`, the same layout as format 2) are refused
+//! with a message saying to get or build a new pack (ADR-0049): a binary
+//! and its pack are always delivered together, so no reader is kept for
+//! a name the engine no longer writes.
 //!
 //! The demo key is written in the source: the encryption only keeps the
 //! rules from being copied as they are, it protects nothing (ADR-0040).
@@ -49,16 +52,16 @@ use sha2::{Digest, Sha256};
 use super::rules_crypto;
 
 /// File extension of a rule pack, without the dot.
-pub const PACK_EXTENSION: &str = "scapack";
+pub const PACK_EXTENSION: &str = "cfpack";
 
 /// File name of the catalog pack, next to the binary (ADR-0040).
-pub const PACK_FILE_NAME: &str = "rules.scapack";
+pub const PACK_FILE_NAME: &str = "rules.cfpack";
 
 /// File name of the demo pack a private-repository build writes next to
 /// the binary, beside the full one (ticket #153). The export script
 /// delivers the same content as the shared repository's
-/// `rules/rules.scapack`; the binary itself never reads this file.
-pub const DEMO_PACK_FILE_NAME: &str = "rules-demo.scapack";
+/// `rules/rules.cfpack`; the binary itself never reads this file.
+pub const DEMO_PACK_FILE_NAME: &str = "rules-demo.cfpack";
 
 /// Name stored in the header of the demo pack.
 pub const DEMO_PACK_NAME: &str = "demo";
@@ -75,10 +78,13 @@ pub const DEMO_VERSION_RULES_FILE: &str = "advisories/demo.sadb";
 
 /// Magic bytes at the start of every pack, version included: a future
 /// incompatible layout gets a new magic rather than a guess.
-const MAGIC: &[u8; 8] = b"SCAPACK2";
+const MAGIC: &[u8; 8] = b"CFPACK02";
 
-/// Magic of format 1 (ADR-0040, rules only), recognised to name it.
-const MAGIC_V1: &[u8; 8] = b"SCAPACK1";
+/// Magics of the packs written before the rename to `.cfpack`
+/// (ADR-0049): `SCAPACK1` (format 1, ADR-0040, rules only) and
+/// `SCAPACK2` (format 2, ADR-0043). Recognised only to name them in the
+/// refusal, never read.
+const LEGACY_MAGICS: [&[u8; 8]; 2] = [b"SCAPACK1", b"SCAPACK2"];
 
 /// Version written in the header's `format` field.
 const FORMAT_VERSION: u64 = 2;
@@ -172,7 +178,7 @@ pub fn write_pack_with_key(
     // orders keys by insertion or alphabetically depending on the
     // `preserve_order` feature, which differs between `build.rs` and the
     // binary (ticket #153). The bytes must not depend on it: the build's
-    // `rules-demo.scapack` and `rules pack --demo` must be identical.
+    // `rules-demo.cfpack` and `rules pack --demo` must be identical.
     let header_bytes = format!(
         "{{\"format\":{FORMAT_VERSION},\"key_fingerprint\":{},\"name\":{},\"rule_files\":{},\"rules_bytes\":{rules_bytes},\"version_rules_bytes\":{version_rules_bytes}}}",
         serde_json::Value::from(key_fingerprint(key)),
@@ -228,8 +234,11 @@ struct PackParts<'a> {
 /// first bytes of a pack are needed, so a scan can tell whether a pack
 /// carries version rules without reading or decrypting it.
 fn parse_header(bytes: &[u8]) -> Result<(PackHeader, usize), String> {
-    if bytes.starts_with(MAGIC_V1) {
-        return Err("rule pack in format 1, which this engine no longer reads: rebuild it (ADR-0043)".to_string());
+    if LEGACY_MAGICS.iter().any(|magic| bytes.starts_with(magic.as_slice())) {
+        return Err(
+            "rule pack in the former .scapack format, which this engine no longer reads: use a .cfpack pack built for this engine"
+                .to_string(),
+        );
     }
     let rest = bytes
         .strip_prefix(MAGIC.as_slice())
@@ -412,7 +421,7 @@ pub fn is_demo_rule(source: &str) -> bool {
 
 /// The demo rules of a catalog (ticket #153): the only selection of what
 /// the shared repository receives, used by `build.rs` for
-/// `rules-demo.scapack` and by `codefixture-audit rules pack --demo` for the
+/// `rules-demo.cfpack` and by `codefixture-audit rules pack --demo` for the
 /// export, so both give the same pack byte for byte.
 pub fn demo_sources(files: &[RuleSource]) -> Vec<RuleSource> {
     files
@@ -554,16 +563,25 @@ mod tests {
         assert!(open_pack(&bytes).unwrap_err().contains("corrupt"));
     }
 
-    /// A pack of format 1 (ADR-0040, signed ones of ADR-0037 included)
-    /// is refused by name, with the way out.
+    /// A pack of the former `.scapack` name, format 1 (ADR-0040, signed
+    /// ones of ADR-0037 included) or format 2 (ADR-0043), is refused by
+    /// name, with the way out (ADR-0049).
     #[test]
-    fn test_format_1_pack_is_refused_with_a_clear_reason() {
-        let header = br#"{"format":1,"name":"x","key_fingerprint":"0","rule_files":0}"#;
-        let mut bytes = MAGIC_V1.to_vec();
-        bytes.extend_from_slice(&(header.len() as u32).to_le_bytes());
-        bytes.extend_from_slice(header);
-        let err = read_header(&bytes).unwrap_err();
-        assert!(err.contains("format 1") && err.contains("rebuild"), "{err}");
+    fn test_legacy_scapack_pack_is_refused_with_a_clear_reason() {
+        for (magic, format) in LEGACY_MAGICS.iter().zip([1, 2]) {
+            let header = format!(r#"{{"format":{format},"name":"x","key_fingerprint":"0","rule_files":0}}"#);
+            let mut bytes = magic.to_vec();
+            bytes.extend_from_slice(&(header.len() as u32).to_le_bytes());
+            bytes.extend_from_slice(header.as_bytes());
+            let err = read_header(&bytes).unwrap_err();
+            assert!(err.contains(".scapack") && err.contains(".cfpack"), "{err}");
+        }
+    }
+
+    /// The pack written today starts with the `.cfpack` magic.
+    #[test]
+    fn test_pack_starts_with_the_cfpack_magic() {
+        assert!(write_pack("demo", &sample(), None).starts_with(b"CFPACK02"));
     }
 
     /// Ticket #153: the header bytes are fixed (alphabetical keys, no

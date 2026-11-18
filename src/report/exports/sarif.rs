@@ -82,7 +82,7 @@ pub struct ReportFinding {
     /// implemented on the codefixture-audit side).
     pub committer: Option<String>,
     /// Where the rule comes from: "json_builtin" (the catalog,
-    /// `rules.scapack` next to the executable or `--rules <PATH>`), "json_custom"
+    /// `rules.cfpack` next to the executable or `--rules <PATH>`), "json_custom"
     /// (the client's own rules, custom rules folder), "advisory_db"
     /// (vulnerable dependency).
     pub rule_source: String,

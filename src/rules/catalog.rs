@@ -1,7 +1,7 @@
 //! The rule catalog, read at run time (ADR-0040). A scan reads one rule
 //! source:
 //!
-//! - **the catalog pack** `rules.scapack` next to the running executable
+//! - **the catalog pack** `rules.cfpack` next to the running executable
 //!   (the default): every rule file of the catalog in one file, encrypted
 //!   with the public demo key (`pack_format`). `build.rs` writes it, from
 //!   `rules/builtin` in the private repository (full catalog) or from the
@@ -62,7 +62,7 @@ impl RuleOrigin {
 /// Kind of a rule source: one pack file, or a folder of `.sca` files.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuleSourceKind {
-    /// A `.scapack` file.
+    /// A `.cfpack` file.
     Pack,
     /// A folder of plain `.sca` files.
     Folder,
@@ -126,7 +126,7 @@ impl LoadedRules {
     }
 }
 
-/// Default catalog: `rules.scapack` in the folder of the running
+/// Default catalog: `rules.cfpack` in the folder of the running
 /// executable, whatever the current folder (ADR-0040). `None` only if the
 /// executable path is unknown.
 pub fn default_pack_path() -> Option<PathBuf> {
@@ -734,7 +734,7 @@ mod tests {
         assert!(
             loaded.files[0]
                 .source_name
-                .ends_with("rules.scapack:python/security/p.sca")
+                .ends_with("rules.cfpack:python/security/p.sca")
         );
         assert!(errors.is_empty(), "{errors:?}");
         assert_eq!(rules.len(), 1);
@@ -750,12 +750,12 @@ mod tests {
         let mut corrupt = pack_format::write_pack("builtin", &files, None);
         let last = corrupt.len() - 1;
         corrupt[last] ^= 0xFF;
-        std::fs::write(dir.join("corrupt.scapack"), corrupt).unwrap();
+        std::fs::write(dir.join("corrupt.cfpack"), corrupt).unwrap();
         let foreign = pack_format::write_pack_with_key("client", &files, None, &[9u8; 32]);
-        std::fs::write(dir.join("client.scapack"), foreign).unwrap();
+        std::fs::write(dir.join("client.cfpack"), foreign).unwrap();
         let python = langs(&["python"]);
 
-        let reasons: Vec<String> = ["corrupt.scapack", "client.scapack", "missing.scapack"]
+        let reasons: Vec<String> = ["corrupt.cfpack", "client.cfpack", "missing.cfpack"]
             .iter()
             .map(|name| {
                 let loaded = load_rules(&dir.join(name), &python, RuleOrigin::Builtin);

@@ -307,7 +307,7 @@ pub struct ScanConfig {
     /// even if they aren't explicitly excluded by
     /// `exclude_patterns` — cf. `project_config.rs`.
     pub include_paths: Vec<String>,
-    /// Catalog (ADR-0040): the pack `rules.scapack` next to the executable
+    /// Catalog (ADR-0040): the pack `rules.cfpack` next to the executable
     /// for the CLI, or `--rules <PATH>`, a pack or a folder of plain
     /// `.sca` files laid out by language (`<language>/<category>/<rule>.sca`).
     /// Only the rule files of `target_languages` are kept (`rules::catalog`).
@@ -2728,7 +2728,7 @@ mod tests {
             }],
         )
         .unwrap();
-        let pack = root.join("rules.scapack");
+        let pack = root.join("rules.cfpack");
         std::fs::write(
             &pack,
             crate::rules::pack_format::write_pack("test", &[], Some(&container)),
