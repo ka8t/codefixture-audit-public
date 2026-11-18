@@ -1,6 +1,6 @@
 {
   "version": "1.0",
-  "tool": "StaticCodeAudit",
+  "tool": "codefixture-audit",
   "tool_version": "1.4.0",
   "description": "Remediation playbook — structured steps for each detection rule. Readable by humans and machines.",
   "total_rules": 560,

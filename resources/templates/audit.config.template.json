@@ -6,7 +6,7 @@
     "_comment_logo": "Logo du client (SVG, PNG, JPG) — chemin relatif au projet ou absolu. Remplace le favicon et le logo header du rapport.",
     "_comment_colors": "Couleurs du header du rapport (format #rrggbb). primary_color = début du gradient, accent_color = fin.",
     "_comment_website_url": "URL affichée dans les exports SARIF (informationUri). Si null, utilise https://codefixture.com.",
-    "tool_name": "StaticCodeAudit",
+    "tool_name": "codefixture-audit",
     "company_name": "CodeFixture",
     "prefix": "SCA",
     "logo": null,

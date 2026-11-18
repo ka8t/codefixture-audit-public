@@ -503,7 +503,7 @@
       "sca": {
         "term": "SCA",
         "full": "Static Code Audit",
-        "desc": "Abréviation de StaticCodeAudit, l'outil ayant généré ce rapport."
+        "desc": "Préfixe des fichiers du rapport (SCA-REPORT…). codefixture-audit, l'outil qui a généré ce rapport, l'utilise par défaut."
       },
       "sarif": {
         "term": "SARIF",

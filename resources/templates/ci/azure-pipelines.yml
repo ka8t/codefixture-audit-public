@@ -1,4 +1,4 @@
-# StaticCodeAudit — Azure DevOps pipeline
+# codefixture-audit — Azure DevOps pipeline
 # Copier ce fichier dans azure-pipelines.yml de votre projet
 #
 # Prérequis :

@@ -1,4 +1,4 @@
-# StaticCodeAudit — GitLab CI configuration
+# codefixture-audit — GitLab CI configuration
 # Copier ce bloc dans le .gitlab-ci.yml de votre projet
 #
 # Prérequis :

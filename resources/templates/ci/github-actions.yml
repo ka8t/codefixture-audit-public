@@ -1,4 +1,4 @@
-# StaticCodeAudit — GitHub Actions workflow
+# codefixture-audit — GitHub Actions workflow
 # Copier ce fichier dans .github/workflows/sca-audit.yml de votre projet
 #
 # Prérequis :
@@ -21,7 +21,7 @@ env:
 
 jobs:
   audit:
-    name: Static Code Audit
+    name: codefixture-audit
     runs-on: ubuntu-latest
     permissions:
       security-events: write  # Pour upload SARIF dans Security tab
