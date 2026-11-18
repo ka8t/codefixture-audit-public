@@ -2029,6 +2029,7 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
                 total_files_scanned: report.files_scanned,
                 health_thresholds: HealthThresholds::default(),
                 rule_catalog: &report.rule_catalog,
+                history: &report.history,
             };
             let audit_params_info = codefixture_audit::report::audit_params::AuditParamsInfo {
                 languages: report.languages.clone(),

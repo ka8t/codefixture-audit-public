@@ -79,12 +79,12 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 /* Audit Parameters Summary */
 .audit-params { background: white; border-radius: 8px; padding: 1.25rem 1.5rem; margin-bottom: 1.5rem; box-shadow: 0 1px 3px rgba(0,0,0,0.1); border-left: 4px solid #6366f1; }
 .audit-params h3 { font-size: 1rem; margin-bottom: 0.75rem; color: var(--gray-800); }
-.params-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 0.5rem 1.5rem; }
-.param-item { display: flex; align-items: baseline; gap: 0.5rem; font-size: 0.85rem; padding: 0.25rem 0; }
+.params-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(280px, 100%), 1fr)); gap: 0.5rem 1.5rem; }
+.param-item { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.25rem 0.5rem; font-size: 0.85rem; padding: 0.25rem 0; min-width: 0; }
 .param-item.param-full { grid-column: 1 / -1; }
 .param-label { color: var(--gray-600); white-space: nowrap; min-width: 120px; }
 .param-label::after { content: ":"; }
-.param-value { color: var(--gray-800); }
+.param-value { flex: 1 1 12rem; color: var(--gray-800); min-width: 0; overflow-wrap: anywhere; }
 .param-value code { background: var(--gray-100); padding: 0.15rem 0.4rem; border-radius: 3px; font-family: monospace; font-size: 0.8rem; }
 .param-value em { color: var(--gray-600); font-style: italic; }
 .cat-badge { display: inline-block; padding: 0.2rem 0.5rem; border-radius: 4px; font-size: 0.75rem; margin-right: 0.25rem; margin-bottom: 0.25rem; }
@@ -92,15 +92,15 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .cat-badge.disabled { background: #fde8e8; color: var(--danger); text-decoration: line-through; }
 
 /* CLI Options Checklist */
-.options-checklist { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 0.4rem; }
-.option-item { display: flex; align-items: baseline; gap: 0.5rem; font-size: 0.85rem; padding: 0.35rem 0.6rem; border-radius: 4px; background: var(--gray-50); }
+.options-checklist { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(420px, 100%), 1fr)); gap: 0.4rem; }
+.option-item { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.25rem 0.5rem; font-size: 0.85rem; padding: 0.35rem 0.6rem; border-radius: 4px; background: var(--gray-50); min-width: 0; }
 .option-item.active { background: #d4edda; }
 .option-item.inactive { background: var(--gray-50); opacity: 0.7; }
 .option-check { font-size: 0.9rem; flex-shrink: 0; width: 1.2rem; text-align: center; }
 .option-flag { flex-shrink: 0; }
 .option-flag code { background: var(--gray-100); padding: 0.15rem 0.4rem; border-radius: 3px; font-family: monospace; font-size: 0.8rem; }
 .option-item.active .option-flag code { background: rgba(21, 87, 36, 0.1); }
-.option-desc { color: var(--gray-600); font-size: 0.8rem; }
+.option-desc { flex: 1 1 12rem; color: var(--gray-600); font-size: 0.8rem; min-width: 0; overflow-wrap: anywhere; }
 
 /* Stats */
 .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 1rem; margin-bottom: 2rem; }
@@ -329,6 +329,8 @@ a.glossary-link[data-tooltip]:hover::before { content: ''; position: absolute; b
    largeur de la colonne, provoquant un rognage des libellés d'axe longs
    (ex. "Architecture et Patterns"), cf. RETEX Franck R10 */
 .chart-container { position: relative; height: 250px; min-width: 0; }
+/* Chart card with nothing to draw yet (trend chart on a first audit) */
+.chart-empty { display: flex; align-items: center; justify-content: center; height: 100%; padding: 0 1rem; text-align: center; color: var(--gray-600); font-size: 0.9rem; }
 .chart-container canvas { max-height: 250px; }
 
 /* Heatmap — Top 10 fichiers */
@@ -603,6 +605,8 @@ body.print-mode .keyboard-hint { display: none !important; }
 .glossary-term { white-space: nowrap; width: 8%; font-family: var(--mono); }
 .glossary-full { width: 30%; color: var(--gray-600); }
 .glossary-desc { width: 62%; }
+/* Phone width: three columns do not fit, each term becomes a block */
+@media (max-width: 600px) { .glossary-table thead { display: none; } .glossary-table tr { display: block; padding: 0.4rem 0; border-bottom: 1px solid var(--gray-200); } .glossary-table td { display: block; width: auto; padding: 0.1rem 0.75rem; border-bottom: none; overflow-wrap: anywhere; } .glossary-term { white-space: normal; font-weight: 600; } }
 
 /* Compliance Matrix (ISO 27001) */
 .compliance-summary { background: white; border-radius: 8px; padding: 1.5rem; margin-bottom: 1.5rem; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }

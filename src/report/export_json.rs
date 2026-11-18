@@ -115,16 +115,42 @@ pub fn load_export(path: &Path) -> Result<ExportData, String> {
     serde_json::from_str(&content).map_err(|e| e.to_string())
 }
 
-/// History of the last N scans (findings/totals only, for a future
-/// trend chart) — simplified port of `_load_history` (no aggregated
-/// tests/DB data, `testing.py`/`database.py` are not yet wired into
-/// the export).
-pub fn load_history(datas_dir: &Path, prefix: &str, max_history: usize) -> Vec<ExportData> {
+/// Number of scans the trend chart shows — Python's default
+/// `reports.max_history` (`_load_history`). The `reports` section of
+/// `audit.config.json` is not supported on the Rust side
+/// (`project_config::UNSUPPORTED_CONFIG_SECTIONS`), so this is fixed.
+pub const MAX_HISTORY: usize = 10;
+
+/// One past scan as the trend chart needs it: when it ran and how many
+/// findings of each severity it had.
+///
+/// Deserialized from an export file, whose other fields (`findings`
+/// above all, up to several megabytes per scan) serde skips without
+/// building them: reading ten past scans stays cheap.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct HistoryPoint {
+    /// `YYYY-MM-DD-HH-MM`, as written by the scan.
+    pub timestamp: String,
+    /// Findings per severity (`HIGH`, `MEDIUM`, …).
+    pub totals: BTreeMap<String, usize>,
+}
+
+/// History of the last `max_history` scans, oldest first, for the trend
+/// chart — port of `_load_history` (`Audit/sca/comparison.py`).
+///
+/// Python also reads each scan's tests and database statistics; the
+/// Rust export carries neither, so the chart's tests and database series
+/// are zeros (`html::build_chart_data`). An unreadable or invalid file is
+/// skipped, as in Python (`except Exception: continue`).
+pub fn load_history(datas_dir: &Path, prefix: &str, max_history: usize) -> Vec<HistoryPoint> {
     let files = list_data_files(datas_dir, prefix);
     let start = files.len().saturating_sub(max_history);
     files[start..]
         .iter()
-        .filter_map(|p| load_export(p).ok())
+        .filter_map(|p| {
+            let content = std::fs::read_to_string(p).ok()?;
+            serde_json::from_str(&content).ok()
+        })
         .collect()
 }
 
@@ -232,6 +258,22 @@ mod tests {
         assert_eq!(history[0].timestamp, "20260103_000000");
         assert_eq!(history[1].timestamp, "20260104_000000");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Each point carries the totals of its scan, and a file that is not
+    /// a valid export is skipped instead of emptying the history.
+    #[test]
+    fn test_load_history_reads_totals_and_skips_invalid_files() {
+        let dir = tmp_dir("history-totals");
+        let data = build_export_data(&[finding("HIGH", "a.py")], "2026-11-18-09-18", "2026", None);
+        write_export(&dir, "SCA", &data).unwrap();
+        std::fs::write(dir.join("SCA-DATA-2026-11-18-10-00.json"), "{not json").unwrap();
+        let history = load_history(&dir, "SCA", MAX_HISTORY);
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].timestamp, "2026-11-18-09-18");
+        assert_eq!(history[0].totals.get("HIGH"), Some(&1));
+        assert_eq!(history[0].totals.get("MEDIUM"), Some(&0));
     }
 
     #[test]

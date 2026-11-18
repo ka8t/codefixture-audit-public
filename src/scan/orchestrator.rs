@@ -588,6 +588,10 @@ pub struct ScanReport {
     pub comparison: Option<crate::report::comparison::ComparisonResult>,
     /// Path of the JSON export written for this scan, if `datas_dir` was configured.
     pub export_path: Option<PathBuf>,
+    /// The last scans of `datas_dir`, this one included, oldest first:
+    /// the points of the report's trend chart (`export_json::load_history`).
+    /// Empty when `datas_dir` is not configured.
+    pub history: Vec<crate::report::export_json::HistoryPoint>,
     /// Languages actually encountered among the scanned files
     /// (`SourceLanguage::rule_tag()`, e.g. "python"/"java"), sorted and
     /// deduplicated — feeds the "audit settings" section of the
@@ -1997,6 +2001,7 @@ pub fn run_scan(config: &ScanConfig) -> ScanReport {
     // --- Comparison against baseline + JSON export -----------------------------
     let mut comparison = None;
     let mut export_path = None;
+    let mut history = Vec::new();
     if let Some(datas_dir) = &config.datas_dir {
         if let Some(baseline_path) = find_baseline(config)
             && let Ok(baseline) = crate::report::export_json::load_export(&baseline_path)
@@ -2022,6 +2027,16 @@ pub fn run_scan(config: &ScanConfig) -> ScanReport {
         export_path =
             crate::report::export_json::write_export(datas_dir, &config.brand_prefix, &export_data)
                 .ok();
+        // Read after the export is written, as Python does
+        // (`runner.py`: `_export_json` then `_generate_report`): the
+        // chart's last point is this scan. Only `datas_dir`, not the
+        // legacy directory used for the comparison (ticket #133): the
+        // chart starts again with the scans made since the move.
+        history = crate::report::export_json::load_history(
+            datas_dir,
+            &config.brand_prefix,
+            crate::report::export_json::MAX_HISTORY,
+        );
     }
 
     let languages: Vec<String> = files_per_language(&parsed_files)
@@ -2050,6 +2065,7 @@ pub fn run_scan(config: &ScanConfig) -> ScanReport {
         database_stats,
         comparison,
         export_path,
+        history,
         languages,
         phase_timings,
         cache_stats,

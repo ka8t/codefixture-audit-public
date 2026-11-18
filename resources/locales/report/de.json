@@ -277,6 +277,7 @@
     "health_penalty": "Abzug",
     "health_severity_chart": "Abzüge nach Schweregrad (nur Sicherheitsbefunde)",
     "findings_by_lang_severity": "Findings nach Sprache und Schweregrad",
+    "history_needs_two_audits": "Der Verlauf erscheint ab dem zweiten Audit dieses Projekts.",
     "nist_coverage": "Abdeckung",
     "nist_covered": "Abgedeckt",
     "nist_findings": "Mit Findings",

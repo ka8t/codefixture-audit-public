@@ -36,6 +36,7 @@ use crate::report::compliance_html::{
     HealthThresholds, generate_asvs_html, generate_compliance_html, generate_nist_csf_html,
 };
 use crate::report::data::{ReportData, compute_report_data};
+use crate::report::export_json::HistoryPoint;
 use crate::report::exports::sarif::ReportFinding;
 use crate::report::findings_html::render_severity_section;
 use crate::report::report_assets::{
@@ -67,6 +68,10 @@ pub struct ReportContext<'a> {
     pub total_files_scanned: usize,
     pub health_thresholds: HealthThresholds,
     pub rule_catalog: &'a RuleCatalog,
+    /// Past scans of the project, this one included, oldest first: the
+    /// points of the trend chart (`ScanReport::history`). Empty without
+    /// a history directory.
+    pub history: &'a [HistoryPoint],
 }
 
 fn category_severity_matrix(
@@ -237,12 +242,55 @@ struct ComplianceResults<'a> {
     score: f64,
 }
 
+/// X-axis label of one past scan: `DD/MM HH:MM` from a `YYYY-MM-DD-HH-MM`
+/// timestamp, the timestamp itself when it has another shape.
+///
+/// Deviation from Python (`report.py`, history loop), which keeps only
+/// `DD/MM`: several scans of one day then share a label, and the chart
+/// cannot tell them apart. The time keeps each point distinct.
+fn history_label(timestamp: &str) -> String {
+    let parts: Vec<&str> = timestamp.split('-').collect();
+    match parts.as_slice() {
+        [_, month, day, hour, minute, ..] => format!("{day}/{month} {hour}:{minute}"),
+        [_, month, day] => format!("{day}/{month}"),
+        _ => timestamp.to_string(),
+    }
+}
+
+/// The `history` series of the chart data — port of the history loop of
+/// `_generate_html` (`Audit/sca/report.py`): one entry per past scan in
+/// each series. The tests and database series are zeros, the Rust export
+/// carries neither (`export_json::load_history`); their charts only draw
+/// when those features ran.
+fn history_chart_data(history: &[HistoryPoint]) -> Value {
+    let total = |severity: &str| -> Vec<usize> {
+        history
+            .iter()
+            .map(|h| h.totals.get(severity).copied().unwrap_or(0))
+            .collect()
+    };
+    let zeros = vec![0; history.len()];
+    json!({
+        "labels": history.iter().map(|h| history_label(&h.timestamp)).collect::<Vec<_>>(),
+        "high": total("HIGH"),
+        "medium": total("MEDIUM"),
+        "low": total("LOW"),
+        "testsRate": zeros,
+        "testsPassed": zeros,
+        "testsFailed": zeros,
+        "dbTables": zeros,
+        "dbColumns": zeros,
+        "dbChanges": zeros,
+    })
+}
+
 fn build_chart_data(
     report_locale: &Value,
     data: &ReportData,
     findings: &[ReportFinding],
     rule_catalog: &RuleCatalog,
     compliance: &ComplianceResults,
+    history: &[HistoryPoint],
 ) -> Value {
     let (compliance, asvs, nist, compliance_score) = (
         compliance.iso27001,
@@ -302,7 +350,7 @@ fn build_chart_data(
         "complianceScore": {"enabled": true, "score": compliance_score, "standards": standards},
         "healthPenalty": data.total_penalty,
         "healthSeverity": health_severity,
-        "history": {"labels": [], "high": [], "medium": [], "low": [], "testsRate": [], "testsPassed": [], "testsFailed": [], "dbTables": [], "dbColumns": [], "dbChanges": []},
+        "history": history_chart_data(history),
         "i18n": chart_i18n_labels(report_locale),
         "taint": taint_chart_data(findings, rule_catalog),
         "languageSeverity": language_severity_data(findings),
@@ -366,7 +414,7 @@ const CHART_LABEL_KEYS: [(&str, &str); 46] = [
     ("asvsFindings", "asvs_findings"),
     ("asvsNotCovered", "asvs_not_covered"),
 ];
-const CHART_LABEL_KEYS_2: [(&str, &str); 11] = [
+const CHART_LABEL_KEYS_2: [(&str, &str); 12] = [
     ("asvsCoverageChart", "asvs_coverage_chart"),
     ("asvsChapterChart", "asvs_chapter_chart"),
     ("asvsStatusChart", "asvs_status_chart"),
@@ -378,6 +426,7 @@ const CHART_LABEL_KEYS_2: [(&str, &str); 11] = [
     ("nistFunctionChart", "nist_function_chart"),
     ("nistStatusChart", "nist_status_chart"),
     ("findingsByLangSeverity", "findings_by_lang_severity"),
+    ("historyNeedsTwoAudits", "history_needs_two_audits"),
 ];
 
 fn chart_i18n_labels(v: &Value) -> Value {
@@ -560,6 +609,7 @@ pub fn generate_html(
         findings,
         ctx.rule_catalog,
         &compliance_results,
+        ctx.history,
     );
     let charts_js = load_asset("charts.js").replace("{{CHART_DATA}}", &chart_data.to_string());
 
@@ -719,12 +769,18 @@ pub fn generate_html(
     html = html.replace("{{timestamp}}", &ctx.timestamp);
     html = html.replace("{{project_version}}", &escape(&ctx.project_version));
     html = html.replace("{{tool_version}}", &escape(&ctx.tool_version));
-    let project_version_display = if ctx.project_version.is_empty() {
-        String::new()
+    // The project version is optional (never set by the CLI today): an
+    // empty one leaves no "v" behind, in the header as in the footer.
+    // Deviation from Python, whose header always writes `• v{version}`
+    // and showed a lone "• v" for a project without version.
+    let (project_version_display, project_version_meta) = if ctx.project_version.is_empty() {
+        (String::new(), String::new())
     } else {
-        format!("v{} ", ctx.project_version)
+        let version = escape(&ctx.project_version);
+        (format!("v{version} "), format!("• v{version} "))
     };
     html = html.replace("{{project_version_display}}", &project_version_display);
+    html = html.replace("{{project_version_meta}}", &project_version_meta);
     html = html.replace("{{tool_name}}", &escape(&ctx.tool_name));
     html = html.replace("{{company_name}}", &escape(&ctx.company_name));
     html = html.replace("{{date_str}}", &ctx.date_str);
@@ -979,6 +1035,7 @@ mod tests {
             total_files_scanned: 42,
             health_thresholds: HealthThresholds::default(),
             rule_catalog,
+            history: &[],
         }
     }
 
@@ -1034,6 +1091,25 @@ mod tests {
         let html = generate_html(&[], &context, None, None, None);
         assert!(html.contains("my-project"));
         assert!(html.contains("CodeFixture"));
+    }
+
+    /// The header names the project version only when there is one: an
+    /// empty version used to leave a lone "• v" after the date.
+    #[test]
+    fn test_header_shows_project_version_only_when_set() {
+        let catalog = BTreeMap::new();
+        let with_version = generate_html(&[], &ctx(&catalog), None, None, None);
+        assert!(with_version.contains("• v1.0.0 "));
+        let context = ReportContext {
+            project_version: String::new(),
+            ..ctx(&catalog)
+        };
+        let without = generate_html(&[], &context, None, None, None);
+        assert!(
+            !without.contains("• v"),
+            "lone version marker in the header"
+        );
+        assert!(!without.contains("{{project_version_meta}}"));
     }
 
     #[test]
@@ -1096,5 +1172,78 @@ mod tests {
         let html = generate_html(&[], &context, Some(&comparison), None, None);
         assert!(html.contains(r#"id="section-comparison""#));
         assert!(!html.contains("{{"));
+    }
+
+    fn point(timestamp: &str, high: usize, medium: usize) -> HistoryPoint {
+        HistoryPoint {
+            timestamp: timestamp.to_string(),
+            totals: [("HIGH", high), ("MEDIUM", medium)]
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v))
+                .collect(),
+        }
+    }
+
+    /// The label keeps the time, so two scans of one day stay distinct;
+    /// another shape of timestamp is shown as it is.
+    #[test]
+    fn test_history_label_keeps_day_month_and_time() {
+        assert_eq!(history_label("2026-11-18-09-18"), "18/11 09:18");
+        assert_eq!(history_label("2026-11-18"), "18/11");
+        assert_eq!(history_label("20260825_120000"), "20260825_120000");
+    }
+
+    /// One entry per past scan in every series, severities read from the
+    /// totals, a missing severity counted as 0.
+    #[test]
+    fn test_history_chart_data_has_one_entry_per_scan() {
+        let data = history_chart_data(&[
+            point("2026-11-14-09-47", 21, 38),
+            point("2026-11-18-09-18", 5, 2),
+        ]);
+        assert_eq!(data["labels"], json!(["14/11 09:47", "18/11 09:18"]));
+        assert_eq!(data["high"], json!([21, 5]));
+        assert_eq!(data["medium"], json!([38, 2]));
+        assert_eq!(data["low"], json!([0, 0]));
+        assert_eq!(data["testsRate"], json!([0, 0]));
+        assert_eq!(data["dbChanges"], json!([0, 0]));
+    }
+
+    /// The report carries the history of its context: the trend chart
+    /// was always empty before, whatever the number of past scans.
+    #[test]
+    fn test_generate_html_carries_the_scan_history() {
+        let catalog = BTreeMap::new();
+        let history = [
+            point("2026-11-14-09-47", 21, 38),
+            point("2026-11-18-09-18", 5, 2),
+        ];
+        let context = ReportContext {
+            history: &history,
+            ..ctx(&catalog)
+        };
+        let html = generate_html(&[], &context, None, None, None);
+        assert!(
+            html.contains(r#""labels":["14/11 09:47","18/11 09:18"]"#),
+            "history labels missing from the chart data"
+        );
+        assert!(html.contains(r#""high":[21,5]"#));
+    }
+
+    /// The first-audit message of the trend card exists in every report
+    /// language and reaches the chart labels.
+    #[test]
+    fn test_history_first_audit_message_in_every_language() {
+        for lang in ["en", "fr", "es", "de"] {
+            let locale = crate::i18n::load_report_locale(lang);
+            let labels = chart_i18n_labels(&locale);
+            let text = labels["historyNeedsTwoAudits"].as_str().unwrap_or("");
+            assert!(
+                !text.is_empty()
+                    && text != "history_needs_two_audits"
+                    && !text.contains("chart_labels"),
+                "{lang}: {text}"
+            );
+        }
     }
 }

@@ -277,6 +277,7 @@
     "health_penalty": "Penalty",
     "health_severity_chart": "Penalties by Severity (security findings only)",
     "findings_by_lang_severity": "Findings by Language & Severity",
+    "history_needs_two_audits": "The trend appears from the second audit of this project.",
     "nist_coverage": "Coverage",
     "nist_covered": "Covered",
     "nist_findings": "With Findings",

@@ -277,6 +277,7 @@
     "health_penalty": "Penalización",
     "health_severity_chart": "Penalizaciones por severidad (solo hallazgos de seguridad)",
     "findings_by_lang_severity": "Findings por lenguaje y severidad",
+    "history_needs_two_audits": "La evolución aparece a partir de la segunda auditoría de este proyecto.",
     "nist_coverage": "Cobertura",
     "nist_covered": "Cubiertos",
     "nist_findings": "Con findings",

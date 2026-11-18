@@ -250,6 +250,16 @@ function initCharts() {
             }
         });
     }
+    // Fewer than two scans: no line to draw. The card says when the
+    // trend appears instead of staying empty (deviation from the Python
+    // report, which leaves the card blank on a first audit).
+    else if (document.getElementById('historyChart')) {
+        const historyBox = document.getElementById('historyChart').parentElement;
+        const historyNote = document.createElement('p');
+        historyNote.className = 'chart-empty';
+        historyNote.textContent = i18n.historyNeedsTwoAudits || 'The trend appears from the second audit of this project.';
+        historyBox.replaceChildren(historyNote);
+    }
 
     // Graphique Tests (Doughnut)
     if (document.getElementById('testsChart') && totalTests > 0) {

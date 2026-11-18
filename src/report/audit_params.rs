@@ -426,6 +426,7 @@ mod tests {
             total_files_scanned: 0,
             health_thresholds: HealthThresholds::default(),
             rule_catalog,
+            history: &[],
         }
     }
 
