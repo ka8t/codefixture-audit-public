@@ -195,7 +195,7 @@ cd ~\codefixture-audit-public
 For a report in French, Spanish or German, replace `--lang en` with `--lang fr`, `--lang es` or `--lang de`.
 
 - `--lang` sets the language of the report: `en`, `fr`, `es` or `de`.
-- When your project declares dependencies (`requirements.txt`, `package.json`, `pom.xml`, `composer.json`…), their pinned versions are compared with the published vulnerabilities the rule pack carries, offline; the output names the pack, the date of its data and its counts. A range such as `>=2.0` names no installed version and is not compared.
+- When your project declares dependencies (`requirements.txt`, `package.json`, `pom.xml`, `composer.json`…), their pinned versions are compared with the published vulnerabilities the rule pack carries, offline; the output names the pack, the date of its data and its counts. A range such as `>=2.0` names no installed version and is not compared. In the finding, each vulnerability gives its severity, then `exploited in attacks, CISA KEV since <date>` when CISA's catalog of Known Exploited Vulnerabilities lists it, and `EPSS <n>%`, FIRST's probability that it gets exploited in the next 30 days. An exploited vulnerability makes the finding critical, whatever its severity; the EPSS score changes nothing. The databases of this data and their licenses are listed in the report's scope table and in the [README](README.md#vulnerability-data).
 - `--sbom` also writes the list of your declared dependencies as a CycloneDX file: see [SBOM export](#sbom-export).
 
 The terminal first shows what was loaded, then the progress and a summary:

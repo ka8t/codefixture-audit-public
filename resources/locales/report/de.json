@@ -664,6 +664,16 @@
         "term": "XXE",
         "full": "XML External Entity",
         "desc": "XML-Angriff, der externe Entitätsverarbeitung ausnutzt, um Dateien zu lesen oder SSRF auszulösen."
+      },
+      "kev": {
+        "term": "KEV",
+        "full": "Known Exploited Vulnerabilities",
+        "desc": "Katalog der CISA mit den Schwachstellen, die in echten Angriffen ausgenutzt werden. Eine davon betroffene Abhängigkeit wird als kritisch gemeldet, unabhängig vom Schweregrad ihres Hinweises."
+      },
+      "epss": {
+        "term": "EPSS",
+        "full": "Exploit Prediction Scoring System",
+        "desc": "Vom FIRST berechnete Wahrscheinlichkeit von 0 bis 100 %, dass eine Schwachstelle in den nächsten 30 Tagen ausgenutzt wird. Wird neben jeder CVE angezeigt; sie ändert den Schweregrad nicht."
       }
     }
   },

@@ -435,7 +435,9 @@ fn in_range(events: &[Event], version: &str) -> bool {
 /// Merges advisories that describe the same vulnerability (shared id or
 /// alias, e.g. a `PYSEC-` record and its `GHSA-` twin), keeping the
 /// most severe record of each group. The kept record takes the KEV and
-/// EPSS marks a twin carries and it lacks: they describe the same CVE.
+/// EPSS marks a twin carries and it lacks, and the twin's identifiers:
+/// they describe the same vulnerability, so the finding names the
+/// group's CVE even when only the twin lists it (ticket #198).
 fn merge_aliases(hits: Vec<Arc<Advisory>>) -> Vec<Arc<Advisory>> {
     let mut groups: Vec<(BTreeSet<String>, Arc<Advisory>)> = Vec::new();
     for advisory in hits {
@@ -454,6 +456,14 @@ fn merge_aliases(hits: Vec<Arc<Advisory>>) -> Vec<Arc<Advisory>> {
                 }
                 if winner.epss.is_none() && other.epss.is_some() {
                     Arc::make_mut(&mut winner).epss = other.epss;
+                }
+                let missing: Vec<String> = other
+                    .identifiers()
+                    .filter(|id| *id != winner.id && !winner.aliases.iter().any(|a| a == id))
+                    .map(str::to_string)
+                    .collect();
+                if !missing.is_empty() {
+                    Arc::make_mut(&mut winner).aliases.extend(missing);
                 }
                 *kept = winner;
             }
@@ -841,8 +851,8 @@ mod tests {
         let found = find_vulnerable(&[dep("Maven", "g:a", Some("1.0"), "1.0")], &db);
         let ids: Vec<&str> = found[0].advisories.iter().map(|a| a.display_id()).collect();
         // `OTHER-low`, the more severe twin of `GHSA-low`, is kept; it
-        // names no CVE itself, hence its own id.
-        assert_eq!(ids, vec!["OTHER-low", "CVE-2026-2", "CVE-2026-1"]);
+        // names no CVE itself, but its twin does (ticket #198).
+        assert_eq!(ids, vec!["CVE-2026-3", "CVE-2026-2", "CVE-2026-1"]);
         let exploited = &found[0].advisories[0];
         assert_eq!(exploited.severity, "MEDIUM", "the twin is more severe");
         assert_eq!(

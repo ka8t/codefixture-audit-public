@@ -35,7 +35,7 @@ Windows (PowerShell):
 ```
 
 - `--lang` sets the report language: `en`, `fr`, `es` or `de`.
-- When your project declares dependencies (`requirements.txt`, `package.json`, `pom.xml`, `composer.json`, `.csproj`…), their pinned versions are compared with the published vulnerabilities the rule pack carries, offline.
+- When your project declares dependencies (`requirements.txt`, `package.json`, `pom.xml`, `composer.json`, `.csproj`…), their pinned versions are compared with the published vulnerabilities the rule pack carries, offline. A vulnerability that CISA lists as exploited in real attacks (KEV) makes the finding critical, and each CVE shows its EPSS score, the probability that it gets exploited in the next 30 days.
 - `--sbom` also writes a CycloneDX SBOM (software bill of materials) of the dependencies your project declares: see [SBOM export](INSTALLATION.md#sbom-export).
 - The first run on a project asks what to analyse and writes `audit.config.json`; run the same command again for the analysis.
 - The report is written into your project, under `audit-reports/`: the terminal prints its path on the `Report generated` line. Open it in a browser.
@@ -87,6 +87,24 @@ With the full rule catalog, copy `rules.cfpack` next to the engine again afterwa
 ## Full rule catalog
 
 The sample covers a small part of what the engine detects. The full catalog has more than 700 rules and is available from [CodeFixture](https://codefixture.com), with its updates, as a rule pack that replaces the sample one, with every published vulnerability of the five ecosystems: see [step 6](INSTALLATION.md#step-6-add-the-full-catalog-optional).
+
+## Vulnerability data
+
+The published vulnerabilities and the exploitation data in the rule packs come from these databases, each used under its license:
+
+| Database | License |
+|---|---|
+| [GitHub Advisory Database](https://github.com/github/advisory-database), through [OSV](https://osv.dev) | CC-BY 4.0 |
+| [PyPI Advisory Database](https://github.com/pypa/advisory-database), through OSV | CC-BY 4.0 |
+| [OpenSSF Malicious Packages](https://github.com/ossf/malicious-packages), through OSV | Apache 2.0 |
+| [Drupal security advisories](https://www.drupal.org/security), through OSV | MIT |
+| [OSS-Fuzz](https://github.com/google/oss-fuzz-vulns), through OSV | CC-BY 4.0 |
+| [Erlang Ecosystem Foundation CNA](https://cna.erlef.org), through OSV | CC-BY 4.0 |
+| [FriendsOfPHP security advisories](https://github.com/FriendsOfPHP/security-advisories) | Unlicense |
+| [CISA Known Exploited Vulnerabilities](https://www.cisa.gov/known-exploited-vulnerabilities-catalog) | CC0 1.0 |
+| [FIRST EPSS](https://www.first.org/epss) | [EPSS usage agreement](https://www.first.org/epss/#Usage-Agreement), credit requested |
+
+The records are reduced to the package names and affected versions the engine compares. Each report lists the databases its rule pack used, in its scope table.
 
 ## License
 

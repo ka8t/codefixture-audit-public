@@ -664,6 +664,16 @@
         "term": "XXE",
         "full": "XML External Entity",
         "desc": "XML injection attack that exploits external entity processing to read files or trigger SSRF."
+      },
+      "kev": {
+        "term": "KEV",
+        "full": "Known Exploited Vulnerabilities",
+        "desc": "CISA catalog of the vulnerabilities used in real attacks. A dependency hit by one is reported as critical, whatever the severity of its advisory."
+      },
+      "epss": {
+        "term": "EPSS",
+        "full": "Exploit Prediction Scoring System",
+        "desc": "FIRST probability, from 0 to 100 %, that a vulnerability gets exploited in the next 30 days. Shown next to each CVE; it does not change the severity."
       }
     }
   },

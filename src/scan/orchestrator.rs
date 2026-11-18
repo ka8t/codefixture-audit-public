@@ -838,11 +838,21 @@ fn advisory_marks(
         marks.push(texts.get(key).replace("{date}", &exploited.added));
     }
     if let Some(epss) = advisory.epss {
-        // One decimal, with the report language's decimal mark.
-        let percent = format!("{:.1}", epss.epss * 100.0).replace('.', &texts.get("decimal_mark"));
+        let percent = epss_percent(epss.epss).replace('.', &texts.get("decimal_mark"));
         marks.push(texts.get("epss").replace("{percent}", &percent));
     }
     marks
+}
+
+/// An EPSS score (0 to 1) as a percentage with one decimal, rounded
+/// down: the figure never claims more than the score. Rounded to the
+/// nearest, 0.9995 read `100.0` (Log4Shell in 2026-11, ticket #197),
+/// although a probability below 1 is never certain.
+fn epss_percent(score: f64) -> String {
+    // The small margin absorbs the binary error of `score * 1000` (0.973
+    // gives 972.9999…), which would otherwise floor one tenth too low.
+    let tenths = (score * 1000.0 + 1e-9).floor();
+    format!("{:.1}", tenths / 10.0)
 }
 
 /// Splits a file's content into lines, keeping their original line
@@ -2829,6 +2839,19 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    /// Ticket #197: the EPSS percentage is rounded down, so a score below
+    /// 1 never reads 100 %.
+    #[test]
+    fn test_epss_percent_never_exceeds_the_score() {
+        assert_eq!(epss_percent(0.99999), "99.9");
+        assert_eq!(epss_percent(0.9995), "99.9");
+        assert_eq!(epss_percent(0.97366), "97.3");
+        assert_eq!(epss_percent(0.973), "97.3");
+        assert_eq!(epss_percent(0.021), "2.1");
+        assert_eq!(epss_percent(0.0004), "0.0");
+        assert_eq!(epss_percent(1.0), "100.0");
+    }
+
     /// ADR-0051: a vulnerability CISA lists as exploited makes the finding
     /// CRITICAL although its advisory says MEDIUM, and the finding names
     /// the KEV mark and the EPSS score in the report language; the scan
@@ -2900,7 +2923,7 @@ mod tests {
         assert!(
             finding.risk.contains(
                 "CVE-2021-28957 (MEDIUM, exploitée dans des attaques, y compris par rançongiciel, \
-                 CISA KEV depuis le 2026-11-01, EPSS 97,4 %): lxml XSS"
+                 CISA KEV depuis le 2026-11-01, EPSS 97,3 %): lxml XSS"
             ),
             "{}",
             finding.risk

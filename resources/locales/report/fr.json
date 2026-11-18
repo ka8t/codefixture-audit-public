@@ -664,6 +664,16 @@
         "term": "XXE",
         "full": "XML External Entity",
         "desc": "Attaque XML exploitant le traitement d'entités externes pour lire des fichiers ou déclencher un SSRF."
+      },
+      "kev": {
+        "term": "KEV",
+        "full": "Known Exploited Vulnerabilities",
+        "desc": "Catalogue de la CISA des vulnérabilités utilisées dans de vraies attaques. Une dépendance touchée par l'une d'elles est signalée comme critique, quelle que soit la sévérité de son avis."
+      },
+      "epss": {
+        "term": "EPSS",
+        "full": "Exploit Prediction Scoring System",
+        "desc": "Probabilité, calculée par le FIRST, de 0 à 100 %, qu'une vulnérabilité soit exploitée dans les 30 prochains jours. Affichée à côté de chaque CVE ; elle ne change pas la sévérité."
       }
     }
   },
