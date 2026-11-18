@@ -385,5 +385,8 @@
   "scan_rule_duplicate": "Rule {rule} is defined twice: {kept} applies, {dropped} is ignored.",
   "scan_cache_line": "Cache ({language}): {dirty}/{files} file(s) changed since the last scan, {analysed}/{total} taint analyses redone.",
   "scan_cache_patterns_line": "Cache (pattern rules): {analysed}/{files} file(s) analysed again, the others unchanged since the last scan.",
+  "scan_unchanged": "No file has changed since the scan of {date}: nothing was analysed again.",
+  "scan_unchanged_report": "Report of that scan: {path}",
+  "scan_unchanged_sbom": "SBOM unchanged: {path}",
   "config_wizard_run_again": "No analysis has run yet. To analyse your project now, run the same command again:"
 }

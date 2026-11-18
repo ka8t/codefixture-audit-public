@@ -72,67 +72,114 @@ fn fnmatch_to_regex(pattern: &str) -> String {
     out
 }
 
+/// Whether `name` matches the `fnmatch` glob `pattern`, compiled for this
+/// one check; an invalid pattern matches nothing.
+#[cfg(test)]
 fn fnmatch(name: &str, pattern: &str) -> bool {
-    let Ok(re) = StdRegex::new(&fnmatch_to_regex(pattern)) else {
-        return false;
-    };
-    re.is_match(name)
+    StdRegex::new(&fnmatch_to_regex(pattern)).is_ok_and(|re| re.is_match(name))
 }
 
-/// Mirror of `rule_engine.py::_matches_any_exclude` — used for
-/// pruning subdirectories during the recursive walk (perf:
-/// avoids descending into `node_modules/`, `.venv/`, `__pycache__/`…).
-/// `rel_path`: path relative to the project, `/` or `\` separators.
-pub fn matches_any_exclude(rel_path: &str, excludes: &[String]) -> bool {
-    let norm = rel_path.replace('\\', "/");
-    for pattern in excludes {
-        if fnmatch(&norm, pattern) {
-            return true;
+/// Exclusion patterns compiled once for a whole discovery.
+///
+/// Until 2026-11-18, every check compiled the regex of every glob pattern
+/// again: about 20 patterns, two checks per file and one per folder made
+/// tens of thousands of compilations per scan, 1.0 s of the 1.0 s that
+/// discovering 775 files took on my-ia. The patterns are now compiled once,
+/// when the walk starts; what they match has not changed.
+pub struct ExcludePatterns {
+    /// Each pattern as written, with its `fnmatch` regex: `None` when
+    /// the pattern gives no valid regex, which then matches nothing as a
+    /// glob (the substring checks still apply to it).
+    patterns: Vec<(String, Option<StdRegex>)>,
+}
+
+impl ExcludePatterns {
+    /// Compiles `patterns` (`fnmatch` globs, see [`fnmatch_to_regex`]).
+    pub fn new(patterns: &[String]) -> Self {
+        ExcludePatterns {
+            patterns: patterns
+                .iter()
+                .map(|p| (p.clone(), StdRegex::new(&fnmatch_to_regex(p)).ok()))
+                .collect(),
         }
-        if let Some(rest) = pattern.strip_prefix("**/")
-            && let Some(middle) = rest.strip_suffix("/**")
-            && !middle.is_empty()
-        {
-            let haystack = format!("/{norm}/");
-            if haystack.contains(&format!("/{middle}/"))
-                || norm == middle
-                || norm.starts_with(&format!("{middle}/"))
+    }
+
+    /// `true` when no pattern was given.
+    pub fn is_empty(&self) -> bool {
+        self.patterns.is_empty()
+    }
+
+    /// Mirror of `rule_engine.py::_matches_any_exclude` — used for
+    /// pruning subdirectories during the recursive walk (perf:
+    /// avoids descending into `node_modules/`, `.venv/`, `__pycache__/`…).
+    /// `rel_path`: path relative to the project, `/` or `\` separators.
+    pub fn matches_any_exclude(&self, rel_path: &str) -> bool {
+        let norm = rel_path.replace('\\', "/");
+        for (pattern, glob) in &self.patterns {
+            if glob.as_ref().is_some_and(|re| re.is_match(&norm)) {
+                return true;
+            }
+            if let Some(rest) = pattern.strip_prefix("**/")
+                && let Some(middle) = rest.strip_suffix("/**")
+                && !middle.is_empty()
             {
-                return true;
+                let haystack = format!("/{norm}/");
+                if haystack.contains(&format!("/{middle}/"))
+                    || norm == middle
+                    || norm.starts_with(&format!("{middle}/"))
+                {
+                    return true;
+                }
+            }
+            let clean = pattern.trim_end_matches('/');
+            if !clean.is_empty() && !clean.contains('/') {
+                let haystack = format!("/{norm}/");
+                if haystack.contains(&format!("/{clean}/"))
+                    || norm.starts_with(&format!("{clean}/"))
+                {
+                    return true;
+                }
             }
         }
-        let clean = pattern.trim_end_matches('/');
-        if !clean.is_empty() && !clean.contains('/') {
-            let haystack = format!("/{norm}/");
-            if haystack.contains(&format!("/{clean}/")) || norm.starts_with(&format!("{clean}/")) {
-                return true;
-            }
-        }
+        false
     }
-    false
+
+    /// Mirror of `runner.py::AuditRunner._is_excluded` — final check
+    /// on a file (full glob, "simple folder" pattern,
+    /// "extension" pattern on the basename).
+    pub fn is_excluded(&self, rel_path: &str, basename: &str) -> bool {
+        let norm = rel_path.replace('\\', "/");
+        for (pattern, glob) in &self.patterns {
+            if glob.as_ref().is_some_and(|re| re.is_match(&norm)) {
+                return true;
+            }
+            let clean = pattern.trim_end_matches('/');
+            if !clean.is_empty() {
+                let haystack = format!("/{norm}");
+                if haystack.contains(&format!("/{clean}/"))
+                    || norm.starts_with(&format!("{clean}/"))
+                {
+                    return true;
+                }
+            }
+            if glob.as_ref().is_some_and(|re| re.is_match(basename)) {
+                return true;
+            }
+        }
+        false
+    }
 }
 
-/// Mirror of `runner.py::AuditRunner._is_excluded` — final check
-/// on a file (full glob, "simple folder" pattern,
-/// "extension" pattern on the basename).
+/// [`ExcludePatterns::matches_any_exclude`] for patterns not compiled
+/// yet: compiles them for this one check.
+pub fn matches_any_exclude(rel_path: &str, excludes: &[String]) -> bool {
+    ExcludePatterns::new(excludes).matches_any_exclude(rel_path)
+}
+
+/// [`ExcludePatterns::is_excluded`] for patterns not compiled yet:
+/// compiles them for this one check.
 pub fn is_excluded(rel_path: &str, basename: &str, exclude_patterns: &[String]) -> bool {
-    let norm = rel_path.replace('\\', "/");
-    for pattern in exclude_patterns {
-        if fnmatch(&norm, pattern) {
-            return true;
-        }
-        let clean = pattern.trim_end_matches('/');
-        if !clean.is_empty() {
-            let haystack = format!("/{norm}");
-            if haystack.contains(&format!("/{clean}/")) || norm.starts_with(&format!("{clean}/")) {
-                return true;
-            }
-        }
-        if fnmatch(basename, pattern) {
-            return true;
-        }
-    }
-    false
+    ExcludePatterns::new(exclude_patterns).is_excluded(rel_path, basename)
 }
 
 /// File discovery configuration.
@@ -265,15 +312,11 @@ pub fn find_files_and_skipped(
     paths: &[&Path],
     config: &FileDiscoveryConfig,
 ) -> (Vec<PathBuf>, Vec<SkippedDir>) {
-    let mut walk = Walk {
-        files: Vec::new(),
-        seen: HashSet::new(),
-        skipped: Vec::new(),
-    };
+    let mut walk = Walk::new(config);
     for start in paths {
         let full_path = root.join(start);
         if full_path.is_file() {
-            consider_file(&full_path, root, config, &mut walk.files, &mut walk.seen);
+            consider_file(&full_path, root, config, &mut walk);
         } else if full_path.is_dir() {
             walk_dir(&full_path, root, config, &mut walk);
         }
@@ -282,24 +325,36 @@ pub fn find_files_and_skipped(
 }
 
 /// What a walk collects: the files kept, the deduplication keys seen and
-/// the folders skipped as holding no project code.
+/// the folders skipped as holding no project code; and the exclusion
+/// patterns of its configuration, compiled once for the whole walk.
 struct Walk {
     files: Vec<PathBuf>,
     seen: HashSet<PathBuf>,
     skipped: Vec<SkippedDir>,
+    /// `FileDiscoveryConfig::exclude_patterns`, compiled.
+    excludes: ExcludePatterns,
+    /// `FileDiscoveryConfig::prune_excludes`, compiled.
+    prune_excludes: ExcludePatterns,
+}
+
+impl Walk {
+    /// An empty walk over `config`, its exclusion patterns compiled.
+    fn new(config: &FileDiscoveryConfig) -> Self {
+        Walk {
+            files: Vec::new(),
+            seen: HashSet::new(),
+            skipped: Vec::new(),
+            excludes: ExcludePatterns::new(&config.exclude_patterns),
+            prune_excludes: ExcludePatterns::new(&config.prune_excludes),
+        }
+    }
 }
 
 /// Keeps `filepath` if it passes the extension/filename filter and no
 /// exclusion matches it, once per scan pass (`seen` deduplicates files
 /// reached through overlapping start paths). Shared by the walk and by
 /// start paths that name a file, so both apply exactly the same rules.
-fn consider_file(
-    filepath: &Path,
-    root: &Path,
-    config: &FileDiscoveryConfig,
-    files: &mut Vec<PathBuf>,
-    seen: &mut HashSet<PathBuf>,
-) {
+fn consider_file(filepath: &Path, root: &Path, config: &FileDiscoveryConfig, walk: &mut Walk) {
     let filename = filepath
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
@@ -322,11 +377,11 @@ fn consider_file(
         .unwrap_or(filepath)
         .to_string_lossy()
         .replace('\\', "/");
-    if is_excluded(&rel_path, &filename, &config.exclude_patterns) {
+    if walk.excludes.is_excluded(&rel_path, &filename) {
         return;
     }
-    if seen.insert(dedup_key(filepath)) {
-        files.push(filepath.to_path_buf());
+    if walk.seen.insert(dedup_key(filepath)) {
+        walk.files.push(filepath.to_path_buf());
     }
 }
 
@@ -411,14 +466,14 @@ fn walk_dir(dir: &Path, root: &Path, config: &FileDiscoveryConfig, walk: &mut Wa
     subdirs.sort_unstable();
 
     // Pruning of excluded subdirectories before descending into them (perf).
-    if !config.prune_excludes.is_empty() {
+    if !walk.prune_excludes.is_empty() {
         subdirs.retain(|d| {
             let rel = d
                 .strip_prefix(root)
                 .unwrap_or(d)
                 .to_string_lossy()
                 .replace('\\', "/");
-            !matches_any_exclude(&rel, &config.prune_excludes)
+            !walk.prune_excludes.matches_any_exclude(&rel)
         });
     }
     if config.skip_non_project_dirs {
@@ -435,7 +490,7 @@ fn walk_dir(dir: &Path, root: &Path, config: &FileDiscoveryConfig, walk: &mut Wa
     }
 
     for filepath in &filepaths {
-        consider_file(filepath, root, config, &mut walk.files, &mut walk.seen);
+        consider_file(filepath, root, config, walk);
     }
 
     for d in &subdirs {
@@ -637,12 +692,11 @@ mod tests {
             prune_excludes: vec![],
             skip_non_project_dirs: false,
         };
-        let mut files = Vec::new();
-        let mut seen = HashSet::new();
+        let mut walk = Walk::new(&config);
         for rel in ["src/a.py", "src/a.js", "legacy/old.py", "src/./a.py"] {
-            consider_file(&root.join(rel), &root, &config, &mut files, &mut seen);
+            consider_file(&root.join(rel), &root, &config, &mut walk);
         }
-        assert_eq!(files, vec![root.join("src/a.py")]);
+        assert_eq!(walk.files, vec![root.join("src/a.py")]);
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -660,11 +714,7 @@ mod tests {
             prune_excludes: vec!["vendor/".to_string()],
             skip_non_project_dirs: false,
         };
-        let mut walk = Walk {
-            files: Vec::new(),
-            seen: HashSet::new(),
-            skipped: Vec::new(),
-        };
+        let mut walk = Walk::new(&config);
         walk_dir(&root, &root, &config, &mut walk);
         assert_eq!(
             walk.files,

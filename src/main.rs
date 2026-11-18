@@ -21,9 +21,11 @@ use codefixture_audit::report::brand::{
     effective_website_url, inject_brand_style, load_brand_file,
 };
 use codefixture_audit::report::compliance_html::HealthThresholds;
+use codefixture_audit::report::exports::sarif::ReportFinding;
 use codefixture_audit::report::exports::sarif::build_sarif_report;
 use codefixture_audit::report::html::{ReportContext, generate_html};
 use codefixture_audit::scan::orchestrator::{ScanConfig, ScanReport, run_scan};
+use codefixture_audit::scan::unchanged::{LastScan, ScanInputs};
 
 /// Exclusions applied to every scan — same list as
 /// `DEFAULT_CONFIG["paths"]["exclude"]` (`Audit/sca/config.py`).
@@ -1791,6 +1793,7 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
     // without --output stay on stdout (explicitly requested format,
     // Unix convention — accepted deviation vs Audit, which always writes its
     // HTML report regardless of the format additionally requested).
+    let explicit_output = output.is_some();
     let output = output.or_else(|| {
         if format == "html" {
             let dir = path.join(REPORTS_DIR);
@@ -1871,6 +1874,35 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
         // Every file is discovered, so undeclared languages are named.
         only_target_language_files: false,
     };
+
+    // ADR-0050: before any rule is loaded, has anything the scan reads
+    // changed since the last one? Never with `--no-cache`, nor when the
+    // results can change without any file changing (`--with-tests`,
+    // `--database`), nor when the run itself is measured
+    // (`--metrics-output`) or an HTML report is expected at an explicit
+    // path. `inputs` is also what the record of this scan will hold.
+    let shortcut_allowed = !no_cache
+        && !config.with_tests
+        && config.database.is_none()
+        && metrics_output.is_none()
+        && !(format == "html" && explicit_output);
+    let inputs = shortcut_allowed.then(|| ScanInputs::read(&config));
+    if let Some(inputs) = &inputs
+        && let Some(last) = LastScan::find_unchanged(&config, inputs, format == "html")
+    {
+        return report_unchanged_scan(UnchangedScan {
+            last: &last,
+            config: &config,
+            format: &format,
+            output: output.as_deref().filter(|_| format != "html"),
+            brand: &brand,
+            quiet,
+            sbom: sbom.then_some((project_name.as_str(), &now)),
+            script_locale: &script_locale,
+            t_command_start,
+        });
+    }
+
     emit_progress(
         quiet,
         &format!(
@@ -1978,12 +2010,16 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
         }
     }
 
+    let mut sbom_written = None;
     if sbom {
         match write_sbom(&config, &project_name, &brand, &now) {
-            Ok(sbom_path) => emit_progress(
-                quiet,
-                &format!("[codefixture-audit] SBOM : {}", sbom_path.display()),
-            ),
+            Ok(sbom_path) => {
+                emit_progress(
+                    quiet,
+                    &format!("[codefixture-audit] SBOM : {}", sbom_path.display()),
+                );
+                sbom_written = Some(sbom_path);
+            }
             Err(e) => {
                 emit_error(&format!(
                     "[codefixture-audit] {}",
@@ -1996,24 +2032,10 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
     }
 
     let output_text = match format.as_str() {
-        "sarif" => {
-            let sarif = build_sarif_report(
-                &report.findings,
-                "codefixture-audit",
-                codefixture_audit::BUILD_VERSION,
-                &effective_website_url(&brand),
-            );
-            match serde_json::to_string_pretty(&sarif) {
-                Ok(s) => s,
-                Err(e) => {
-                    emit_error(
-                        &codefixture_audit::i18n::t(&script_locale, "scan_internal_error")
-                            .replace("{error}", &format!("SARIF serialization: {e}")),
-                    );
-                    return ExitCode::from(4);
-                }
-            }
-        }
+        "sarif" => match sarif_text(&report.findings, &brand, &script_locale) {
+            Ok(text) => text,
+            Err(code) => return code,
+        },
         "html" => {
             let ctx = ReportContext {
                 project_name,
@@ -2075,78 +2097,40 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
             // `brand.json` has no color (or doesn't exist).
             inject_brand_style(html, brand_style_block(&brand).as_deref())
         }
-        _ => format_text_report(&report),
+        _ => format_text_report(&report.findings),
     };
 
-    match &output {
-        Some(out_path) => {
-            if let Err(e) = std::fs::write(out_path, &output_text) {
-                emit_error(
-                    &codefixture_audit::i18n::t(&script_locale, "scan_internal_error")
-                        .replace("{error}", &format!("{}: {e}", out_path.display())),
-                );
-                return ExitCode::from(4);
-            }
-            emit_progress(
-                quiet,
-                &format!(
-                    "[codefixture-audit] {} : {}",
-                    codefixture_audit::i18n::t(&script_locale, "report_generated"),
-                    out_path.display()
-                ),
-            );
-        }
-        None => println!("{output_text}"),
+    if let Err(code) = write_scan_output(output.as_deref(), &output_text, quiet, &script_locale) {
+        return code;
     }
 
-    // Never suppressed by `--quiet` (see ticket #44): it's the only
-    // message guaranteed by a silent CI scan — without it, a run that
-    // "succeeds" with no finding is indistinguishable from a run that scanned
-    // nothing at all.
-    emit_result(&format!(
-        "[codefixture-audit] {}",
-        codefixture_audit::i18n::t(&script_locale, "scan_summary")
-            .replace("{files}", &report.files_scanned.to_string())
-            .replace("{loc}", &report.total_loc.to_string())
-            .replace("{findings}", &report.findings.len().to_string())
-    ));
-    // Whole command, from argument parsing to the written report
-    // (ticket #135) — the per-phase lines don't add up to it (rule
-    // loading aside, discovery and report rendering are not phases).
-    // Same never-suppressed treatment as the summary line above.
-    let total_elapsed = t_command_start.elapsed();
-    if JSON_LOGS.load(std::sync::atomic::Ordering::Relaxed) {
-        emit_json_line(
-            LogLevel::Info,
-            &codefixture_audit::i18n::t(&script_locale, "scan_total_duration")
-                .replace("{duration}", &format_duration(total_elapsed)),
-            Some(serde_json::json!(total_elapsed.as_millis())),
+    // ADR-0050: the record that lets the next scan skip everything when
+    // nothing changes, written once this scan's export and report exist,
+    // with the inputs read before the scan. A record that cannot be
+    // written only costs the next scan its shortcut, never a wrong result.
+    if let Some(inputs) = &inputs
+        && let Some(export_path) = &report.export_path
+    {
+        let mut record = LastScan::new(
+            inputs,
+            report.governance_names.clone(),
+            export_path.clone(),
+            output.clone().filter(|_| format == "html"),
+            report.files_scanned,
+            report.total_loc,
         );
-    } else {
-        emit_result(&format!(
-            "[codefixture-audit] {}",
-            codefixture_audit::i18n::t(&script_locale, "scan_total_duration")
-                .replace("{duration}", &format_duration(total_elapsed))
-        ));
+        record.sbom_path = sbom_written;
+        let _ = record.save(&config);
     }
 
-    let high_count = report
-        .findings
-        .iter()
-        .filter(|f| f.severity == "HIGH" || f.severity == "CRITICAL")
-        .count();
-    // Configurable threshold (ticket #42/spec #27) — `0` by default
-    // (missing file or no `thresholds` section) reproduces
-    // exactly the previous hardcoded behavior: failure as soon as
-    // at least one HIGH/CRITICAL exists. Accepted deviations vs Python
-    // documented in `read_max_high_threshold_config`.
-    let max_high_threshold =
-        codefixture_audit::project::project_config::read_max_high_threshold_config(&config.root);
-    let exit_code: u8 = if high_count as i64 > max_high_threshold {
-        1
-    } else {
-        0
-    };
+    let exit_code = finish_scan(
+        &report.findings,
+        report.files_scanned,
+        report.total_loc,
+        &config.root,
+        &script_locale,
+        t_command_start,
+    );
 
     // Ticket #90: written last, so it records the real exit code. A
     // write failure is an internal error (4), like the report itself.
@@ -2173,9 +2157,229 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
     ExitCode::from(exit_code)
 }
 
-fn format_text_report(report: &ScanReport) -> String {
+/// The SARIF document of `findings`, as written by `--format sarif`. An
+/// error is reported to the user, and the exit code is returned.
+fn sarif_text(
+    findings: &[ReportFinding],
+    brand: &Brand,
+    script_locale: &serde_json::Value,
+) -> Result<String, ExitCode> {
+    let sarif = build_sarif_report(
+        findings,
+        "codefixture-audit",
+        codefixture_audit::BUILD_VERSION,
+        &effective_website_url(brand),
+    );
+    serde_json::to_string_pretty(&sarif).map_err(|e| {
+        emit_error(
+            &codefixture_audit::i18n::t(script_locale, "scan_internal_error")
+                .replace("{error}", &format!("SARIF serialization: {e}")),
+        );
+        ExitCode::from(4)
+    })
+}
+
+/// Writes a scan's output to `output` and names the file, or prints it on
+/// stdout without `output`. A write error is reported, and the exit code
+/// is returned.
+fn write_scan_output(
+    output: Option<&Path>,
+    text: &str,
+    quiet: bool,
+    script_locale: &serde_json::Value,
+) -> Result<(), ExitCode> {
+    let Some(out_path) = output else {
+        println!("{text}");
+        return Ok(());
+    };
+    if let Err(e) = std::fs::write(out_path, text) {
+        emit_error(
+            &codefixture_audit::i18n::t(script_locale, "scan_internal_error")
+                .replace("{error}", &format!("{}: {e}", out_path.display())),
+        );
+        return Err(ExitCode::from(4));
+    }
+    emit_progress(
+        quiet,
+        &format!(
+            "[codefixture-audit] {} : {}",
+            codefixture_audit::i18n::t(script_locale, "report_generated"),
+            out_path.display()
+        ),
+    );
+    Ok(())
+}
+
+/// The last two lines of every scan, full or skipped as unchanged
+/// (ADR-0050): the summary and the total duration. Returns the exit code
+/// that `findings` give against the project's threshold.
+fn finish_scan(
+    findings: &[ReportFinding],
+    files_scanned: usize,
+    total_loc: usize,
+    root: &Path,
+    script_locale: &serde_json::Value,
+    t_command_start: std::time::Instant,
+) -> u8 {
+    // Never suppressed by `--quiet` (see ticket #44): it's the only
+    // message guaranteed by a silent CI scan — without it, a run that
+    // "succeeds" with no finding is indistinguishable from a run that scanned
+    // nothing at all.
+    emit_result(&format!(
+        "[codefixture-audit] {}",
+        codefixture_audit::i18n::t(script_locale, "scan_summary")
+            .replace("{files}", &files_scanned.to_string())
+            .replace("{loc}", &total_loc.to_string())
+            .replace("{findings}", &findings.len().to_string())
+    ));
+    // Whole command, from argument parsing to the written report
+    // (ticket #135) — the per-phase lines don't add up to it (rule
+    // loading aside, discovery and report rendering are not phases).
+    // Same never-suppressed treatment as the summary line above.
+    let total_elapsed = t_command_start.elapsed();
+    if JSON_LOGS.load(std::sync::atomic::Ordering::Relaxed) {
+        emit_json_line(
+            LogLevel::Info,
+            &codefixture_audit::i18n::t(script_locale, "scan_total_duration")
+                .replace("{duration}", &format_duration(total_elapsed)),
+            Some(serde_json::json!(total_elapsed.as_millis())),
+        );
+    } else {
+        emit_result(&format!(
+            "[codefixture-audit] {}",
+            codefixture_audit::i18n::t(script_locale, "scan_total_duration")
+                .replace("{duration}", &format_duration(total_elapsed))
+        ));
+    }
+
+    let high_count = findings
+        .iter()
+        .filter(|f| f.severity == "HIGH" || f.severity == "CRITICAL")
+        .count();
+    // Configurable threshold (ticket #42/spec #27) — `0` by default
+    // (missing file or no `thresholds` section) reproduces
+    // exactly the previous hardcoded behavior: failure as soon as
+    // at least one HIGH/CRITICAL exists. Accepted deviations vs Python
+    // documented in `read_max_high_threshold_config`.
+    let max_high_threshold =
+        codefixture_audit::project::project_config::read_max_high_threshold_config(root);
+    u8::from(high_count as i64 > max_high_threshold)
+}
+
+/// What [`report_unchanged_scan`] needs from `run_scan_command`.
+struct UnchangedScan<'a> {
+    /// The record of the last scan, whose inputs are those of this one.
+    last: &'a LastScan,
+    config: &'a ScanConfig,
+    format: &'a str,
+    /// Where `sarif` and `text` go; `None` for stdout, and for `html`.
+    output: Option<&'a Path>,
+    brand: &'a Brand,
+    quiet: bool,
+    /// Project name and scan date when `--sbom` is set.
+    sbom: Option<(&'a str, &'a chrono::DateTime<chrono::Local>)>,
+    script_locale: &'a serde_json::Value,
+    t_command_start: std::time::Instant,
+}
+
+/// Ends a scan whose inputs are those of the last one (ADR-0050): nothing
+/// is analysed. `html` writes nothing and names the last report; `sarif`
+/// and `text` are rebuilt from the findings of the last export; `--sbom`
+/// names the SBOM already written for these inputs, if any. The
+/// summary and the exit code are those of that export.
+fn report_unchanged_scan(scan: UnchangedScan<'_>) -> ExitCode {
+    let say = |key: &str| codefixture_audit::i18n::t(scan.script_locale, key);
+    let export = match codefixture_audit::report::export_json::load_export(&scan.last.export_path) {
+        Ok(export) => export,
+        Err(error) => {
+            emit_error(&say("scan_internal_error").replace(
+                "{error}",
+                &format!("{}: {error}", scan.last.export_path.display()),
+            ));
+            return ExitCode::from(4);
+        }
+    };
+    // The export's `YYYY-MM-DD-HH-MM` stamp, as the reader writes a date.
+    let date = chrono::NaiveDateTime::parse_from_str(&export.timestamp, "%Y-%m-%d-%H-%M")
+        .map_or_else(
+            |_| export.timestamp.clone(),
+            |d| d.format("%d/%m/%Y %H:%M").to_string(),
+        );
+    emit_result(&format!(
+        "[codefixture-audit] {}",
+        say("scan_unchanged").replace("{date}", &date)
+    ));
+    // The SBOM follows the report: the one written for these inputs is
+    // named, not written again; written only when none was yet, and then
+    // kept in the record for the next runs.
+    let recorded_sbom = scan.last.sbom_path.as_deref().filter(|p| p.is_file());
+    if let (Some(_), Some(sbom_path)) = (scan.sbom, recorded_sbom) {
+        emit_result(&format!(
+            "[codefixture-audit] {}",
+            say("scan_unchanged_sbom").replace("{path}", &sbom_path.display().to_string())
+        ));
+    } else if let Some((project_name, now)) = scan.sbom {
+        match write_sbom(scan.config, project_name, scan.brand, now) {
+            Ok(sbom_path) => {
+                emit_progress(
+                    scan.quiet,
+                    &format!("[codefixture-audit] SBOM : {}", sbom_path.display()),
+                );
+                // A record that cannot be written only costs the next run
+                // a new SBOM.
+                let mut record = scan.last.clone();
+                record.sbom_path = Some(sbom_path);
+                let _ = record.save(scan.config);
+            }
+            Err(e) => {
+                emit_error(&format!(
+                    "[codefixture-audit] {}",
+                    say("scan_internal_error").replace("{error}", &e)
+                ));
+                return ExitCode::from(4);
+            }
+        }
+    }
+    let text = match scan.format {
+        "sarif" => match sarif_text(&export.findings, scan.brand, scan.script_locale) {
+            Ok(text) => Some(text),
+            Err(code) => return code,
+        },
+        "text" => Some(format_text_report(&export.findings)),
+        _ => None,
+    };
+    match text {
+        Some(text) => {
+            if let Err(code) = write_scan_output(scan.output, &text, scan.quiet, scan.script_locale)
+            {
+                return code;
+            }
+        }
+        // `find_unchanged` only matched for `html` when the report exists.
+        None => {
+            if let Some(report) = &scan.last.report_path {
+                emit_result(&format!(
+                    "[codefixture-audit] {}",
+                    say("scan_unchanged_report").replace("{path}", &report.display().to_string())
+                ));
+            }
+        }
+    }
+    ExitCode::from(finish_scan(
+        &export.findings,
+        scan.last.files_scanned,
+        scan.last.total_loc,
+        &scan.config.root,
+        scan.script_locale,
+        scan.t_command_start,
+    ))
+}
+
+/// The `text` format: one `file:line: [severity] rule — message` line per
+/// finding.
+fn format_text_report(findings: &[ReportFinding]) -> String {
     let mut out = String::new();
-    for f in &report.findings {
+    for f in findings {
         let message = if f.risk.is_empty() {
             &f.rule_name
         } else {

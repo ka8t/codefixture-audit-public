@@ -385,5 +385,8 @@
   "scan_rule_duplicate": "Die Regel {rule} ist zweimal definiert: {kept} gilt, {dropped} wird ignoriert.",
   "scan_cache_line": "Cache ({language}): {dirty}/{files} Datei(en) seit dem letzten Scan geändert, {analysed}/{total} Datenflussanalysen neu ausgeführt.",
   "scan_cache_patterns_line": "Cache (Musterregeln): {analysed}/{files} Datei(en) neu analysiert, die übrigen seit dem letzten Scan unverändert.",
+  "scan_unchanged": "Seit der Analyse vom {date} hat sich keine Datei geändert: Es wurde nichts erneut analysiert.",
+  "scan_unchanged_report": "Bericht dieser Analyse: {path}",
+  "scan_unchanged_sbom": "SBOM unverändert: {path}",
   "config_wizard_run_again": "Es wurde noch keine Analyse durchgeführt. Um Ihr Projekt jetzt zu analysieren, starten Sie denselben Befehl erneut:"
 }

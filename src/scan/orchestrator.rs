@@ -610,6 +610,10 @@ pub struct ScanReport {
     /// How much of each language's taint pass the cache spared (empty
     /// without a cache).
     pub cache_stats: Vec<crate::scan::scan_cache::CacheStat>,
+    /// Governance file names the loaded rules look for
+    /// (`not_path_has_file`), sorted: recorded with the scan so that the
+    /// next one can check them without loading the rules (ADR-0050).
+    pub governance_names: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1439,37 +1443,11 @@ fn project_relative_path(root: &Path, path: &Path) -> String {
         .replace('\\', "/")
 }
 
-/// Runs a full scan on `config.root`.
-///
-/// Three phases:
-///   A. Reading + parsing of all files (once).
-///   B. Regex/file_contains, per file (independent of the others).
-///   C. Taint, **multi-file**: builds a `CallGraph` over the whole set
-///      of files (mirrors `dataflow_adapter.py` — one graph per batch
-///      of files analyzed together, here the whole scan since
-///      Decision #10 = Python only, hence a single language), resolves
-///      the interprocedural summaries per taint rule, then analyzes
-///      each file with `specs.summaries` seeded (the file's own
-///      summaries + resolved import summaries, own summaries taking
-///      priority over imports — mirrors `merged.update(summaries)` on
-///      the `dataflow_taint.py` side).
-pub fn run_scan(config: &ScanConfig) -> ScanReport {
-    // Total number of phases planned for THIS scan — mirrors
-    // `runner.py::_compute_phase_total` (already referenced above by
-    // `ScanConfig::quick_mode`: "Python only affects these 3 phases").
-    // The 3 core phases always run (rules, phase A, phase B), the
-    // phase C taint passes (Python/Java/JS-TS/PHP/C#) of the languages
-    // present (ticket #134), plus the optional phases actually enabled
-    // (dependencies/tests/database), disabled by `--quick` as on the
-    // Python side. Computed once, before any phase, so that the live
-    // `[n/N]` counter (ticket #45) is correct from the very first
-    // message rather than a frozen constant that would go wrong as
-    // soon as a phase is added (went from 7 to 8 in ticket #79 when
-    // wiring up the C# taint engine).
-    // File discovery runs first, outside any timed phase (it used to sit
-    // between the rules phase and phase A): the languages it finds
-    // decide which phase C passes run, hence the `[n/N]` total printed
-    // from the very first phase on (ticket #134).
+/// Discovers the files a scan of `config` reads, and the folders it skips
+/// as holding no project code (ticket #152). The single place of the
+/// discovery settings: `run_scan` and the unchanged-project check
+/// (`scan::unchanged`, ADR-0050) must see exactly the same files.
+pub fn discover_files(config: &ScanConfig) -> (Vec<PathBuf>, Vec<SkippedDir>) {
     let discovery_config = FileDiscoveryConfig {
         // Derived from `SourceLanguage::EXTENSIONS`, the sole authoritative
         // list (fix 2026-11-04): a hand-maintained copy here had drifted
@@ -1502,8 +1480,41 @@ pub fn run_scan(config: &ScanConfig) -> ScanReport {
         skip_non_project_dirs: true,
     };
     let include_paths: Vec<&Path> = config.include_paths.iter().map(Path::new).collect();
-    let (files, skipped_dirs) =
-        find_files_and_skipped(&config.root, &include_paths, &discovery_config);
+    find_files_and_skipped(&config.root, &include_paths, &discovery_config)
+}
+
+/// Runs a full scan on `config.root`.
+///
+/// Three phases:
+///   A. Reading + parsing of all files (once).
+///   B. Regex/file_contains, per file (independent of the others).
+///   C. Taint, **multi-file**: builds a `CallGraph` over the whole set
+///      of files (mirrors `dataflow_adapter.py` — one graph per batch
+///      of files analyzed together, here the whole scan since
+///      Decision #10 = Python only, hence a single language), resolves
+///      the interprocedural summaries per taint rule, then analyzes
+///      each file with `specs.summaries` seeded (the file's own
+///      summaries + resolved import summaries, own summaries taking
+///      priority over imports — mirrors `merged.update(summaries)` on
+///      the `dataflow_taint.py` side).
+pub fn run_scan(config: &ScanConfig) -> ScanReport {
+    // Total number of phases planned for THIS scan — mirrors
+    // `runner.py::_compute_phase_total` (already referenced above by
+    // `ScanConfig::quick_mode`: "Python only affects these 3 phases").
+    // The 3 core phases always run (rules, phase A, phase B), the
+    // phase C taint passes (Python/Java/JS-TS/PHP/C#) of the languages
+    // present (ticket #134), plus the optional phases actually enabled
+    // (dependencies/tests/database), disabled by `--quick` as on the
+    // Python side. Computed once, before any phase, so that the live
+    // `[n/N]` counter (ticket #45) is correct from the very first
+    // message rather than a frozen constant that would go wrong as
+    // soon as a phase is added (went from 7 to 8 in ticket #79 when
+    // wiring up the C# taint engine).
+    // File discovery runs first, outside any timed phase (it used to sit
+    // between the rules phase and phase A): the languages it finds
+    // decide which phase C passes run, hence the `[n/N]` total printed
+    // from the very first phase on (ticket #134).
+    let (files, skipped_dirs) = discover_files(config);
 
     // ADR-0038: the rule languages of the scan — the project's declared
     // list, else the languages of the discovered files. The rules of any
@@ -2043,8 +2054,10 @@ pub fn run_scan(config: &ScanConfig) -> ScanReport {
         .keys()
         .map(|lang| lang.to_string())
         .collect();
+    let governance_names = patterns::governance_names(&rule_jsons);
 
     ScanReport {
+        governance_names,
         findings: all_findings,
         files_scanned: parsed_files.len(),
         total_loc,

@@ -105,7 +105,7 @@ pub(super) fn run_pattern_pass(
 /// The governance file names any loaded rule looks for
 /// (`not_path_has_file`), sorted and without duplicates: whether they
 /// exist around a file is part of the file's cache key.
-fn governance_names(rule_jsons: &[serde_json::Value]) -> Vec<String> {
+pub(super) fn governance_names(rule_jsons: &[serde_json::Value]) -> Vec<String> {
     rule_jsons
         .iter()
         .filter_map(|r| r.get("file_contains")?.get("not_path_has_file")?.as_array())
