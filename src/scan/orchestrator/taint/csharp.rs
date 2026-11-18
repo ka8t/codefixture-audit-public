@@ -104,7 +104,11 @@ impl<'a> TaintLanguage<'a> for CSharpTaint<'a> {
         };
         let lines = Some(file.source_lines_plain.as_slice());
         specs.summaries = compute_csharp_file_summaries_prepared(prepared, specs, lines);
-        specs.type_map = self.type_maps.get(&file.rel_path).cloned().unwrap_or_default();
+        specs.type_map = self
+            .type_maps
+            .get(&file.rel_path)
+            .cloned()
+            .unwrap_or_default();
         run_taint_rule_csharp_prepared(prepared, specs, lines)
     }
 }

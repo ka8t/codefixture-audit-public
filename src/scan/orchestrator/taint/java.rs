@@ -75,7 +75,11 @@ impl<'a> TaintLanguage<'a> for JavaTaint<'a> {
         resolved: &ResolvedSummaries,
     ) -> TaintFindings {
         specs.summaries = file_summaries(resolved, &file.rel_path);
-        specs.type_map = self.type_maps.get(&file.rel_path).cloned().unwrap_or_default();
+        specs.type_map = self
+            .type_maps
+            .get(&file.rel_path)
+            .cloned()
+            .unwrap_or_default();
         // The graph prepared every file of the pass once for all its
         // rules (ticket #192). A file it does not know cannot happen (the
         // pass is built from the files it analyzes); it would still be

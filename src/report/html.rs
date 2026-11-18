@@ -38,7 +38,6 @@ use crate::report::compliance_html::{
 use crate::report::data::{ReportData, compute_report_data};
 use crate::report::exports::sarif::ReportFinding;
 use crate::report::findings_html::render_severity_section;
-use crate::rules::identity::RuleCatalog;
 use crate::report::report_assets::{
     asset_data_uri, load_asset, load_template, load_vendor_chart_js,
 };
@@ -46,6 +45,7 @@ use crate::report::summary_html::{
     build_exec_recommendations, build_exec_trend, build_threat_context, render_heatmap,
 };
 use crate::report::text::{escape, lang_label};
+use crate::rules::identity::RuleCatalog;
 
 /// Inputs that can't be derived from the findings — project/tool
 /// identity, timestamp, display thresholds. Everything else

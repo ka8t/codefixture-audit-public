@@ -300,7 +300,8 @@ mod tests {
 
     #[test]
     fn test_load_db_credentials_full_success() {
-        let tmp = std::env::temp_dir().join(format!("codefixture-audit-test-{}", std::process::id()));
+        let tmp =
+            std::env::temp_dir().join(format!("codefixture-audit-test-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
         std::fs::write(tmp.join(".env"), "DB_PASSWORD=hunter2\n").unwrap();
         let config = DbConfig {

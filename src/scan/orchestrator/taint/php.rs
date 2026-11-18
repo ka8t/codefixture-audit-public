@@ -28,8 +28,7 @@ impl<'a> TaintLanguage<'a> for PhpTaint<'a> {
     const NAME: &'static str = "php";
     const FILE_LANGUAGES: &'static [SourceLanguage] = &[SourceLanguage::Php];
     const RULE_LANGUAGE: SourceLanguage = SourceLanguage::Php;
-    const PHASE_LABEL: (&'static str, &'static str) =
-        ("scan_phase_c_php", "phase C - PHP (taint)");
+    const PHASE_LABEL: (&'static str, &'static str) = ("scan_phase_c_php", "phase C - PHP (taint)");
 
     fn build(files: &[&'a ParsedFile]) -> Self {
         PhpTaint {

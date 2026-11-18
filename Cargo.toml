@@ -37,8 +37,6 @@ tree-sitter-python = "0.25.0"
 tree-sitter-typescript = "0.23.2"
 tree-sitter-yaml = "0.7.2"
 which = "8.0.0"
-
-
 # The delivered binary: whole-program optimization across all crates
 # (`lto = "fat"`, one codegen unit) for the regex and tree-sitter hot paths,
 # and no symbol table (`strip`), which only debuggers read. `panic` stays

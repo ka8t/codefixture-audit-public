@@ -158,8 +158,10 @@ mod tests {
     }
 
     fn tmp_dir(label: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("codefixture-audit-export-{label}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "codefixture-audit-export-{label}-{}",
+            std::process::id()
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }

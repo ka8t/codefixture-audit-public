@@ -25,7 +25,6 @@ use codefixture_audit::report::exports::sarif::build_sarif_report;
 use codefixture_audit::report::html::{ReportContext, generate_html};
 use codefixture_audit::scan::orchestrator::{ScanConfig, ScanReport, run_scan};
 
-
 /// Exclusions applied to every scan — same list as
 /// `DEFAULT_CONFIG["paths"]["exclude"]` (`Audit/sca/config.py`).
 /// `paths.exclude` (`audit.config.json`) and `--exclude` ADD to this
@@ -133,7 +132,8 @@ fn resolve_project_paths(
     match codefixture_audit::project::project_config::load_config_json(root) {
         Ok(Some(_)) => {
             let (include, exclude) =
-                codefixture_audit::project::project_config::read_paths_config(root).unwrap_or_default();
+                codefixture_audit::project::project_config::read_paths_config(root)
+                    .unwrap_or_default();
             let include = if include.is_empty() {
                 vec![".".to_string()]
             } else {
@@ -283,8 +283,10 @@ fn resolve_rules_path(
         Some(path) if path.is_file() => Ok(path),
         Some(path) => fail("scan_invalid_rules_dir", &path),
         None => {
-            let pack = codefixture_audit::rules::catalog::default_pack_path()
-                .unwrap_or_else(|| PathBuf::from(codefixture_audit::rules::pack_format::PACK_FILE_NAME));
+            let pack =
+                codefixture_audit::rules::catalog::default_pack_path().unwrap_or_else(|| {
+                    PathBuf::from(codefixture_audit::rules::pack_format::PACK_FILE_NAME)
+                });
             if pack.is_file() {
                 Ok(pack)
             } else {
@@ -309,7 +311,6 @@ fn read_rules_or_exit(
         ExitCode::from(2)
     })
 }
-
 
 /// Rule languages declared by the project (ADR-0038): the `languages` key
 /// of `audit.config.json`, warning once about the values that name no
@@ -406,11 +407,7 @@ fn skipped_dirs_line(
 /// rest is counted, like the scope line. `None` when nothing was skipped.
 /// Never silent, for the reason of [`skipped_dirs_line`]: a file the scan
 /// leaves out must be named.
-fn skipped_files_line(
-    key: &str,
-    files: &[String],
-    say: impl Fn(&str) -> String,
-) -> Option<String> {
+fn skipped_files_line(key: &str, files: &[String], say: impl Fn(&str) -> String) -> Option<String> {
     if files.is_empty() {
         return None;
     }
@@ -469,7 +466,10 @@ fn version_rules_line(
             counts,
         } => {
             let total: usize = counts.iter().map(|(_, n)| n).sum();
-            let counts: Vec<String> = counts.iter().map(|(name, n)| format!("{name} {n}")).collect();
+            let counts: Vec<String> = counts
+                .iter()
+                .map(|(name, n)| format!("{name} {n}"))
+                .collect();
             (
                 false,
                 say("scan_version_rules_read")
@@ -480,9 +480,10 @@ fn version_rules_line(
             )
         }
         VersionRulesStatus::Missing => (true, say("scan_version_rules_missing")),
-        VersionRulesStatus::Unreadable { error } => {
-            (true, say("scan_version_rules_unreadable").replace("{error}", error))
-        }
+        VersionRulesStatus::Unreadable { error } => (
+            true,
+            say("scan_version_rules_unreadable").replace("{error}", error),
+        ),
     }
 }
 
@@ -508,7 +509,10 @@ fn print_phase_progress(label: &str, elapsed: std::time::Duration) {
 /// `print_phase_progress` (kept separate so its format is testable
 /// without capturing stderr).
 fn phase_progress_line(label: &str, elapsed: std::time::Duration) -> String {
-    format!("[codefixture-audit]   {label} : {}", format_duration(elapsed))
+    format!(
+        "[codefixture-audit]   {label} : {}",
+        format_duration(elapsed)
+    )
 }
 
 /// Human-readable duration for the console (ticket #135): `850 ms`
@@ -622,9 +626,15 @@ mod tests {
 
     #[test]
     fn test_rerun_command_is_the_typed_command_ready_to_copy() {
-        let args = ["./target/release/codefixture-audit", "scan", "/Users/me/My Project", "--lang", "fr"]
-            .iter()
-            .map(|s| s.to_string());
+        let args = [
+            "./target/release/codefixture-audit",
+            "scan",
+            "/Users/me/My Project",
+            "--lang",
+            "fr",
+        ]
+        .iter()
+        .map(|s| s.to_string());
         assert_eq!(
             rerun_command(args),
             "./target/release/codefixture-audit scan '/Users/me/My Project' --lang fr"
@@ -668,13 +678,27 @@ mod tests {
         );
         assert!(!warning);
         assert!(
-            line.contains("/x/rules.cfpack") && line.contains("2026-11-11") && line.contains("PyPI 12, npm 30") && line.contains("42"),
+            line.contains("/x/rules.cfpack")
+                && line.contains("2026-11-11")
+                && line.contains("PyPI 12, npm 30")
+                && line.contains("42"),
             "{line}"
         );
         let (warning, line) = version_rules_line(&VersionRulesStatus::Missing, say);
-        assert!(warning && line.contains("not checked") && !line.contains("sadb"), "{line}");
-        let (warning, line) = version_rules_line(&VersionRulesStatus::Unreadable { error: "bad magic".into() }, say);
-        assert!(warning && line.contains("bad magic") && line.contains("not checked"), "{line}");
+        assert!(
+            warning && line.contains("not checked") && !line.contains("sadb"),
+            "{line}"
+        );
+        let (warning, line) = version_rules_line(
+            &VersionRulesStatus::Unreadable {
+                error: "bad magic".into(),
+            },
+            say,
+        );
+        assert!(
+            warning && line.contains("bad magic") && line.contains("not checked"),
+            "{line}"
+        );
     }
 
     #[test]
@@ -783,7 +807,6 @@ mod tests {
         assert_eq!(no_rules.err(), Some(ExitCode::from(2)));
         assert_eq!(missing.err(), Some(ExitCode::from(2)));
     }
-
 
     #[test]
     fn test_phase_progress_line_and_print() {
@@ -1178,7 +1201,6 @@ enum Command {
     // lists its rules with `list-rules` (the maintainer, 2026-11-14).
 }
 
-
 impl Command {
     /// Console language of the subcommand, for messages emitted outside
     /// it (the panic hook).
@@ -1399,12 +1421,7 @@ fn run_list_rules_command(lang: &str, rules: Option<PathBuf>) -> ExitCode {
             rules.len()
         );
         for rule in rules {
-            let _ = writeln!(
-                out,
-                "   {:<40} {}",
-                rule.id,
-                rule_display_name(rule, lang)
-            );
+            let _ = writeln!(out, "   {:<40} {}", rule.id, rule_display_name(rule, lang));
         }
         let _ = writeln!(out);
     }
@@ -1548,7 +1565,10 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
             Ok(ConfigWizardOutcome::Declined) => ExitCode::from(1),
             Ok(ConfigWizardOutcome::InputClosed) => {
                 eprintln!();
-                emit_error(&format!("[codefixture-audit] {}", say("config_prompt_input_closed")));
+                emit_error(&format!(
+                    "[codefixture-audit] {}",
+                    say("config_prompt_input_closed")
+                ));
                 ExitCode::from(2)
             }
             Err(error) => {
@@ -1664,8 +1684,7 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
         codefixture_audit::BUILD_VERSION
     ));
 
-    let (include_paths, base_excludes, paths_origin) =
-        resolve_project_paths(&path, &script_locale);
+    let (include_paths, base_excludes, paths_origin) = resolve_project_paths(&path, &script_locale);
     let exclude_patterns: Vec<String> = base_excludes.into_iter().chain(exclude).collect();
 
     // Ticket #140 — the scope actually applied, once per scan.
@@ -1926,11 +1945,11 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
                         "scan_cache_line"
                     },
                 )
-                    .replace("{language}", &stat.language)
-                    .replace("{dirty}", &stat.dirty.to_string())
-                    .replace("{files}", &stat.files.to_string())
-                    .replace("{analysed}", &stat.analysed.to_string())
-                    .replace("{total}", &stat.total.to_string())
+                .replace("{language}", &stat.language)
+                .replace("{dirty}", &stat.dirty.to_string())
+                .replace("{files}", &stat.files.to_string())
+                .replace("{analysed}", &stat.analysed.to_string())
+                .replace("{total}", &stat.total.to_string())
             ),
         );
     }

@@ -436,7 +436,10 @@ mod tests {
             severities: BTreeMap::new(),
         }];
         let html = render_heatmap(&top_files, &en);
-        assert!(html.contains("navigateToFile("), "the inline handler is present");
+        assert!(
+            html.contains("navigateToFile("),
+            "the inline handler is present"
+        );
         assert!(
             !html.contains("('b.py"),
             "a bare single quote must not survive inside the JS string"

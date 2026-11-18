@@ -142,7 +142,8 @@ fn write_catalog_pack(manifest_dir: &str, out_dir: &str) {
             );
         } else {
             let demo_rules = version_rules(&demo_versions, "demo");
-            let pack = pack_format::write_pack(pack_format::DEMO_PACK_NAME, &demo, demo_rules.as_deref());
+            let pack =
+                pack_format::write_pack(pack_format::DEMO_PACK_NAME, &demo, demo_rules.as_deref());
             fs::write(&demo_dest, pack).expect("writing rules-demo.cfpack next to the binary");
         }
         return;

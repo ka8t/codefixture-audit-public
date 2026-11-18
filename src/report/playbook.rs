@@ -96,7 +96,12 @@ fn step_icon(step_type: &str) -> &'static str {
 /// `action_i18n`. English text stays only as a last resort. Fixed after a
 /// French report showed an English playbook (2026-11-14); the Python
 /// report has the same English-only playbook.
-fn step_text(step: &PlaybookStep, lang: &str, report_locale: &Value, solution: Option<&str>) -> String {
+fn step_text(
+    step: &PlaybookStep,
+    lang: &str,
+    report_locale: &Value,
+    solution: Option<&str>,
+) -> String {
     const LOCATE: &str = "Locate the vulnerable code pattern in the file";
     const RERUN: &str = "Run the audit again to verify the finding is resolved";
     if step.step_type == "code_change"
@@ -235,7 +240,10 @@ mod tests {
             Some("Ajoutez scope=\"col\" ou scope=\"row\"."),
             "Rend les tableaux lisibles au lecteur d'écran.",
         );
-        assert!(html.contains("Repérez tous les éléments &lt;th&gt;"), "{html}");
+        assert!(
+            html.contains("Repérez tous les éléments &lt;th&gt;"),
+            "{html}"
+        );
         assert!(html.contains("Ajoutez scope="), "{html}");
         assert!(html.contains("Rend les tableaux lisibles"), "{html}");
         // `escape` encodes `'` as `&#39;` since the 2026-11-15 security fix.
@@ -266,9 +274,15 @@ mod tests {
             "Scripts can no longer read the cookie.",
         );
         assert!(html.contains("Pass httpOnly: true"), "{html}");
-        assert!(html.contains("Scripts can no longer read the cookie."), "{html}");
+        assert!(
+            html.contains("Scripts can no longer read the cookie."),
+            "{html}"
+        );
         assert!(!html.contains("set_cookie"), "{html}");
-        assert!(html.contains("Locate the vulnerable code pattern"), "{html}");
+        assert!(
+            html.contains("Locate the vulnerable code pattern"),
+            "{html}"
+        );
     }
 
     #[test]
@@ -291,6 +305,9 @@ mod tests {
     #[test]
     fn test_render_playbook_unknown_rule_is_empty() {
         let en = load_report_locale("en");
-        assert_eq!(render_playbook_inline("does_not_exist_xyz", &en, None, ""), "");
+        assert_eq!(
+            render_playbook_inline("does_not_exist_xyz", &en, None, ""),
+            ""
+        );
     }
 }

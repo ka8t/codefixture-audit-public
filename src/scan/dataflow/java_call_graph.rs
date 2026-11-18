@@ -375,7 +375,9 @@ impl<'tree> JavaCallGraph<'tree> {
                 && let Some(previous) = reuse.previous.get(&node)
             {
                 resolved.insert(node, previous.clone());
-                own.entry(filepath).or_default().insert(name, previous.clone());
+                own.entry(filepath)
+                    .or_default()
+                    .insert(name, previous.clone());
                 continue;
             }
             let mut seed: BTreeMap<String, Arc<FunctionSummary>> = BTreeMap::new();

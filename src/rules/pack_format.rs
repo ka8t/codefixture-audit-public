@@ -82,7 +82,7 @@ const MAGIC: &[u8; 8] = b"CFPACK02";
 
 /// Magics of the packs written before the rename to `.cfpack`
 /// (ADR-0049): `SCAPACK1` (format 1, ADR-0040, rules only) and
-/// `SCAPACK2` (format 2, ADR-0043). Recognised only to name them in the
+/// `SCAPACK2` (format 2, ADR-0043). Recognized only to name them in the
 /// refusal, never read.
 const LEGACY_MAGICS: [&[u8; 8]; 2] = [b"SCAPACK1", b"SCAPACK2"];
 
@@ -187,7 +187,9 @@ pub fn write_pack_with_key(
     )
     .into_bytes();
 
-    let mut out = Vec::with_capacity(MAGIC.len() + 4 + header_bytes.len() + rules_bytes + version_rules_bytes);
+    let mut out = Vec::with_capacity(
+        MAGIC.len() + 4 + header_bytes.len() + rules_bytes + version_rules_bytes,
+    );
     out.extend_from_slice(MAGIC);
     out.extend_from_slice(&(header_bytes.len() as u32).to_le_bytes());
     out.extend_from_slice(&header_bytes);
@@ -215,9 +217,15 @@ fn seal(header_bytes: &[u8], section: &[u8], plain: &[u8], key: &[u8; 32]) -> Ve
 
 /// Decrypts one section with the demo key, `Err` naming the pack as
 /// corrupt when authentication fails.
-fn open_section(header_bytes: &[u8], section: &[u8], blob: &[u8], key: &[u8; 32]) -> Result<Vec<u8>, String> {
+fn open_section(
+    header_bytes: &[u8],
+    section: &[u8],
+    blob: &[u8],
+    key: &[u8; 32],
+) -> Result<Vec<u8>, String> {
     let aad = [header_bytes, section].concat();
-    rules_crypto::decrypt_bytes_with_aad(blob, &aad, key).ok_or_else(|| "rule pack is corrupt or was altered".to_string())
+    rules_crypto::decrypt_bytes_with_aad(blob, &aad, key)
+        .ok_or_else(|| "rule pack is corrupt or was altered".to_string())
 }
 
 /// A pack split into its parts: header, raw header bytes (the associated
@@ -234,7 +242,10 @@ struct PackParts<'a> {
 /// first bytes of a pack are needed, so a scan can tell whether a pack
 /// carries version rules without reading or decrypting it.
 fn parse_header(bytes: &[u8]) -> Result<(PackHeader, usize), String> {
-    if LEGACY_MAGICS.iter().any(|magic| bytes.starts_with(magic.as_slice())) {
+    if LEGACY_MAGICS
+        .iter()
+        .any(|magic| bytes.starts_with(magic.as_slice()))
+    {
         return Err(
             "rule pack in the former .scapack format, which this engine no longer reads: use a .cfpack pack built for this engine"
                 .to_string(),
@@ -359,7 +370,13 @@ pub fn open_version_rules(bytes: &[u8]) -> Result<Option<Vec<u8>>, String> {
         return Ok(None);
     }
     let key = demo_key_for(&parts.header)?;
-    open_section(parts.header_bytes, VERSION_RULES_SECTION, parts.version_rules, &key).map(Some)
+    open_section(
+        parts.header_bytes,
+        VERSION_RULES_SECTION,
+        parts.version_rules,
+        &key,
+    )
+    .map(Some)
 }
 
 /// Every `.sca` file under `root`, as `(path relative to root with `/`
@@ -527,10 +544,16 @@ mod tests {
     fn test_pack_is_deterministic_and_content_dependent() {
         let mut reversed = sample();
         reversed.reverse();
-        assert_eq!(write_pack("demo", &sample(), None), write_pack("demo", &reversed, None));
+        assert_eq!(
+            write_pack("demo", &sample(), None),
+            write_pack("demo", &reversed, None)
+        );
         let mut changed = sample();
         changed[0].1.push(' ');
-        assert_ne!(write_pack("demo", &sample(), None), write_pack("demo", &changed, None));
+        assert_ne!(
+            write_pack("demo", &sample(), None),
+            write_pack("demo", &changed, None)
+        );
     }
 
     #[test]
@@ -569,7 +592,8 @@ mod tests {
     #[test]
     fn test_legacy_scapack_pack_is_refused_with_a_clear_reason() {
         for (magic, format) in LEGACY_MAGICS.iter().zip([1, 2]) {
-            let header = format!(r#"{{"format":{format},"name":"x","key_fingerprint":"0","rule_files":0}}"#);
+            let header =
+                format!(r#"{{"format":{format},"name":"x","key_fingerprint":"0","rule_files":0}}"#);
             let mut bytes = magic.to_vec();
             bytes.extend_from_slice(&(header.len() as u32).to_le_bytes());
             bytes.extend_from_slice(header.as_bytes());
@@ -680,20 +704,32 @@ mod tests {
         let pack = write_pack("builtin", &sample(), Some(&container));
         let header = read_header(&pack).unwrap();
         assert!(header.has_version_rules());
-        assert_eq!(header.version_rules_bytes, container.len() + SECTION_OVERHEAD);
+        assert_eq!(
+            header.version_rules_bytes,
+            container.len() + SECTION_OVERHEAD
+        );
         assert_eq!(open_version_rules(&pack).unwrap(), Some(container));
         let (_, files) = open_pack(&pack).unwrap();
         assert_eq!(files.len(), 2, "rules unchanged by the second section");
-        assert!(!String::from_utf8_lossy(&pack).contains("SADB-container"), "encrypted");
+        assert!(
+            !String::from_utf8_lossy(&pack).contains("SADB-container"),
+            "encrypted"
+        );
     }
 
     #[test]
     fn test_pack_without_version_rules_has_none() {
-        for pack in [write_pack("demo", &sample(), None), write_pack("demo", &sample(), Some(b""))] {
+        for pack in [
+            write_pack("demo", &sample(), None),
+            write_pack("demo", &sample(), Some(b"")),
+        ] {
             assert!(!read_header(&pack).unwrap().has_version_rules());
             assert_eq!(open_version_rules(&pack).unwrap(), None);
         }
-        assert_eq!(write_pack("demo", &sample(), None), write_pack("demo", &sample(), Some(b"")));
+        assert_eq!(
+            write_pack("demo", &sample(), None),
+            write_pack("demo", &sample(), Some(b""))
+        );
     }
 
     #[test]
@@ -711,8 +747,16 @@ mod tests {
         let mut corrupt = pack.clone();
         let last = corrupt.len() - 1;
         corrupt[last] ^= 0xFF;
-        assert!(open_version_rules(&corrupt).unwrap_err().contains("corrupt"));
+        assert!(
+            open_version_rules(&corrupt)
+                .unwrap_err()
+                .contains("corrupt")
+        );
         assert!(open_pack(&corrupt).is_ok(), "the rules section is intact");
-        assert!(open_version_rules(&pack[..pack.len() - 1]).unwrap_err().contains("truncated"));
+        assert!(
+            open_version_rules(&pack[..pack.len() - 1])
+                .unwrap_err()
+                .contains("truncated")
+        );
     }
 }

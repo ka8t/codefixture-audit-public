@@ -15,7 +15,10 @@ pub fn rule_display_name(rule: &Value, lang: &str) -> String {
     if !name.is_empty() {
         return name;
     }
-    rule.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string()
+    rule.get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string()
 }
 
 /// Longest code line a finding shows whole, in characters: the limit of
@@ -386,7 +389,10 @@ mod tests {
     #[test]
     fn test_escape_single_quote() {
         assert_eq!(escape("a'); alert(1); ('"), "a&#39;); alert(1); (&#39;");
-        assert!(!escape("x'y").contains('\''), "no bare single quote survives");
+        assert!(
+            !escape("x'y").contains('\''),
+            "no bare single quote survives"
+        );
     }
 
     #[test]

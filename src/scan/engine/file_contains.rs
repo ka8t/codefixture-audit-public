@@ -117,7 +117,13 @@ pub fn matches(
 pub fn governance_fingerprint(filepath: &Path, names: &[String]) -> String {
     names
         .iter()
-        .map(|n| if governance_file_found(filepath, std::slice::from_ref(n)) { '1' } else { '0' })
+        .map(|n| {
+            if governance_file_found(filepath, std::slice::from_ref(n)) {
+                '1'
+            } else {
+                '0'
+            }
+        })
         .collect()
 }
 
@@ -159,7 +165,12 @@ pub fn execute_file_contains_rule(
     content: &str,
     all_lines: &[(usize, String)],
 ) -> Option<Finding> {
-    if !matches(&rule.file_contains, content, Some(location), all_lines.len()) {
+    if !matches(
+        &rule.file_contains,
+        content,
+        Some(location),
+        all_lines.len(),
+    ) {
         return None;
     }
 
@@ -223,7 +234,10 @@ mod tests {
     /// Location whose absolute and relative paths are the same string —
     /// enough for the conditions that don't touch the disk.
     fn at(path: &str) -> Option<FileLocation<'_>> {
-        Some(FileLocation { absolute: Path::new(path), relative: path })
+        Some(FileLocation {
+            absolute: Path::new(path),
+            relative: path,
+        })
     }
 
     #[test]
@@ -265,10 +279,16 @@ mod tests {
 
         let mut fc = empty_condition();
         fc.not_path_has_file = vec!["governance.txt".to_string()];
-        let location = FileLocation { absolute: &file, relative: "deploy.yml" };
+        let location = FileLocation {
+            absolute: &file,
+            relative: "deploy.yml",
+        };
         let blocked = !matches(&fc, "x", Some(location), 1);
         std::fs::remove_dir_all(&dir).unwrap();
-        assert!(blocked, "the governance file found on disk must suppress the finding");
+        assert!(
+            blocked,
+            "the governance file found on disk must suppress the finding"
+        );
     }
 
     #[test]
@@ -288,7 +308,10 @@ mod tests {
         // they're never looked up on disk, never found → no blocking.
         let dir = std::env::temp_dir();
         let fake_file = dir.join("some_scanned_file.py");
-        let location = FileLocation { absolute: &fake_file, relative: "some_scanned_file.py" };
+        let location = FileLocation {
+            absolute: &fake_file,
+            relative: "some_scanned_file.py",
+        };
         assert!(matches(&fc, "x", Some(location), 1));
     }
 

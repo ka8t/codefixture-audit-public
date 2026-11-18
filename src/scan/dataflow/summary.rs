@@ -434,12 +434,21 @@ fn bounded_by_literal_allowlist(ann: Node, source: &[u8]) -> bool {
     // wrapper, whose parent is the `typed_default_parameter`.
     let Some(param) = ann
         .parent()
-        .and_then(|t| if t.kind() == "type" { t.parent() } else { Some(t) })
+        .and_then(|t| {
+            if t.kind() == "type" {
+                t.parent()
+            } else {
+                Some(t)
+            }
+        })
         .filter(|p| p.kind() == "typed_default_parameter")
     else {
         return false;
     };
-    let Some(call) = param.child_by_field_name("value").filter(|v| v.kind() == "call") else {
+    let Some(call) = param
+        .child_by_field_name("value")
+        .filter(|v| v.kind() == "call")
+    else {
         return false;
     };
     let callee = call
@@ -480,7 +489,9 @@ fn is_word_list_pattern(literal: &str) -> bool {
         .unwrap_or(inner);
     let inner = inner.strip_prefix("?:").unwrap_or(inner);
     inner.split('|').all(|w| {
-        !w.is_empty() && w.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        !w.is_empty()
+            && w.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
     })
 }
 

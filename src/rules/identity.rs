@@ -81,7 +81,10 @@ mod tests {
     #[test]
     fn test_identity_of_a_compiled_rule() {
         let rule = json!({"id": "base64_eval", "language": "python"});
-        assert_eq!(RuleId::of(&rule), Some(RuleId::new("python", "base64_eval")));
+        assert_eq!(
+            RuleId::of(&rule),
+            Some(RuleId::new("python", "base64_eval"))
+        );
         assert_eq!(RuleId::of(&rule).unwrap().to_string(), "python/base64_eval");
         assert_eq!(RuleId::of(&json!({"language": "python"})), None);
     }

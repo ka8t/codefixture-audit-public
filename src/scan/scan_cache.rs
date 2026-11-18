@@ -127,9 +127,18 @@ impl CacheKey {
     pub fn engine_dir(&self, base: &Path) -> PathBuf {
         let version: String = crate::BUILD_VERSION
             .chars()
-            .map(|c| if c.is_ascii_alphanumeric() || "+.-".contains(c) { c } else { '_' })
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || "+.-".contains(c) {
+                    c
+                } else {
+                    '_'
+                }
+            })
             .collect();
-        base.join(format!("{version}-{}", &sha256_hex(self.engine.as_bytes())[..8]))
+        base.join(format!(
+            "{version}-{}",
+            &sha256_hex(self.engine.as_bytes())[..8]
+        ))
     }
 
     /// The key of the running engine for `lang`.
@@ -374,7 +383,9 @@ fn remove_files_of_the_old_layout(base: &Path) {
     };
     for path in entries.flatten().map(|e| e.path()) {
         let old_cache_file = path.is_file()
-            && path.file_name().is_some_and(|n| n.to_string_lossy().ends_with(".json.gz"));
+            && path
+                .file_name()
+                .is_some_and(|n| n.to_string_lossy().ends_with(".json.gz"));
         if old_cache_file {
             let _ = std::fs::remove_file(path);
         }
@@ -464,9 +475,15 @@ mod tests {
             engine: "e2".to_string(),
             lang: "fr".to_string(),
         };
-        assert!(TaintCache::load(&path, &other).is_none(), "another engine: full scan");
+        assert!(
+            TaintCache::load(&path, &other).is_none(),
+            "another engine: full scan"
+        );
         std::fs::write(&path, b"garbage").unwrap();
-        assert!(TaintCache::load(&path, &key).is_none(), "unreadable: full scan");
+        assert!(
+            TaintCache::load(&path, &key).is_none(),
+            "unreadable: full scan"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -532,7 +549,10 @@ mod tests {
         let older = engine_dir_used_at(&base, "older", 4_000);
         let current = engine_dir_used_at(&base, "current", 9_500);
         prune_engine_dirs(&base, &current);
-        assert!(daily.exists(), "used last, kept despite its old folder date");
+        assert!(
+            daily.exists(),
+            "used last, kept despite its old folder date"
+        );
         assert!(other.exists());
         assert!(!older.exists());
         std::fs::remove_dir_all(&base).ok();

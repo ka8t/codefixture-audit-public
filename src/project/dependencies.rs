@@ -545,7 +545,10 @@ mod tests {
     use std::io::Write;
 
     fn write_tmp(name: &str, content: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("codefixture-audit-deps-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "codefixture-audit-deps-test-{}",
+            std::process::id()
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(name);
         let mut f = std::fs::File::create(&path).unwrap();
@@ -651,7 +654,10 @@ mod tests {
 
     #[test]
     fn test_find_dependency_files_root_requirements() {
-        let dir = std::env::temp_dir().join(format!("codefixture-audit-deps-find-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "codefixture-audit-deps-find-{}",
+            std::process::id()
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("requirements.txt"), "django==4.0\n").unwrap();
         let files = find_dependency_files(&dir, &[]);

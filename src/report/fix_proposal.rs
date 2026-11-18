@@ -157,7 +157,11 @@ fn placeholder(chars: &[char], start: usize, quote: char) -> Option<(String, Opt
         }
         i += 1;
     }
-    let expr: String = chars[start..i].iter().collect::<String>().trim().to_string();
+    let expr: String = chars[start..i]
+        .iter()
+        .collect::<String>()
+        .trim()
+        .to_string();
     if expr.is_empty() {
         return None;
     }
@@ -166,8 +170,11 @@ fn placeholder(chars: &[char], start: usize, quote: char) -> Option<(String, Opt
         '!' => {
             // `!=` is a comparison inside the expression: not handled.
             let conv = *chars.get(i + 1)?;
-            (matches!(conv, 'r' | 's') && chars.get(i + 2) == Some(&'}'))
-                .then_some((expr, Some(conv), i + 3))
+            (matches!(conv, 'r' | 's') && chars.get(i + 2) == Some(&'}')).then_some((
+                expr,
+                Some(conv),
+                i + 3,
+            ))
         }
         _ => None,
     }
@@ -182,7 +189,10 @@ fn button_with_type(line: &str) -> Option<String> {
     if !tag.is_match(line).unwrap_or(false) {
         return None;
     }
-    Some(tag.replace_all(line, r#"<button type="button""#).into_owned())
+    Some(
+        tag.replace_all(line, r#"<button type="button""#)
+            .into_owned(),
+    )
 }
 
 #[cfg(test)]
@@ -243,7 +253,10 @@ mod tests {
             r#"  <button type="button" class="btn" onclick="go()">Go</button> <button type="submit">Ok</button>"#
         );
         assert_eq!(p.note_key, Some("fix_note_button_submit"));
-        assert_eq!(fix("html_button_missing_type", r#"<button type="reset">"#), None);
+        assert_eq!(
+            fix("html_button_missing_type", r#"<button type="reset">"#),
+            None
+        );
     }
 
     #[test]

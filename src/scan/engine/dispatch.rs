@@ -6,7 +6,9 @@
 use serde_json::Value;
 
 use super::Finding;
-use super::file_contains::{FileLocation, execute_file_contains_rule, matches as file_contains_matches};
+use super::file_contains::{
+    FileLocation, execute_file_contains_rule, matches as file_contains_matches,
+};
 use super::pattern::execute_regex_rule;
 use super::rule_loader::{compile_file_contains_rule_from_json, compile_regex_rule_from_json};
 
@@ -125,7 +127,10 @@ mod tests {
 
     /// The scanned file of these tests: `f.py` at the project root.
     fn f_py() -> FileLocation<'static> {
-        FileLocation { absolute: std::path::Path::new("f.py"), relative: "f.py" }
+        FileLocation {
+            absolute: std::path::Path::new("f.py"),
+            relative: "f.py",
+        }
     }
 
     fn lines(text: &str) -> Vec<(usize, String)> {

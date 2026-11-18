@@ -366,7 +366,10 @@ mod tests {
 
     #[test]
     fn test_auto_detect_python_pytest_dir() {
-        let tmp = std::env::temp_dir().join(format!("codefixture-audit-testdetect-{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!(
+            "codefixture-audit-testdetect-{}",
+            std::process::id()
+        ));
         std::fs::create_dir_all(tmp.join("tests")).unwrap();
         let cmd = auto_detect_test_command(&tmp, &["python".to_string()]);
         assert!(cmd.is_some());
@@ -376,8 +379,10 @@ mod tests {
 
     #[test]
     fn test_auto_detect_no_match_returns_none() {
-        let tmp =
-            std::env::temp_dir().join(format!("codefixture-audit-testdetect-empty-{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!(
+            "codefixture-audit-testdetect-empty-{}",
+            std::process::id()
+        ));
         std::fs::create_dir_all(&tmp).unwrap();
         let cmd = auto_detect_test_command(&tmp, &["python".to_string()]);
         assert!(cmd.is_none());

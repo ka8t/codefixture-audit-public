@@ -15,8 +15,8 @@ use serde_json::Value;
 use crate::i18n::t;
 use crate::report::exports::sarif::ReportFinding;
 use crate::report::text::{escape, rule_display_name};
-use crate::scan::orchestrator::extract_i18n_block;
 use crate::rules::identity::{RuleCatalog, RuleId};
+use crate::scan::orchestrator::extract_i18n_block;
 
 const CATEGORY_ORDER: [(&str, &str, &str); 5] = [
     ("SECURITY", "security", "🔒"),
@@ -177,7 +177,10 @@ mod tests {
     fn test_findings_without_fix_before_after_excluded() {
         let en = load_report_locale("en");
         let mut catalog = BTreeMap::new();
-        catalog.insert(RuleId::new("python", "no_fix_rule"), json!({"name": "No fix"}));
+        catalog.insert(
+            RuleId::new("python", "no_fix_rule"),
+            json!({"name": "No fix"}),
+        );
         let findings = vec![finding("SECURITY", "no_fix_rule", "a.py", 1, "eval(x)")];
         let out = render_category_examples_html(&findings, &catalog, &en);
         assert_eq!(out, "");

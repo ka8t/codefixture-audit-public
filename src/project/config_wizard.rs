@@ -64,11 +64,19 @@ pub fn is_yes(raw_answer: &str, localized_yes: &str, default_yes: bool) -> bool 
 /// the ones every scan skips (`node_modules`, `target`, previous reports…)
 /// are left out: offering them would only offer what is never scanned.
 pub fn sub_folders(root: &Path, base: &str) -> Vec<String> {
-    let dir = if base == "." { root.to_path_buf() } else { root.join(base) };
+    let dir = if base == "." {
+        root.to_path_buf()
+    } else {
+        root.join(base)
+    };
     let Ok(entries) = std::fs::read_dir(&dir) else {
         return Vec::new();
     };
-    let prefix = if base == "." { String::new() } else { base.to_string() };
+    let prefix = if base == "." {
+        String::new()
+    } else {
+        base.to_string()
+    };
     let mut out: Vec<String> = entries
         .flatten()
         .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
@@ -107,7 +115,11 @@ fn read_answer<R: BufRead>(reader: &mut R) -> io::Result<Option<String>> {
 }
 
 /// Asks `question` and reads the answer; `None` when the input closed.
-fn ask<R: BufRead, W: Write>(reader: &mut R, writer: &mut W, question: &str) -> io::Result<Option<String>> {
+fn ask<R: BufRead, W: Write>(
+    reader: &mut R,
+    writer: &mut W,
+    question: &str,
+) -> io::Result<Option<String>> {
     write!(writer, "[codefixture-audit] {question} ")?;
     writer.flush()?;
     read_answer(reader)
@@ -125,7 +137,11 @@ fn pick_folders<R: BufRead, W: Write>(
     question: &str,
     allow_empty: bool,
 ) -> io::Result<Option<Vec<String>>> {
-    writeln!(writer, "[codefixture-audit] {}", say("config_wizard_folders"))?;
+    writeln!(
+        writer,
+        "[codefixture-audit] {}",
+        say("config_wizard_folders")
+    )?;
     for (i, folder) in folders.iter().enumerate() {
         writeln!(writer, "    {:>2}. {folder}", i + 1)?;
     }
@@ -135,7 +151,9 @@ fn pick_folders<R: BufRead, W: Write>(
         };
         match parse_numbers(&answer, folders.len()) {
             Some(picked) if allow_empty || !picked.is_empty() => {
-                return Ok(Some(picked.into_iter().map(|i| folders[i].clone()).collect()));
+                return Ok(Some(
+                    picked.into_iter().map(|i| folders[i].clone()).collect(),
+                ));
             }
             _ => writeln!(
                 writer,
@@ -194,7 +212,11 @@ pub fn run_config_wizard<R: BufRead, W: Write>(
 
     // 1. The whole folder or some sub-folders.
     let top = sub_folders(root, ".");
-    writeln!(writer, "[codefixture-audit] {}", say("config_wizard_scope_title"))?;
+    writeln!(
+        writer,
+        "[codefixture-audit] {}",
+        say("config_wizard_scope_title")
+    )?;
     writeln!(writer, "     1. {}", say("config_wizard_scope_all"))?;
     writeln!(writer, "     2. {}", say("config_wizard_scope_some"))?;
     let some = loop {
@@ -212,10 +234,21 @@ pub fn run_config_wizard<R: BufRead, W: Write>(
         }
     };
     let include = if some && top.is_empty() {
-        writeln!(writer, "[codefixture-audit] {}", say("config_wizard_no_subfolders"))?;
+        writeln!(
+            writer,
+            "[codefixture-audit] {}",
+            say("config_wizard_no_subfolders")
+        )?;
         vec![".".to_string()]
     } else if some {
-        match pick_folders(reader, writer, say, &top, &say("config_wizard_pick_include"), false)? {
+        match pick_folders(
+            reader,
+            writer,
+            say,
+            &top,
+            &say("config_wizard_pick_include"),
+            false,
+        )? {
             Some(picked) => picked,
             None => return Ok(ConfigWizardOutcome::InputClosed),
         }
@@ -230,11 +263,25 @@ pub fn run_config_wizard<R: BufRead, W: Write>(
     };
     let mut exclude = Vec::new();
     if is_yes(&answer, &yes_words, false) {
-        let candidates: Vec<String> = include.iter().flat_map(|base| sub_folders(root, base)).collect();
+        let candidates: Vec<String> = include
+            .iter()
+            .flat_map(|base| sub_folders(root, base))
+            .collect();
         if candidates.is_empty() {
-            writeln!(writer, "[codefixture-audit] {}", say("config_wizard_no_exclude_candidates"))?;
+            writeln!(
+                writer,
+                "[codefixture-audit] {}",
+                say("config_wizard_no_exclude_candidates")
+            )?;
         } else {
-            match pick_folders(reader, writer, say, &candidates, &say("config_wizard_pick_exclude"), true)? {
+            match pick_folders(
+                reader,
+                writer,
+                say,
+                &candidates,
+                &say("config_wizard_pick_exclude"),
+                true,
+            )? {
                 Some(picked) => exclude = picked,
                 None => return Ok(ConfigWizardOutcome::InputClosed),
             }
@@ -252,12 +299,20 @@ pub fn run_config_wizard<R: BufRead, W: Write>(
     for line in audit_config_json_text(root, &config).lines() {
         writeln!(writer, "    {line}")?;
     }
-    writeln!(writer, "[codefixture-audit] {}", say("config_wizard_defaults_note"))?;
+    writeln!(
+        writer,
+        "[codefixture-audit] {}",
+        say("config_wizard_defaults_note")
+    )?;
     let Some(answer) = ask(reader, writer, &say("config_wizard_write_question"))? else {
         return Ok(ConfigWizardOutcome::InputClosed);
     };
     if !is_yes(&answer, &yes_words, true) {
-        writeln!(writer, "[codefixture-audit] {}", say("config_wizard_declined"))?;
+        writeln!(
+            writer,
+            "[codefixture-audit] {}",
+            say("config_wizard_declined")
+        )?;
         return Ok(ConfigWizardOutcome::Declined);
     }
     let written = write_audit_config_json(root, &config)?;
@@ -269,7 +324,11 @@ pub fn run_config_wizard<R: BufRead, W: Write>(
     // Nothing was analysed yet: said plainly, the caller then prints the
     // exact command to run again (2026-11-14).
     writeln!(writer)?;
-    writeln!(writer, "[codefixture-audit] {}", say("config_wizard_run_again"))?;
+    writeln!(
+        writer,
+        "[codefixture-audit] {}",
+        say("config_wizard_run_again")
+    )?;
     Ok(ConfigWizardOutcome::Written(written))
 }
 
@@ -279,9 +338,17 @@ mod tests {
     use std::io::Cursor;
 
     fn project(label: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("sast-config-wizard-{label}-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("sast-config-wizard-{label}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        for sub in ["src/legacy", "src/app", "tests", "docs", "node_modules/x", ".git"] {
+        for sub in [
+            "src/legacy",
+            "src/app",
+            "tests",
+            "docs",
+            "node_modules/x",
+            ".git",
+        ] {
             std::fs::create_dir_all(dir.join(sub)).unwrap();
         }
         std::fs::write(dir.join("src/app/main.py"), "print(1)\n").unwrap();
@@ -293,12 +360,14 @@ mod tests {
         let en = crate::i18n::load_script_locale("en");
         let say = |k: &str| crate::i18n::t(&en, k);
         let mut out = Vec::new();
-        let outcome = run_config_wizard(&mut Cursor::new(input.as_bytes()), &mut out, dir, &say).unwrap();
+        let outcome =
+            run_config_wizard(&mut Cursor::new(input.as_bytes()), &mut out, dir, &say).unwrap();
         (outcome, String::from_utf8(out).unwrap())
     }
 
     fn written(dir: &Path) -> serde_json::Value {
-        serde_json::from_str(&std::fs::read_to_string(dir.join("audit.config.json")).unwrap()).unwrap()
+        serde_json::from_str(&std::fs::read_to_string(dir.join("audit.config.json")).unwrap())
+            .unwrap()
     }
 
     /// Whole folder, no exclusion, Enter at the confirmation: the file
@@ -307,10 +376,18 @@ mod tests {
     fn test_whole_folder_defaults() {
         let dir = project("whole");
         let (outcome, out) = run(&dir, "\n\n\n");
-        assert_eq!(outcome, ConfigWizardOutcome::Written(dir.join("audit.config.json")));
+        assert_eq!(
+            outcome,
+            ConfigWizardOutcome::Written(dir.join("audit.config.json"))
+        );
         let file = written(&dir);
         assert_eq!(file["paths"]["include"], serde_json::json!(["."]));
-        assert!(file["paths"]["exclude"].as_array().unwrap().contains(&"**/node_modules/**".into()));
+        assert!(
+            file["paths"]["exclude"]
+                .as_array()
+                .unwrap()
+                .contains(&"**/node_modules/**".into())
+        );
         assert_eq!(file["languages"], serde_json::json!(["python"]));
         assert!(out.contains("\"include\""), "the file is shown: {out}");
         assert!(out.contains("Settings saved in"), "{out}");
@@ -335,7 +412,10 @@ mod tests {
         assert!(!out.contains(". .git/"), "{out}");
         assert!(out.contains("between 1 and 3"), "{out}");
         let file = written(&dir);
-        assert_eq!(file["paths"]["include"], serde_json::json!(["src/", "tests/"]));
+        assert_eq!(
+            file["paths"]["include"],
+            serde_json::json!(["src/", "tests/"])
+        );
         let exclude = file["paths"]["exclude"].as_array().unwrap();
         assert_eq!(exclude[0], "src/legacy/");
         assert!(exclude.contains(&"**/target/**".into()));
@@ -369,7 +449,12 @@ mod tests {
     /// work everywhere; an empty line takes the default.
     #[test]
     fn test_is_yes() {
-        let yes = |lang: &str| crate::i18n::t(&crate::i18n::load_script_locale(lang), "config_prompt_yes_answers");
+        let yes = |lang: &str| {
+            crate::i18n::t(
+                &crate::i18n::load_script_locale(lang),
+                "config_prompt_yes_answers",
+            )
+        };
         assert!(is_yes("\n", "o,oui", true));
         assert!(!is_yes("\n", "o,oui", false));
         for s in ["o\n", "O\n", "oui\n", "y\n", "yes\n", "  o  \n"] {

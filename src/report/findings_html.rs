@@ -286,7 +286,12 @@ fn render_fix_proposal(f: &ReportFinding, report_locale: &Value) -> String {
         Some(fix) => {
             let note = fix
                 .note_key
-                .map(|k| format!(r#"<p class="fix-proposal-note">{}</p>"#, escape(&t(report_locale, k))))
+                .map(|k| {
+                    format!(
+                        r#"<p class="fix-proposal-note">{}</p>"#,
+                        escape(&t(report_locale, k))
+                    )
+                })
                 .unwrap_or_default();
             format!(
                 r#"<div class="fix-proposal"><div class="fix-proposal-title">✅ {}</div><pre><code>{}</code></pre>{note}</div>"#,
@@ -467,7 +472,11 @@ fn render_findings(
                 first.solution.as_deref(),
                 &first.benefit,
             ));
-            shared_html.push_str(&generate_fix_suggestion(rule_catalog, &rule_id, report_locale));
+            shared_html.push_str(&generate_fix_suggestion(
+                rule_catalog,
+                &rule_id,
+                report_locale,
+            ));
         }
 
         let items_html: String = rule_findings
@@ -659,11 +668,19 @@ mod tests {
     #[test]
     fn test_render_finding_item_labels_the_code_and_proposes_a_real_fix() {
         let fr = load_report_locale("fr");
-        let mut f = finding("PERFORMANCE", "fstring_in_logging", "fstring", "app/auth/router.py");
+        let mut f = finding(
+            "PERFORMANCE",
+            "fstring_in_logging",
+            "fstring",
+            "app/auth/router.py",
+        );
         f.line = 91;
         f.code = r#"        logger.error(f"Error for '{username}': {e}")"#.to_string();
         let html = render_finding_item(&f, "LOW", &fr);
-        assert!(html.contains("Votre code — app/auth/router.py:91"), "{html}");
+        assert!(
+            html.contains("Votre code — app/auth/router.py:91"),
+            "{html}"
+        );
         assert!(html.contains("Ligne détectée (L91)"), "{html}");
         assert!(html.contains("Correction proposée"), "{html}");
         // Single quotes are HTML-encoded (`&#39;`) since the 2026-11-15
@@ -703,9 +720,24 @@ mod tests {
             sink_expr: "_rows(...)".to_string(),
             source_kind: "http".to_string(),
             steps: vec![
-                step("source", "app/router.py", 12, "async def list_calls(name: str):"),
-                step("propagation", "app/router.py", 13, "return await _rows(db, name)"),
-                step("sink", "app/journal.py", 6, "return await db.execute(query)"),
+                step(
+                    "source",
+                    "app/router.py",
+                    12,
+                    "async def list_calls(name: str):",
+                ),
+                step(
+                    "propagation",
+                    "app/router.py",
+                    13,
+                    "return await _rows(db, name)",
+                ),
+                step(
+                    "sink",
+                    "app/journal.py",
+                    6,
+                    "return await db.execute(query)",
+                ),
             ],
         });
         let html = render_taint_trace(&f, &fr);
@@ -861,10 +893,16 @@ mod tests {
             serde_json::json!({"risk": {"en": "An attacker can read your data.", "fr": "Un attaquant peut lire vos données."}}),
         );
         let html = render_findings(&refs, "HIGH", &fr, &catalog);
-        assert!(html.contains("Un attaquant peut lire vos données."), "{html}");
+        assert!(
+            html.contains("Un attaquant peut lire vos données."),
+            "{html}"
+        );
         assert!(!html.contains("données non fiables"), "{html}");
         let html = render_findings(&refs, "HIGH", &fr, &RuleCatalog::new());
-        assert!(html.contains("données non fiables"), "fallback without the rule");
+        assert!(
+            html.contains("données non fiables"),
+            "fallback without the rule"
+        );
     }
 
     #[test]
@@ -951,9 +989,15 @@ mod tests {
             serde_json::json!({"fix_before": "js_before", "fix_after": "js_after"}),
         );
         let html = render_findings(&[&python, &javascript], "HIGH", &en, &catalog);
-        assert!(html.contains("py_after") && html.contains("js_after"), "{html}");
+        assert!(
+            html.contains("py_after") && html.contains("js_after"),
+            "{html}"
+        );
         // The JavaScript group comes after the Python one and holds app.js.
         let js_group = &html[html.find("js_after").unwrap()..];
-        assert!(js_group.contains("app.js") && !js_group.contains("app.py"), "{html}");
+        assert!(
+            js_group.contains("app.js") && !js_group.contains("app.py"),
+            "{html}"
+        );
     }
 }

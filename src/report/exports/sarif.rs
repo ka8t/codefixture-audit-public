@@ -482,7 +482,8 @@ mod tests {
     #[test]
     fn test_single_finding_produces_one_rule_and_one_result() {
         let f = finding("sql_injection", "app.py", 12);
-        let report = build_sarif_report(&[f], "codefixture-audit", "1.0", "https://codefixture.com");
+        let report =
+            build_sarif_report(&[f], "codefixture-audit", "1.0", "https://codefixture.com");
         assert_eq!(report.runs[0].tool.driver.rules.len(), 1);
         assert_eq!(report.runs[0].results.len(), 1);
         assert_eq!(report.runs[0].results[0].rule_id, "python/sql_injection");
@@ -495,13 +496,21 @@ mod tests {
         let mut javascript = finding("base64_eval", "app.js", 1);
         javascript.rule_language = "javascript".to_string();
         javascript.risk = "JavaScript risk".to_string();
-        let report = build_sarif_report(&[python, javascript], "codefixture-audit", "1.0", "https://codefixture.com");
+        let report = build_sarif_report(
+            &[python, javascript],
+            "codefixture-audit",
+            "1.0",
+            "https://codefixture.com",
+        );
         let rules = &report.runs[0].tool.driver.rules;
         let ids: Vec<&str> = rules.iter().map(|r| r.id.as_str()).collect();
         assert_eq!(ids, ["python/base64_eval", "javascript/base64_eval"]);
         let js_result = &report.runs[0].results[1];
         assert_eq!(js_result.rule_id, "javascript/base64_eval");
-        assert_eq!(rules[js_result.rule_index].full_description.text, "JavaScript risk");
+        assert_eq!(
+            rules[js_result.rule_index].full_description.text,
+            "JavaScript risk"
+        );
     }
 
     #[test]
@@ -510,7 +519,12 @@ mod tests {
             finding("sql_injection", "a.py", 1),
             finding("sql_injection", "b.py", 2),
         ];
-        let report = build_sarif_report(&findings, "codefixture-audit", "1.0", "https://codefixture.com");
+        let report = build_sarif_report(
+            &findings,
+            "codefixture-audit",
+            "1.0",
+            "https://codefixture.com",
+        );
         assert_eq!(
             report.runs[0].tool.driver.rules.len(),
             1,
@@ -638,7 +652,8 @@ mod tests {
     #[test]
     fn test_json_serializable() {
         let f = finding("xss", "app.py", 1);
-        let report = build_sarif_report(&[f], "codefixture-audit", "1.0", "https://codefixture.com");
+        let report =
+            build_sarif_report(&[f], "codefixture-audit", "1.0", "https://codefixture.com");
         let json = serde_json::to_string(&report)
             .expect("le rapport SARIF doit être sérialisable en JSON");
         assert!(json.contains("\"ruleId\":\"python/xss\""));

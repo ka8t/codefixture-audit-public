@@ -167,15 +167,16 @@ pub(super) fn run_taint_pass<'a, L: TaintLanguage<'a>>(
         .collect();
     let rules: Vec<&serde_json::Value> = rule_jsons
         .iter()
-        .filter(|r| {
-            r.get("language").and_then(|v| v.as_str()) == Some(L::RULE_LANGUAGE.rule_tag())
-        })
+        .filter(|r| r.get("language").and_then(|v| v.as_str()) == Some(L::RULE_LANGUAGE.rule_tag()))
         .collect();
     let language = L::build(&files);
     let per_rule = cached_rule_runs(&language, &files, &rules, context);
     merge_taint_findings(&files, &rules, per_rule, context, seen);
     let (key, french_fallback) = L::PHASE_LABEL;
-    (phase_label(context.config, key, french_fallback), started.elapsed())
+    (
+        phase_label(context.config, key, french_fallback),
+        started.elapsed(),
+    )
 }
 
 /// Runs every taint rule on the files of one language, reusing the taint
@@ -229,8 +230,11 @@ fn cached_rule_runs<'a, L: TaintLanguage<'a>>(
             // `Some` as soon as the rule has a source and a sink, whatever
             // its `patterns` (a `regex+taint` rule goes through both phases).
             let base_specs = rule_json_to_specs(rule_json, &config.lang)?;
-            let rule_hash =
-                sha256_hex(serde_json::to_string(rule_json).unwrap_or_default().as_bytes());
+            let rule_hash = sha256_hex(
+                serde_json::to_string(rule_json)
+                    .unwrap_or_default()
+                    .as_bytes(),
+            );
             let prior = previous
                 .as_ref()
                 .and_then(|c| c.rules.get(&base_specs.rule_id))
@@ -321,14 +325,22 @@ fn merge_taint_findings(
         };
         for (pf, findings) in files.iter().zip(per_file) {
             for f in findings {
-                let key = (pf.rel_path.clone(), f.rule_id.clone(), f.line, f.source_line);
+                let key = (
+                    pf.rel_path.clone(),
+                    f.rule_id.clone(),
+                    f.line,
+                    f.source_line,
+                );
                 if !seen.insert(key) {
                     continue;
                 }
                 let code = line_text(&pf.all_lines, f.line);
                 // Trimmed, as the report hashes it for its 🚫 button
                 // (`ReportFinding.code`): an indented line never matched.
-                if context.suppressions.is_suppressed(&f.rule_id, &pf.rel_path, code.trim()) {
+                if context
+                    .suppressions
+                    .is_suppressed(&f.rule_id, &pf.rel_path, code.trim())
+                {
                     continue;
                 }
                 if is_inline_ignored(&code, &f.rule_id) {
@@ -466,16 +478,25 @@ mod tests {
             .iter()
             .map(|f| {
                 let hash = crate::project::suppress::line_hash(&f.code);
-                format!(r#"{{"rule_key": "{}", "file": "{}", "code_hash": {hash}}}"#, f.rule_key, f.file)
+                format!(
+                    r#"{{"rule_key": "{}", "file": "{}", "code_hash": {hash}}}"#,
+                    f.rule_key, f.file
+                )
             })
             .collect();
         let suppress_path = root.join(".sca-suppress.json");
         std::fs::write(
             &suppress_path,
-            format!(r#"{{"version": "1.0", "suppressions": [{}]}}"#, entries.join(", ")),
+            format!(
+                r#"{{"version": "1.0", "suppressions": [{}]}}"#,
+                entries.join(", ")
+            ),
         )
         .unwrap();
-        let suppressed = run_scan(&ScanConfig { suppress_file: Some(suppress_path), ..config });
+        let suppressed = run_scan(&ScanConfig {
+            suppress_file: Some(suppress_path),
+            ..config
+        });
         assert_eq!(counts(&suppressed), each(0), "{:?}", suppressed.findings);
 
         // 3. Ignored inline, by a comment on the sink line.

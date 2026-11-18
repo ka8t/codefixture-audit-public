@@ -128,7 +128,11 @@ impl DatabaseFile {
     /// The uncompressed JSON of `ecosystem`, `None` when the file does
     /// not hold it.
     pub fn ecosystem_json(&self, ecosystem: &str) -> Option<Result<Vec<u8>, String>> {
-        let entry = self.header.ecosystems.iter().find(|e| e.name == ecosystem)?;
+        let entry = self
+            .header
+            .ecosystems
+            .iter()
+            .find(|e| e.name == ecosystem)?;
         let start = entry.offset as usize;
         let end = start.checked_add(entry.length as usize)?;
         let Some(member) = self.body.get(start..end) else {
@@ -226,7 +230,10 @@ pub fn decode(path: &Path, bytes: Vec<u8>) -> Result<DatabaseFile, String> {
     let header: Header = serde_json::from_slice(&bytes[12..header_end])
         .map_err(|e| fail(&format!("invalid header: {e}")))?;
     if header.format != FORMAT_VERSION {
-        return Err(fail(&format!("header format {} not supported", header.format)));
+        return Err(fail(&format!(
+            "header format {} not supported",
+            header.format
+        )));
     }
     Ok(DatabaseFile {
         path: path.to_path_buf(),
@@ -261,7 +268,10 @@ mod tests {
     /// ecosystem; the header is readable without decompressing.
     #[test]
     fn test_write_then_read_gives_the_same_ecosystems() {
-        let a = [payload("PyPI", 3, "2026-11-10T00:00:00Z"), payload("npm", 5, "2026-11-11T00:00:00Z")];
+        let a = [
+            payload("PyPI", 3, "2026-11-10T00:00:00Z"),
+            payload("npm", 5, "2026-11-11T00:00:00Z"),
+        ];
         let bytes = encode("OSV", &a).unwrap();
         let db = decode(Path::new("x.sadb"), bytes.clone()).unwrap();
         assert_eq!(db.header.created, "2026-11-11T00:00:00Z");
@@ -281,7 +291,10 @@ mod tests {
     /// Same input, same bytes, whatever the order and the time.
     #[test]
     fn test_encode_is_deterministic() {
-        let a = [payload("npm", 5, "2026-11-11T00:00:00Z"), payload("PyPI", 3, "2026-11-10T00:00:00Z")];
+        let a = [
+            payload("npm", 5, "2026-11-11T00:00:00Z"),
+            payload("PyPI", 3, "2026-11-10T00:00:00Z"),
+        ];
         let b = [a[1].clone(), a[0].clone()];
         let first = encode("OSV", &a).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(1100));
@@ -328,10 +341,16 @@ mod tests {
 
     #[test]
     fn test_created_is_the_latest_instant_not_the_largest_text() {
-        let a = [payload("PyPI", 1, "2026-11-07T10:00:00Z"), payload("npm", 1, "2026-11-07T10:00:00.5Z")];
+        let a = [
+            payload("PyPI", 1, "2026-11-07T10:00:00Z"),
+            payload("npm", 1, "2026-11-07T10:00:00.5Z"),
+        ];
         let db = decode(Path::new("x.sadb"), encode("OSV", &a).unwrap()).unwrap();
         assert_eq!(db.header.created, "2026-11-07T10:00:00.5Z");
-        assert_eq!(newest_date(["garbage", "2026-01-01T00:00:00+02:00"].into_iter()), Some("2026-01-01T00:00:00+02:00"));
+        assert_eq!(
+            newest_date(["garbage", "2026-01-01T00:00:00+02:00"].into_iter()),
+            Some("2026-01-01T00:00:00+02:00")
+        );
         assert_eq!(newest_date(std::iter::empty()), None);
     }
 

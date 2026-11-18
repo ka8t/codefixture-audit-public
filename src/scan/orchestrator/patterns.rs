@@ -24,7 +24,7 @@ use std::collections::BTreeSet;
 
 use rayon::prelude::*;
 
-use super::{PassContext, ParsedFile, engine_finding_to_report, phase_label};
+use super::{ParsedFile, PassContext, engine_finding_to_report, phase_label};
 use crate::project::suppress::{Suppressions, is_inline_ignored};
 use crate::report::exports::sarif::ReportFinding;
 use crate::scan::engine::Finding;
@@ -44,7 +44,11 @@ pub(super) fn run_pattern_pass(
     context: &mut PassContext<'_>,
 ) -> (String, std::time::Duration) {
     let started = std::time::Instant::now();
-    let rules_hash = sha256_hex(serde_json::to_string(rule_jsons).unwrap_or_default().as_bytes());
+    let rules_hash = sha256_hex(
+        serde_json::to_string(rule_jsons)
+            .unwrap_or_default()
+            .as_bytes(),
+    );
     let governance = governance_names(rule_jsons);
     let cache_path = context.cache.map(|c| PatternCache::path(&c.dir));
     let previous = context
@@ -60,7 +64,9 @@ pub(super) fn run_pattern_pass(
     let reportable: Vec<Vec<ReportFinding>> = parsed_files
         .par_iter()
         .zip(runs.par_iter())
-        .map(|(pf, run)| reportable_findings(pf, &run.state, rule_jsons, suppressions, &config.lang))
+        .map(|(pf, run)| {
+            reportable_findings(pf, &run.state, rule_jsons, suppressions, &config.lang)
+        })
         .collect();
 
     if let Some((cache_context, path)) = context.cache.zip(cache_path.as_ref()) {
@@ -87,7 +93,11 @@ pub(super) fn run_pattern_pass(
         context.findings.extend(findings);
     }
     (
-        phase_label(context.config, "scan_phase_b", "phase B (regex/file_contains)"),
+        phase_label(
+            context.config,
+            "scan_phase_b",
+            "phase B (regex/file_contains)",
+        ),
         started.elapsed(),
     )
 }
@@ -128,10 +138,17 @@ fn run_file(
         && prior.hash == hash
         && prior.governance == governance
     {
-        return FileRun { state: prior.clone(), redone: false };
+        return FileRun {
+            state: prior.clone(),
+            redone: false,
+        };
     }
     FileRun {
-        state: PatternFileState { hash, governance, findings: rules_on_file(pf, rule_jsons) },
+        state: PatternFileState {
+            hash,
+            governance,
+            findings: rules_on_file(pf, rule_jsons),
+        },
         redone: true,
     }
 }
@@ -154,9 +171,13 @@ fn rules_on_file(pf: &ParsedFile, rule_jsons: &[serde_json::Value]) -> Vec<(usiz
         if pf.language.is_config_file() && !names_a_path(rule_json) {
             continue;
         }
-        let DispatchOutcome::Findings(found) =
-            dispatch_rule(rule_json, pf.location(), &pf.all_lines, &pf.source_text, syntax)
-        else {
+        let DispatchOutcome::Findings(found) = dispatch_rule(
+            rule_json,
+            pf.location(),
+            &pf.all_lines,
+            &pf.source_text,
+            syntax,
+        ) else {
             continue; // Taint/Ast/Hook: handled elsewhere (phase C) or out of scope.
         };
         findings.extend(found.into_iter().map(|f| (index, f)));
@@ -192,7 +213,13 @@ fn reportable_findings(
         .filter(|(_, f)| !suppressions.is_suppressed(&f.rule_id, &pf.rel_path, &f.code))
         .filter(|(_, f)| !is_inline_ignored(&f.code, &f.rule_id))
         .map(|(index, f)| {
-            engine_finding_to_report(f, &rule_jsons[*index], &pf.rel_path, &pf.source_lines_plain, lang)
+            engine_finding_to_report(
+                f,
+                &rule_jsons[*index],
+                &pf.rel_path,
+                &pf.source_lines_plain,
+                lang,
+            )
         })
         .collect()
 }
@@ -242,7 +269,13 @@ mod tests {
     }
 
     /// Parses the files of `root` (as phase A does) and runs the pass.
-    fn run(root: &Path, files: &[&str], rules: &[serde_json::Value], suppress: &str, cached: bool) -> PassRun {
+    fn run(
+        root: &Path,
+        files: &[&str],
+        rules: &[serde_json::Value],
+        suppress: &str,
+        cached: bool,
+    ) -> PassRun {
         let parsed: Vec<_> = files
             .iter()
             .map(|f| {
@@ -251,7 +284,10 @@ mod tests {
                     .expect("parsable fixture")
             })
             .collect();
-        let config = ScanConfig { root: root.to_path_buf(), ..ScanConfig::default() };
+        let config = ScanConfig {
+            root: root.to_path_buf(),
+            ..ScanConfig::default()
+        };
         let suppressions = Suppressions::load_from_json(suppress);
         let cache = cached.then(|| CacheContext::prepare(&root.join("cache"), "en", root).unwrap());
         let mut findings = Vec::new();
@@ -265,8 +301,14 @@ mod tests {
         };
         run_pattern_pass(&parsed, rules, &mut context);
         PassRun {
-            findings: findings.iter().map(|f| format!("{}:{}:{}", f.file, f.line, f.rule_key)).collect(),
-            redone: cache_stats.iter().find(|s| s.language == CACHE_STAT_NAME).map(|s| s.analysed),
+            findings: findings
+                .iter()
+                .map(|f| format!("{}:{}:{}", f.file, f.line, f.rule_key))
+                .collect(),
+            redone: cache_stats
+                .iter()
+                .find(|s| s.language == CACHE_STAT_NAME)
+                .map(|s| s.analysed),
         }
     }
 
@@ -283,15 +325,30 @@ mod tests {
         let root = project();
         write(&root, "app.py", "eval(x)\n");
         write(&root, "App.java", "class App { void m() { eval(x); } }\n");
-        let rules = [line_rule("py_eval", "python", r"eval\("), line_rule("java_eval", "java", r"eval\(")];
-        let run = run(&root, &["app.py", "App.java"], &rules, NO_SUPPRESSION, false);
+        let rules = [
+            line_rule("py_eval", "python", r"eval\("),
+            line_rule("java_eval", "java", r"eval\("),
+        ];
+        let run = run(
+            &root,
+            &["app.py", "App.java"],
+            &rules,
+            NO_SUPPRESSION,
+            false,
+        );
         assert_eq!(run.findings, ["app.py:1:py_eval", "App.java:1:java_eval"]);
         std::fs::remove_dir_all(&root).ok();
     }
 
     /// A line rule restricted to the paths holding `path` (`requires` …
     /// `path_contains`), with an optional `pattern-not`.
-    fn path_rule(id: &str, language: &str, pattern: &str, not: Option<&str>, path: &str) -> serde_json::Value {
+    fn path_rule(
+        id: &str,
+        language: &str,
+        pattern: &str,
+        not: Option<&str>,
+        path: &str,
+    ) -> serde_json::Value {
         let mut block = json!({"pattern": pattern, "match": "line"});
         if let Some(not) = not {
             block["pattern-not"] = json!(not);
@@ -309,13 +366,26 @@ mod tests {
         // the rule naming pom.xml does, and no longer runs on .java code.
         let root = project();
         write(&root, "pom.xml", "<url>http://repo.example.com/</url>\n");
-        write(&root, "App.java", "String u = \"<url>http://repo.example.com/</url>\";\n");
+        write(
+            &root,
+            "App.java",
+            "String u = \"<url>http://repo.example.com/</url>\";\n",
+        );
         let rules = [
             line_rule("java_any_http", "java", r"http://"),
             path_rule("maven_http", "java", r"<url>http://", None, "pom.xml"),
         ];
-        let run = run(&root, &["pom.xml", "App.java"], &rules, NO_SUPPRESSION, false);
-        assert_eq!(run.findings, ["pom.xml:1:maven_http", "App.java:1:java_any_http"]);
+        let run = run(
+            &root,
+            &["pom.xml", "App.java"],
+            &rules,
+            NO_SUPPRESSION,
+            false,
+        );
+        assert_eq!(
+            run.findings,
+            ["pom.xml:1:maven_http", "App.java:1:java_any_http"]
+        );
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -331,7 +401,13 @@ mod tests {
             "<system.webServer> <add url=\"http://x\" name=\"X-Frame-Options\" />\n\
              <system.webServer> <!-- X-Frame-Options -->\n",
         );
-        let rules = [path_rule("xfo", "csharp", r"<system\.webServer>", Some("X-Frame-Options"), "web.config")];
+        let rules = [path_rule(
+            "xfo",
+            "csharp",
+            r"<system\.webServer>",
+            Some("X-Frame-Options"),
+            "web.config",
+        )];
         let run = run(&root, &["Web.config"], &rules, NO_SUPPRESSION, false);
         assert_eq!(run.findings, ["Web.config:2:xfo"]);
         std::fs::remove_dir_all(&root).ok();
@@ -346,10 +422,17 @@ mod tests {
         let files = ["a.py", "b.py"];
 
         let first = run(&root, &files, &rules, NO_SUPPRESSION, true);
-        assert_eq!((first.findings.as_slice(), first.redone), (&["a.py:1:py_eval".to_string()][..], Some(2)));
+        assert_eq!(
+            (first.findings.as_slice(), first.redone),
+            (&["a.py:1:py_eval".to_string()][..], Some(2))
+        );
 
         let again = run(&root, &files, &rules, NO_SUPPRESSION, true);
-        assert_eq!((again.findings, again.redone), (first.findings.clone(), Some(0)), "nothing changed: all reused");
+        assert_eq!(
+            (again.findings, again.redone),
+            (first.findings.clone(), Some(0)),
+            "nothing changed: all reused"
+        );
 
         write(&root, "b.py", "print(x)\neval(y)\n");
         let changed = run(&root, &files, &rules, NO_SUPPRESSION, true);
@@ -362,16 +445,27 @@ mod tests {
     fn test_a_governance_file_appearing_redoes_the_file_it_covers() {
         // The file itself does not change: only the LICENSE next to it.
         let root = project();
-        write(&root, "third_party/lib/util.py", "def helper():\n    return 2\n");
+        write(
+            &root,
+            "third_party/lib/util.py",
+            "def helper():\n    return 2\n",
+        );
         let rules = [third_party_rule()];
         let files = ["third_party/lib/util.py"];
 
         let before = run(&root, &files, &rules, NO_SUPPRESSION, true);
-        assert_eq!(before.findings, ["third_party/lib/util.py:1:unreviewed_third_party"]);
+        assert_eq!(
+            before.findings,
+            ["third_party/lib/util.py:1:unreviewed_third_party"]
+        );
 
         write(&root, "third_party/lib/LICENSE", "MIT\n");
         let after = run(&root, &files, &rules, NO_SUPPRESSION, true);
-        assert_eq!((after.findings.len(), after.redone), (0, Some(1)), "the cached finding must not survive");
+        assert_eq!(
+            (after.findings.len(), after.redone),
+            (0, Some(1)),
+            "the cached finding must not survive"
+        );
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -381,7 +475,13 @@ mod tests {
         write(&root, "a.py", "eval(x)\nexec(y)\n");
         write(&root, "b.py", "exec(z)\n");
         let files = ["a.py", "b.py"];
-        run(&root, &files, &[line_rule("py_eval", "python", r"eval\(")], NO_SUPPRESSION, true);
+        run(
+            &root,
+            &files,
+            &[line_rule("py_eval", "python", r"eval\(")],
+            NO_SUPPRESSION,
+            true,
+        );
 
         let new_rules = [line_rule("py_exec", "python", r"exec\(")];
         let after = run(&root, &files, &new_rules, NO_SUPPRESSION, true);
@@ -397,9 +497,14 @@ mod tests {
         let rules = [line_rule("py_eval", "python", r"eval\(")];
         run(&root, &["a.py"], &rules, NO_SUPPRESSION, true);
 
-        let suppress = r#"{"suppressions": [{"rule_key": "py_eval", "file": "a.py", "code_hash": null}]}"#;
+        let suppress =
+            r#"{"suppressions": [{"rule_key": "py_eval", "file": "a.py", "code_hash": null}]}"#;
         let after = run(&root, &["a.py"], &rules, suppress, true);
-        assert_eq!((after.findings.len(), after.redone), (0, Some(0)), "reused from the cache, then suppressed");
+        assert_eq!(
+            (after.findings.len(), after.redone),
+            (0, Some(0)),
+            "reused from the cache, then suppressed"
+        );
         std::fs::remove_dir_all(&root).ok();
     }
 

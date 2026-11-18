@@ -115,7 +115,10 @@ impl KnownFiles {
         for fp in files {
             let parts = path_parts(fp);
             if let Some(name) = parts.last() {
-                by_name.entry(name.clone()).or_default().push((fp.clone(), parts));
+                by_name
+                    .entry(name.clone())
+                    .or_default()
+                    .push((fp.clone(), parts));
             }
         }
         KnownFiles { by_name }
@@ -165,7 +168,11 @@ fn match_unique_suffix(
 /// path. Absolute (`level == 0`): `mod/parts.py` suffix, resolved only
 /// if it matches **exactly one** file in the set (ambiguity →
 /// give up, anti-FP).
-fn resolve_target_file(importer: &str, imp: &ImportInfo, known_files: &KnownFiles) -> Option<String> {
+fn resolve_target_file(
+    importer: &str,
+    imp: &ImportInfo,
+    known_files: &KnownFiles,
+) -> Option<String> {
     let mod_parts: Vec<String> = if imp.module.is_empty() {
         vec![]
     } else {
@@ -649,7 +656,7 @@ impl<'tree> CallGraph<'tree> {
     /// callees. Every function whose summary differs from the previous one
     /// (or that had none) is listed in `changed`, so the caller re-runs
     /// exactly the files that consume one of them. Without `reuse`, every
-    /// summary is computed and listed as changed: the behaviour of a full
+    /// summary is computed and listed as changed: the behavior of a full
     /// scan.
     pub fn resolve_summaries_incremental(
         &self,
@@ -664,10 +671,16 @@ impl<'tree> CallGraph<'tree> {
         let lines_for_rule = rule_lines_by_file(source_lines_by_file, base_specs);
 
         let sccs = self.strongly_connected_components();
-        resolve_incremental(sccs, &self.edges, &self.import_bindings, reuse, |node, resolved, current| {
-            let seed = self.build_seed(node, resolved, current);
-            self.compute_one(node, seed, base_specs, &lines_for_rule)
-        })
+        resolve_incremental(
+            sccs,
+            &self.edges,
+            &self.import_bindings,
+            reuse,
+            |node, resolved, current| {
+                let seed = self.build_seed(node, resolved, current);
+                self.compute_one(node, seed, base_specs, &lines_for_rule)
+            },
+        )
     }
 
     /// True when `file` reads a summary that changed in this run: one of
@@ -719,7 +732,10 @@ pub(crate) fn resolve_incremental(
         }
         let callees_unchanged = edges
             .get(node)
-            .map(|e| e.values().all(|t| members.contains(t) || !changed.contains(t)))
+            .map(|e| {
+                e.values()
+                    .all(|t| members.contains(t) || !changed.contains(t))
+            })
             .unwrap_or(true);
         if !callees_unchanged {
             return Err(());
@@ -1029,10 +1045,15 @@ mod tests {
         // to helper in a.py: the report shows both lines.
         let flow = &main_summary.sink_param_findings[&0].flow;
         let sink = flow.iter().rev().find(|s| s.kind == "sink").unwrap();
-        assert_eq!((sink.file.as_deref(), sink.line), (Some("utils.py"), 4), "{flow:?}");
+        assert_eq!(
+            (sink.file.as_deref(), sink.line),
+            (Some("utils.py"), 4),
+            "{flow:?}"
+        );
         assert!(
-            flow.iter()
-                .any(|s| s.kind == "propagation" && s.file.as_deref() == Some("a.py") && s.line == 4),
+            flow.iter().any(|s| s.kind == "propagation"
+                && s.file.as_deref() == Some("a.py")
+                && s.line == 4),
             "{flow:?}"
         );
     }

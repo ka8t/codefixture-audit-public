@@ -740,7 +740,6 @@ mod tests {
     // `controls` section), not its consistency with the actually
     // compiled rule catalog. ===
 
-
     #[test]
     fn test_iso27001_mapping_references_valid_controls() {
         let m = load_iso27001_mapping();

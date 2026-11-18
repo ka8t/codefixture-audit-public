@@ -281,7 +281,13 @@ mod tests {
 
     #[test]
     fn test_empty_report_has_zero_components() {
-        let report = SbomReport::new("p", "1.0", "codefixture-audit", "0.1.0", "2026-08-24T12:00:00Z");
+        let report = SbomReport::new(
+            "p",
+            "1.0",
+            "codefixture-audit",
+            "0.1.0",
+            "2026-08-24T12:00:00Z",
+        );
         assert!(report.components.is_empty());
     }
 

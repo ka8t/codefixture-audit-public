@@ -759,7 +759,10 @@ mod tests {
         let rules = compile_sca_to_json(RULE_WITH_NAME, "python/security/base64_eval.sca").unwrap();
         assert_eq!(rules.len(), 1);
         assert_eq!(rules[0]["name"]["en"], "Obfuscated base64 code execution");
-        assert_eq!(rules[0]["name"]["fr"], "Exécution de code obfusqué en base64");
+        assert_eq!(
+            rules[0]["name"]["fr"],
+            "Exécution de code obfusqué en base64"
+        );
         assert_eq!(rules[0]["risk"]["en"], "Hidden code runs.");
     }
 
@@ -788,9 +791,15 @@ mod tests {
     /// in the Python source.
     #[test]
     fn test_a_quoted_text_loses_its_delimiting_quotes() {
-        let rule = RULE_WITH_NAME.replace("en: Hidden code runs.", r#"en: "N+1 query: database call inside loop""#);
+        let rule = RULE_WITH_NAME.replace(
+            "en: Hidden code runs.",
+            r#"en: "N+1 query: database call inside loop""#,
+        );
         let rules = compile_sca_to_json(&rule, "python/arch/n_plus_one.sca").unwrap();
-        assert_eq!(rules[0]["risk"]["en"], "N+1 query: database call inside loop");
+        assert_eq!(
+            rules[0]["risk"]["en"],
+            "N+1 query: database call inside loop"
+        );
     }
 
     #[test]

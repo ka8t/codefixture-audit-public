@@ -363,11 +363,11 @@ impl RuleRegistry {
     /// `language` is kept). One error per invalid file, which never stops
     /// the others.
     pub fn add_source(&mut self, loaded: &LoadedRules, languages: &[String]) {
-        let targeted = |rule: &serde_json::Value| match rule.get("language").and_then(|v| v.as_str())
-        {
-            Some(language) => languages.iter().any(|l| l == language),
-            None => true,
-        };
+        let targeted =
+            |rule: &serde_json::Value| match rule.get("language").and_then(|v| v.as_str()) {
+                Some(language) => languages.iter().any(|l| l == language),
+                None => true,
+            };
         for file in &loaded.files {
             match crate::scan::parser::compile_sca_to_json(&file.content, &file.source_name) {
                 Ok(compiled) => {
@@ -382,7 +382,9 @@ impl RuleRegistry {
                         });
                     }
                 }
-                Err(e) => self.errors.push((PathBuf::from(&file.source_name), e.to_string())),
+                Err(e) => self
+                    .errors
+                    .push((PathBuf::from(&file.source_name), e.to_string())),
             }
         }
     }
@@ -417,7 +419,13 @@ impl RuleRegistry {
 
     /// The registered rules in run order, the conflicts met, and the
     /// files that failed to compile.
-    pub fn finish(self) -> (Vec<serde_json::Value>, Vec<RuleConflict>, Vec<(PathBuf, String)>) {
+    pub fn finish(
+        self,
+    ) -> (
+        Vec<serde_json::Value>,
+        Vec<RuleConflict>,
+        Vec<(PathBuf, String)>,
+    ) {
         let rules = self.rules.into_iter().map(|r| r.json).collect();
         (rules, self.conflicts, self.errors)
     }
@@ -502,9 +510,6 @@ pub fn rule_listing(files: &[RuleSource]) -> Vec<RuleListing> {
     by_id.into_values().collect()
 }
 
-
-
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -534,7 +539,11 @@ mod tests {
     fn registered(
         sources: &[&LoadedRules],
         languages: &[String],
-    ) -> (Vec<serde_json::Value>, Vec<RuleConflict>, Vec<(PathBuf, String)>) {
+    ) -> (
+        Vec<serde_json::Value>,
+        Vec<RuleConflict>,
+        Vec<(PathBuf, String)>,
+    ) {
         let mut registry = RuleRegistry::default();
         for source in sources {
             registry.add_source(source, languages);
@@ -566,7 +575,10 @@ mod tests {
         rules
             .iter()
             .map(|r| {
-                (RuleId::of(r).unwrap().to_string(), r["severity"].as_str().unwrap_or("").to_string())
+                (
+                    RuleId::of(r).unwrap().to_string(),
+                    r["severity"].as_str().unwrap_or("").to_string(),
+                )
             })
             .collect()
     }
@@ -574,9 +586,15 @@ mod tests {
     #[test]
     fn test_duplicate_identities_names_both_files_and_ignores_other_languages() {
         let files = vec![
-            ("python/security/a.sca".to_string(), rule_named("a", "python")),
+            (
+                "python/security/a.sca".to_string(),
+                rule_named("a", "python"),
+            ),
             ("java/security/a.sca".to_string(), rule_named("a", "java")),
-            ("python/security/a_again.sca".to_string(), rule_named("a", "python")),
+            (
+                "python/security/a_again.sca".to_string(),
+                rule_named("a", "python"),
+            ),
         ];
         assert_eq!(
             duplicate_identities(&files),
@@ -592,12 +610,18 @@ mod tests {
     fn test_registry_keeps_one_name_in_two_languages_as_two_rules() {
         let catalog = source(
             RuleOrigin::Builtin,
-            &[("python/security/a.sca", rule_named("a", "python")), ("java/security/a.sca", rule_named("a", "java"))],
+            &[
+                ("python/security/a.sca", rule_named("a", "python")),
+                ("java/security/a.sca", rule_named("a", "java")),
+            ],
         );
         let (rules, conflicts, _) = registered(&[&catalog], &langs(&["python", "java"]));
         assert_eq!(
             identities(&rules),
-            [("python/a".to_string(), "HIGH".to_string()), ("java/a".to_string(), "HIGH".to_string())]
+            [
+                ("python/a".to_string(), "HIGH".to_string()),
+                ("java/a".to_string(), "HIGH".to_string())
+            ]
         );
         assert!(conflicts.is_empty(), "{conflicts:?}");
     }
@@ -606,17 +630,26 @@ mod tests {
     fn test_registry_lets_a_client_rule_replace_the_catalog_rule_in_place() {
         let catalog = source(
             RuleOrigin::Builtin,
-            &[("python/security/a.sca", rule_named("a", "python")), ("python/security/b.sca", rule_named("b", "python"))],
+            &[
+                ("python/security/a.sca", rule_named("a", "python")),
+                ("python/security/b.sca", rule_named("b", "python")),
+            ],
         );
         let client = source(
             RuleOrigin::Client,
-            &[("python/security/a.sca", rule_named("a", "python").replace("HIGH", "LOW"))],
+            &[(
+                "python/security/a.sca",
+                rule_named("a", "python").replace("HIGH", "LOW"),
+            )],
         );
         let (rules, conflicts, _) = registered(&[&catalog, &client], &langs(&["python"]));
         // Same place as the catalog rule (run order kept), client's content.
         assert_eq!(
             identities(&rules),
-            [("python/a".to_string(), "LOW".to_string()), ("python/b".to_string(), "HIGH".to_string())]
+            [
+                ("python/a".to_string(), "LOW".to_string()),
+                ("python/b".to_string(), "HIGH".to_string())
+            ]
         );
         assert_eq!(rules[0]["origin"], "client");
         assert_eq!(
@@ -636,11 +669,17 @@ mod tests {
             RuleOrigin::Client,
             &[
                 ("python/security/first.sca", rule_named("a", "python")),
-                ("python/security/second.sca", rule_named("a", "python").replace("HIGH", "LOW")),
+                (
+                    "python/security/second.sca",
+                    rule_named("a", "python").replace("HIGH", "LOW"),
+                ),
             ],
         );
         let (rules, conflicts, _) = registered(&[&client], &langs(&["python"]));
-        assert_eq!(identities(&rules), [("python/a".to_string(), "HIGH".to_string())]);
+        assert_eq!(
+            identities(&rules),
+            [("python/a".to_string(), "HIGH".to_string())]
+        );
         assert_eq!(conflicts.len(), 1);
         assert_eq!(conflicts[0].kind, RuleConflictKind::DuplicateInSource);
         assert_eq!(
@@ -648,9 +687,6 @@ mod tests {
             ("python/security/first.sca", "python/security/second.sca")
         );
     }
-
-
-
 
     #[test]
     fn test_is_targeted_rule_path_filters_language_folders_only() {

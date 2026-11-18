@@ -111,7 +111,9 @@ impl SavedPageFolders {
 /// `<name>.htm` is a saved page; `None` for any other folder name.
 fn resources_page_of(folder: &Path) -> Option<bool> {
     let name = folder.file_name()?.to_str()?;
-    let page = name.strip_suffix(RESOURCES_SUFFIX).filter(|n| !n.is_empty())?;
+    let page = name
+        .strip_suffix(RESOURCES_SUFFIX)
+        .filter(|n| !n.is_empty())?;
     let parent = folder.parent()?;
     Some(
         ["html", "htm"]
@@ -143,15 +145,22 @@ mod tests {
     #[test]
     fn test_browser_mark_makes_a_saved_page() {
         assert!(is_saved_page_text(SAVED));
-        assert!(is_saved_page_text("<!-- Saved From URL=(0014)about:internet -->"));
-        assert!(!is_saved_page_text("<!DOCTYPE html>\n<html><body>saved from url</body></html>"));
+        assert!(is_saved_page_text(
+            "<!-- Saved From URL=(0014)about:internet -->"
+        ));
+        assert!(!is_saved_page_text(
+            "<!DOCTYPE html>\n<html><body>saved from url</body></html>"
+        ));
     }
 
     /// The mark must be at the top: a page that quotes it further down
     /// (a tutorial on saved pages) is the project's own page.
     #[test]
     fn test_mark_after_the_head_is_ignored() {
-        let text = format!("<html>{}<!-- saved from url=(0001)x -->", "é".repeat(HEAD_BYTES));
+        let text = format!(
+            "<html>{}<!-- saved from url=(0001)x -->",
+            "é".repeat(HEAD_BYTES)
+        );
         assert!(!is_saved_page_text(&text));
     }
 

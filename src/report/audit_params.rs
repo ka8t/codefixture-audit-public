@@ -189,7 +189,6 @@ fn shared_cli_options_html(info: &AuditParamsInfo, report_locale: &Value) -> Str
     html
 }
 
-
 /// Generates the complete "audit parameters" section. The project
 /// identity comes from `ctx` (which already carries these fields for
 /// the rest of the report) rather than being duplicated in the
@@ -519,7 +518,6 @@ mod tests {
         let zeta_pos = html.find("zeta_rule").unwrap();
         assert!(alpha_pos < zeta_pos, "triés alphabétiquement");
     }
-
 
     /// Shared binary (ticket #188): its part of the checklist names only
     /// options of its `scan --help`, whatever ran (here the dependencies

@@ -644,11 +644,23 @@ mod tests {
         let mut languages = BTreeSet::new();
         let mut top_level_dirs = BTreeSet::new();
         let mut has_root_level_files = false;
-        walk_detect(&dir, &dir, &mut languages, &mut top_level_dirs, &mut has_root_level_files);
+        walk_detect(
+            &dir,
+            &dir,
+            &mut languages,
+            &mut top_level_dirs,
+            &mut has_root_level_files,
+        );
         std::fs::remove_dir_all(&dir).unwrap();
 
-        assert_eq!(languages.into_iter().collect::<Vec<_>>(), ["python".to_string()]);
-        assert_eq!(top_level_dirs.into_iter().collect::<Vec<_>>(), ["src".to_string()]);
+        assert_eq!(
+            languages.into_iter().collect::<Vec<_>>(),
+            ["python".to_string()]
+        );
+        assert_eq!(
+            top_level_dirs.into_iter().collect::<Vec<_>>(),
+            ["src".to_string()]
+        );
         assert!(!has_root_level_files);
     }
 

@@ -148,9 +148,9 @@ impl SourceLanguage {
         match self {
             SourceLanguage::Python => "python",
             SourceLanguage::Java | SourceLanguage::MavenPom => "java",
-            SourceLanguage::JavaScript | SourceLanguage::TypeScript | SourceLanguage::PackageJson => {
-                "javascript"
-            }
+            SourceLanguage::JavaScript
+            | SourceLanguage::TypeScript
+            | SourceLanguage::PackageJson => "javascript",
             SourceLanguage::Php => "php",
             SourceLanguage::CSharp | SourceLanguage::WebConfig => "csharp",
             SourceLanguage::Html => "html",
@@ -640,7 +640,9 @@ pub enum VersionRulesStatus {
 /// Opens the version rules of the rule pack at `path` (ADR-0043): the
 /// advisory container of its version rules section. A folder of plain
 /// rules carries none.
-fn read_version_rules(path: &Path) -> Result<Option<crate::project::advisory_file::DatabaseFile>, String> {
+fn read_version_rules(
+    path: &Path,
+) -> Result<Option<crate::project::advisory_file::DatabaseFile>, String> {
     if !path.is_file() {
         return Ok(None);
     }
@@ -1269,8 +1271,7 @@ fn read_and_parse(root: &Path, filepath: &Path) -> Option<FileOutcome> {
     let rel_path = project_relative_path(root, filepath);
     // A saved page first: it is often minified too, and its own reason
     // tells the reader more (ADR-0046).
-    if language == SourceLanguage::Html
-        && crate::scan::saved_page::is_saved_page_text(&source_text)
+    if language == SourceLanguage::Html && crate::scan::saved_page::is_saved_page_text(&source_text)
     {
         return Some(FileOutcome::SavedPage(rel_path));
     }
@@ -1278,8 +1279,7 @@ fn read_and_parse(root: &Path, filepath: &Path) -> Option<FileOutcome> {
         return Some(FileOutcome::Minified(rel_path));
     }
     let all_lines = split_lines_with_terminators(&source_text);
-    let source_lines_plain: Vec<String> =
-        all_lines.iter().map(|(_, t)| t.clone()).collect();
+    let source_lines_plain: Vec<String> = all_lines.iter().map(|(_, t)| t.clone()).collect();
 
     let mut parser = TsParser::new();
     let ts_lang: tree_sitter::Language = match language {
@@ -1570,12 +1570,19 @@ pub fn run_scan(config: &ScanConfig) -> ScanReport {
     let pack_has_version_rules = config.rules_path.is_file()
         && crate::rules::pack_format::read_header_from_file(&config.rules_path)
             .is_ok_and(|header| header.has_version_rules());
-    let mut declared_dependencies = ((config.with_deps || pack_has_version_rules) && !config.quick_mode)
+    let mut declared_dependencies = ((config.with_deps || pack_has_version_rules)
+        && !config.quick_mode)
         // Root + every `paths.include` entry, like Python — see
         // `dependencies::collect_dependencies` (fix 2026-11-04).
-        .then(|| crate::project::dependencies::collect_dependencies(&config.root, &config.include_paths));
+        .then(|| {
+            crate::project::dependencies::collect_dependencies(&config.root, &config.include_paths)
+        });
     let deps_phase_active = !config.quick_mode
-        && (config.with_deps || (pack_has_version_rules && declared_dependencies.as_ref().is_some_and(|d| !d.is_empty())));
+        && (config.with_deps
+            || (pack_has_version_rules
+                && declared_dependencies
+                    .as_ref()
+                    .is_some_and(|d| !d.is_empty())));
     let tests_phase_active = config.with_tests && !config.quick_mode;
     let database_phase_active = config.database.is_some() && !config.quick_mode;
     let total_phases = CORE_PHASES
@@ -1752,14 +1759,11 @@ pub fn run_scan(config: &ScanConfig) -> ScanReport {
     // folder, marked as used now, the folders of engines unused for the
     // longest removed. `None` without a cache folder, or when it cannot be
     // created: the scan then runs in full.
-    let scan_cache = config
-        .cache_dir
-        .as_deref()
-        .and_then(|base| {
-            // `config.root`: the symlink guard of `prepare` (a scanned
-            // project is untrusted and may plant a link under its cache path).
-            crate::scan::scan_cache::CacheContext::prepare(base, &config.lang, &config.root)
-        });
+    let scan_cache = config.cache_dir.as_deref().and_then(|base| {
+        // `config.root`: the symlink guard of `prepare` (a scanned
+        // project is untrusted and may plant a link under its cache path).
+        crate::scan::scan_cache::CacheContext::prepare(base, &config.lang, &config.root)
+    });
     let mut passes = PassContext {
         config,
         suppressions: &suppressions,
@@ -1785,11 +1789,17 @@ pub fn run_scan(config: &ScanConfig) -> ScanReport {
         &mut taint::SeenTaint,
     ) -> (String, std::time::Duration);
     let taint_passes: [(bool, TaintPass<'_>); 5] = [
-        (taint_python_active, taint::run_taint_pass::<taint::PythonTaint>),
+        (
+            taint_python_active,
+            taint::run_taint_pass::<taint::PythonTaint>,
+        ),
         (taint_java_active, taint::run_taint_pass::<taint::JavaTaint>),
         (taint_js_active, taint::run_taint_pass::<taint::JsTaint>),
         (taint_php_active, taint::run_taint_pass::<taint::PhpTaint>),
-        (taint_csharp_active, taint::run_taint_pass::<taint::CSharpTaint>),
+        (
+            taint_csharp_active,
+            taint::run_taint_pass::<taint::CSharpTaint>,
+        ),
     ];
     let mut seen_taint = taint::SeenTaint::new();
     for (active, pass) in taint_passes {
@@ -2401,14 +2411,22 @@ mod tests {
             "rule eval_usage\n  language  javascript\n  category  security\n  severity  HIGH\n  match\n    pattern  eval\\s*\\(\n    scope    line\n  end\nend\n",
         );
         write(&root, "app.js", "const x = eval(userInput);\n");
-        write(&root, "index.html", "<html><body>project page</body></html>\n");
+        write(
+            &root,
+            "index.html",
+            "<html><body>project page</body></html>\n",
+        );
         write(
             &root,
             "writeup.html",
             "<!DOCTYPE html>\n<!-- saved from url=(0023)https://example.com/x -->\n<html></html>\n",
         );
         std::fs::create_dir_all(root.join("writeup_files")).unwrap();
-        write(&root.join("writeup_files"), "main.js", "eval(location.hash);\n");
+        write(
+            &root.join("writeup_files"),
+            "main.js",
+            "eval(location.hash);\n",
+        );
 
         let config = ScanConfig {
             root: root.clone(),
@@ -2420,7 +2438,13 @@ mod tests {
         let report = run_scan(&config);
         let mut skipped = report.skipped_saved_pages.clone();
         skipped.sort();
-        assert_eq!(skipped, vec!["writeup.html".to_string(), "writeup_files/main.js".to_string()]);
+        assert_eq!(
+            skipped,
+            vec![
+                "writeup.html".to_string(),
+                "writeup_files/main.js".to_string()
+            ]
+        );
         assert!(report.skipped_minified.is_empty());
         let files: Vec<&str> = report.findings.iter().map(|f| f.file.as_str()).collect();
         assert_eq!(files, vec!["app.js"]);
@@ -2540,7 +2564,10 @@ mod tests {
                 assert_eq!((stat.dirty, stat.analysed), (0, 0), "unchanged: all reused");
             }
         }
-        assert!(seen_router_finding, "the caller file got the cross-file finding");
+        assert!(
+            seen_router_finding,
+            "the caller file got the cross-file finding"
+        );
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -2572,14 +2599,30 @@ mod tests {
             write(&root, path, text);
             let cached = run_scan(&config(true));
             let full = run_scan(&config(false));
-            assert_eq!(finding_keys(&cached), finding_keys(&full), "{path} step {step}");
+            assert_eq!(
+                finding_keys(&cached),
+                finding_keys(&full),
+                "{path} step {step}"
+            );
             seen_caller_finding |= cached.findings.iter().any(|f| f.file == caller.0);
             if step == 2 {
-                let stat = cached.cache_stats.iter().find(|s| s.language != "patterns").unwrap();
-                assert_eq!((stat.dirty, stat.analysed), (0, 0), "{path}: unchanged, all reused");
+                let stat = cached
+                    .cache_stats
+                    .iter()
+                    .find(|s| s.language != "patterns")
+                    .unwrap();
+                assert_eq!(
+                    (stat.dirty, stat.analysed),
+                    (0, 0),
+                    "{path}: unchanged, all reused"
+                );
             }
         }
-        assert!(seen_caller_finding, "{}: the cross-file finding reached the caller", caller.0);
+        assert!(
+            seen_caller_finding,
+            "{}: the cross-file finding reached the caller",
+            caller.0
+        );
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -2661,8 +2704,19 @@ mod tests {
         let cached = run_scan(&config(true));
         let full = run_scan(&config(false));
         assert_eq!(finding_keys(&cached), finding_keys(&full));
-        assert_eq!(cached.findings.iter().filter(|f| f.rule_key == "taint_q").count(), 2);
-        let stat = cached.cache_stats.iter().find(|s| s.language == "csharp").unwrap();
+        assert_eq!(
+            cached
+                .findings
+                .iter()
+                .filter(|f| f.rule_key == "taint_q")
+                .count(),
+            2
+        );
+        let stat = cached
+            .cache_stats
+            .iter()
+            .find(|s| s.language == "csharp")
+            .unwrap();
         assert_eq!((stat.dirty, stat.analysed), (1, 1), "only B.cs redone");
         std::fs::remove_dir_all(&root).ok();
     }
@@ -2701,7 +2755,12 @@ mod tests {
             suppress_file: Some(suppress_path),
             ..config
         });
-        assert!(report.findings.iter().all(|f| f.rule_key != "unpinned_dependency"));
+        assert!(
+            report
+                .findings
+                .iter()
+                .all(|f| f.rule_key != "unpinned_dependency")
+        );
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -2763,7 +2822,11 @@ mod tests {
             vulnerable.risk
         );
         // Identifier and OSV summary: as published.
-        assert!(vulnerable.risk.contains("CVE-2021-28957 (MEDIUM): lxml vulnerable to Cross-Site Scripting"));
+        assert!(
+            vulnerable
+                .risk
+                .contains("CVE-2021-28957 (MEDIUM): lxml vulnerable to Cross-Site Scripting")
+        );
         assert_eq!(
             vulnerable.solution.as_deref(),
             Some("Mettez à jour lxml vers la version 4.6.3 ou plus récente.")
@@ -2816,7 +2879,11 @@ mod tests {
             "taint_cmd.sca",
             "rule taint_cmd\n  language  python\n  category  security\n  severity  HIGH\n  source  input\\s*\\(  kind=cli\n  sink    os\\.system\\s*\\(\nend\n",
         );
-        write(&root, "app.py", "import os\n\ndef handler():\n    cmd = input()\n    os.system(cmd)\n");
+        write(
+            &root,
+            "app.py",
+            "import os\n\ndef handler():\n    cmd = input()\n    os.system(cmd)\n",
+        );
         let config = ScanConfig {
             root: root.clone(),
             rules_path: rules_dir.clone(),
@@ -3063,7 +3130,6 @@ mod tests {
     // the real catalog. Their exclusion with `--rules <DIR>` is decided by
     // the CLI (`main.rs::resolve_custom_rules_dir`). ===
 
-
     /// `adjust_injection_confidence`: an untraced injection finding on a
     /// taint-confirmed line is dropped; elsewhere it is capped at 60;
     /// non-injection and traced findings are untouched.
@@ -3131,8 +3197,6 @@ mod tests {
         assert_eq!(SourceLanguage::from_path(Path::new("a.txt")), None);
     }
 
-
-
     /// ADR-0040: a catalog pack gives the scan its rules for the target
     /// languages only, the custom rules folder adds the client's own, and
     /// the report keeps the counts the CLI prints for each source.
@@ -3170,7 +3234,11 @@ mod tests {
         });
         std::fs::remove_dir_all(&root).ok();
 
-        let mut ids: Vec<String> = report.rule_catalog.keys().map(|id| id.to_string()).collect();
+        let mut ids: Vec<String> = report
+            .rule_catalog
+            .keys()
+            .map(|id| id.to_string())
+            .collect();
         ids.sort();
         assert_eq!(ids, ["python/mine", "python/py_packed"]);
         assert!(report.rule_errors.is_empty(), "{:?}", report.rule_errors);
@@ -3550,7 +3618,12 @@ mod tests {
         assert_eq!(lang("app/pom.xml"), Some(SourceLanguage::MavenPom));
         assert_eq!(lang("Site/Web.config"), Some(SourceLanguage::WebConfig));
         assert_eq!(lang("web/package.json"), Some(SourceLanguage::PackageJson));
-        for other in ["settings.xml", "package-lock.json", "Web.Release.config", "tsconfig.json"] {
+        for other in [
+            "settings.xml",
+            "package-lock.json",
+            "Web.Release.config",
+            "tsconfig.json",
+        ] {
             assert_eq!(lang(other), None, "{other}");
         }
         assert_eq!(SourceLanguage::MavenPom.rule_tag(), "java");
@@ -3580,7 +3653,11 @@ mod tests {
             "java/security/any_http.sca",
             "rule any_http\n  language  java\n  severity  LOW\n  category  security\n  match\n    pattern  http://\n  end\nend\n",
         );
-        write(&root, "pom.xml", "<project>\n  <url>http://repo.example.com/</url>\n</project>\n");
+        write(
+            &root,
+            "pom.xml",
+            "<project>\n  <url>http://repo.example.com/</url>\n</project>\n",
+        );
         write(&root, "Main.java", "class Main {}\n");
         CAPTURED.lock().unwrap().clear();
         let config = ScanConfig {
@@ -3590,12 +3667,17 @@ mod tests {
             ..ScanConfig::default()
         };
         let report = run_scan(&config);
-        let found: Vec<String> =
-            report.findings.iter().map(|f| format!("{}:{}:{}", f.file, f.line, f.rule_key)).collect();
+        let found: Vec<String> = report
+            .findings
+            .iter()
+            .map(|f| format!("{}:{}:{}", f.file, f.line, f.rule_key))
+            .collect();
         assert_eq!(found, ["pom.xml:2:maven_http"]);
         let labels = CAPTURED.lock().unwrap().clone();
         assert!(
-            labels.iter().any(|l| l.contains("java: 2 (java 1, pom.xml 1)")),
+            labels
+                .iter()
+                .any(|l| l.contains("java: 2 (java 1, pom.xml 1)")),
             "pom.xml counted under java by its name: {labels:?}"
         );
         std::fs::remove_dir_all(&root).ok();
