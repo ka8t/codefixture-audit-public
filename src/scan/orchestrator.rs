@@ -636,6 +636,9 @@ pub enum VersionRulesStatus {
         pack: PathBuf,
         created: String,
         counts: Vec<(String, usize)>,
+        /// The databases of the version rules and their licenses, for the
+        /// credit of the report (ADR-0051). Empty for a pack built before.
+        sources: Vec<crate::project::advisory_file::DataSource>,
     },
     /// The rules come from a pack without version rules, or from a folder
     /// of plain rules: dependencies were not checked against published
@@ -695,8 +698,11 @@ impl DependencyTexts {
 /// by the version rules `file` of the pack (ADR-0035, ADR-0043) — one finding
 /// per dependency, listing every distinct vulnerability, so a package
 /// with ten CVEs does not bury the report under ten lines. The severity
-/// is the highest among them. Unreadable database files are reported on
-/// stderr and skipped: the rest of the scan does not depend on them.
+/// is the highest among them, and CRITICAL as soon as one is listed by
+/// CISA as exploited in attacks (ADR-0051). Each vulnerability names its
+/// KEV mark and its EPSS score when the pack has them. Unreadable database
+/// files are reported on stderr and skipped: the rest of the scan does not
+/// depend on them.
 /// The texts follow the report language (`texts`, ticket #189); the
 /// advisory identifiers and OSV summaries stay as published, in English.
 fn vulnerable_dependency_findings(
@@ -723,12 +729,17 @@ fn vulnerable_dependency_findings(
         .into_iter()
         .map(|hit| {
             let dep = &hit.dependency;
-            let severity = hit
-                .advisories
-                .iter()
-                .map(|a| advisories::engine_severity(a))
-                .max_by_key(|s| rank(s))
-                .unwrap_or("MEDIUM");
+            // An exploited vulnerability comes first in the report
+            // whatever its advisory rates it (ADR-0051).
+            let severity = if hit.advisories.iter().any(|a| a.exploited.is_some()) {
+                "CRITICAL"
+            } else {
+                hit.advisories
+                    .iter()
+                    .map(|a| advisories::engine_severity(a))
+                    .max_by_key(|s| rank(s))
+                    .unwrap_or("MEDIUM")
+            };
             // The 10 most severe with their summary (the list arrives
             // sorted), the rest by identifier only: an old Django pin
             // matches 45 advisories.
@@ -741,7 +752,7 @@ fn vulnerable_dependency_findings(
                     format!(
                         "{} ({}): {}",
                         a.display_id(),
-                        advisories::engine_severity(a),
+                        advisory_marks(a, texts).join(", "),
                         a.summary
                     )
                 })
@@ -808,6 +819,30 @@ fn vulnerable_dependency_findings(
             }
         })
         .collect()
+}
+
+/// What a finding says of one vulnerability between parentheses: its
+/// severity, then its KEV mark and its EPSS score when the pack has them
+/// (ADR-0051), in the report language.
+fn advisory_marks(
+    advisory: &crate::project::advisories::Advisory,
+    texts: &DependencyTexts,
+) -> Vec<String> {
+    let mut marks = vec![crate::project::advisories::engine_severity(advisory).to_string()];
+    if let Some(exploited) = &advisory.exploited {
+        let key = if exploited.ransomware {
+            "exploited_ransomware"
+        } else {
+            "exploited"
+        };
+        marks.push(texts.get(key).replace("{date}", &exploited.added));
+    }
+    if let Some(epss) = advisory.epss {
+        // One decimal, with the report language's decimal mark.
+        let percent = format!("{:.1}", epss.epss * 100.0).replace('.', &texts.get("decimal_mark"));
+        marks.push(texts.get("epss").replace("{percent}", &percent));
+    }
+    marks
 }
 
 /// Splits a file's content into lines, keeping their original line
@@ -1882,6 +1917,7 @@ pub fn run_scan(config: &ScanConfig) -> ScanReport {
             Ok(Some(file)) => {
                 let status = VersionRulesStatus::Read {
                     pack: config.rules_path.clone(),
+                    sources: file.header.sources.clone(),
                     created: file.header.created.clone(),
                     counts: file
                         .header
@@ -2793,28 +2829,112 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    /// ADR-0051: a vulnerability CISA lists as exploited makes the finding
+    /// CRITICAL although its advisory says MEDIUM, and the finding names
+    /// the KEV mark and the EPSS score in the report language; the scan
+    /// names the credited sources of its version rules.
+    #[test]
+    fn test_exploited_vulnerability_makes_the_finding_critical_and_is_named() {
+        use crate::project::advisory_file::{
+            Contents, DataSource, EcosystemPayload, TablePayload, encode,
+        };
+        let root = temp_dir();
+        write(&root, "requirements.txt", "lxml==4.6.2\n");
+        let pypi = r#"{"format":1,"ecosystem":"PyPI","last_modified":"2026-11-07T00:00:00Z","advisories":[
+              {"id":"GHSA-jq4v-f5q6-mjqq","aliases":["CVE-2021-28957"],"summary":"lxml XSS",
+               "severity":"MEDIUM","packages":[{"name":"lxml","ranges":[[{"introduced":"0"},{"fixed":"4.6.3"}]]}]}]}"#;
+        let tables = [
+            TablePayload {
+                name: "kev".into(),
+                date: "2026-11-18".into(),
+                rows: 1,
+                json: br#"{"format":1,"cves":{"CVE-2021-28957":{"added":"2026-11-01","ransomware":true}}}"#
+                    .to_vec(),
+            },
+            TablePayload {
+                name: "epss".into(),
+                date: "2026-11-18".into(),
+                rows: 1,
+                json: br#"{"format":1,"cves":{"CVE-2021-28957":{"epss":0.97366,"percentile":0.99}}}"#
+                    .to_vec(),
+            },
+        ];
+        let sources = [DataSource {
+            name: "CISA Known Exploited Vulnerabilities".into(),
+            url: "https://www.cisa.gov/known-exploited-vulnerabilities-catalog".into(),
+            license: "CC0-1.0".into(),
+            records: 1,
+        }];
+        let container = encode(&Contents {
+            source: "test",
+            sources: &sources,
+            ecosystems: &[EcosystemPayload {
+                name: "PyPI".into(),
+                advisories: 1,
+                last_modified: "2026-11-07T00:00:00Z".into(),
+                json: pypi.as_bytes().to_vec(),
+            }],
+            tables: &tables,
+        })
+        .unwrap();
+        let pack = root.join("rules.cfpack");
+        std::fs::write(
+            &pack,
+            crate::rules::pack_format::write_pack("test", &[], Some(&container)),
+        )
+        .unwrap();
+        let report = run_scan(&ScanConfig {
+            root: root.clone(),
+            rules_path: pack,
+            exclude_patterns: vec![],
+            lang: "fr".to_string(),
+            ..ScanConfig::default()
+        });
+        let _ = std::fs::remove_dir_all(&root);
+        let finding = report
+            .findings
+            .iter()
+            .find(|f| f.rule_key == "vulnerable_dependency")
+            .expect("vulnerable dependency reported");
+        assert_eq!(finding.severity, "CRITICAL");
+        assert!(
+            finding.risk.contains(
+                "CVE-2021-28957 (MEDIUM, exploitée dans des attaques, y compris par rançongiciel, \
+                 CISA KEV depuis le 2026-11-01, EPSS 97,4 %): lxml XSS"
+            ),
+            "{}",
+            finding.risk
+        );
+        match &report.version_rules {
+            Some(VersionRulesStatus::Read { sources: read, .. }) => assert_eq!(read, &sources),
+            other => panic!("version rules read: {other:?}"),
+        }
+    }
+
     /// Ticket #189: the dependency findings were in English whatever
     /// `--lang`. Their name, message and solution follow the report
     /// language in the four languages; the advisory identifier and the OSV
     /// summary stay as published.
     #[test]
     fn test_dependency_findings_follow_the_report_language() {
-        use crate::project::advisory_file::{EcosystemPayload, encode};
+        use crate::project::advisory_file::{Contents, EcosystemPayload, encode};
         let root = temp_dir();
         write(&root, "requirements.txt", "lxml==4.6.2\nrequests\n");
         let pypi = r#"{"format":1,"ecosystem":"PyPI","last_modified":"2026-11-07T00:00:00Z","advisories":[
               {"id":"GHSA-jq4v-f5q6-mjqq","aliases":["CVE-2021-28957"],"summary":"lxml vulnerable to Cross-Site Scripting",
                "severity":"MEDIUM","cwe":["CWE-79"],
                "packages":[{"name":"lxml","ranges":[[{"introduced":"0"},{"fixed":"4.6.3"}]]}]}]}"#;
-        let container = encode(
-            "test",
-            &[EcosystemPayload {
+        let container = encode(&Contents {
+            source: "test",
+            sources: &[],
+            ecosystems: &[EcosystemPayload {
                 name: "PyPI".into(),
                 advisories: 1,
                 last_modified: "2026-11-07T00:00:00Z".into(),
                 json: pypi.as_bytes().to_vec(),
             }],
-        )
+            tables: &[],
+        })
         .unwrap();
         let pack = root.join("rules.cfpack");
         std::fs::write(

@@ -21,9 +21,13 @@
 //! ```
 //!
 //! The header is clear JSON, readable without decompressing anything:
-//! format, creation date, source, and per ecosystem its advisory count,
-//! the newest OSV `modified` date and where its gzip member sits in the
-//! body. Each member holds the JSON of one ecosystem as
+//! format, creation date, source, the databases the records come from
+//! with their licenses (ADR-0051), per ecosystem its advisory count, the
+//! newest OSV `modified` date and where its gzip member sits in the body,
+//! and the same for each table keyed by CVE (KEV, EPSS, ADR-0051), whose
+//! members follow the ecosystems' in the body. The sources and the tables
+//! are optional: a file written before them reads as having none, and an
+//! engine that predates them ignores them. Each member holds the JSON of one ecosystem as
 //! `codefixture-audit-advisories` writes it (`tools/codefixture-audit-advisories/src/format.rs`);
 //! this module does not look inside.
 //!
@@ -85,10 +89,69 @@ pub struct Header {
     /// Newest OSV `modified` date across the ecosystems (RFC 3339): the
     /// date of the data, so that unchanged data keeps the same bytes.
     pub created: String,
-    /// Where the advisories come from.
+    /// Where the advisories come from, in one line.
     pub source: String,
+    /// The databases whose data the file holds, with their licenses, for
+    /// the credit a redistributed pack owes them (ADR-0051). Empty in a
+    /// file written before 2026-11-18.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sources: Vec<DataSource>,
     /// In body order.
     pub ecosystems: Vec<EcosystemEntry>,
+    /// Tables keyed by CVE (`kev`, `epss`), in body order after the
+    /// ecosystems (ADR-0051). Empty in a file written before 2026-11-18.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tables: Vec<TableEntry>,
+}
+
+/// One database whose data the file holds (ADR-0051).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DataSource {
+    /// Name to credit (`GitHub Advisory Database`).
+    pub name: String,
+    /// Where the data is published.
+    pub url: String,
+    /// SPDX identifier of its license (`CC-BY-4.0`), or a short note when
+    /// the source names none.
+    pub license: String,
+    /// Records or rows of the file that come from it.
+    pub records: usize,
+}
+
+/// One table of the header: data keyed by CVE, beside the ecosystems.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TableEntry {
+    /// `kev` or `epss`.
+    pub name: String,
+    /// Date of the data, as the source gives it.
+    pub date: String,
+    /// Number of CVEs in the table.
+    pub rows: usize,
+    /// Offset of its gzip member from the start of the body.
+    pub offset: u64,
+    /// Length of its gzip member.
+    pub length: u64,
+}
+
+/// One table to write: its name, date, row count and JSON payload.
+#[derive(Debug, Clone)]
+pub struct TablePayload {
+    pub name: String,
+    pub date: String,
+    pub rows: usize,
+    /// The JSON of the table, uncompressed.
+    pub json: Vec<u8>,
+}
+
+/// Everything a database file holds, for [`encode`] and [`write`].
+#[derive(Debug, Clone, Copy)]
+pub struct Contents<'a> {
+    /// Where the advisories come from, in one line.
+    pub source: &'a str,
+    /// The databases of the data, with their licenses.
+    pub sources: &'a [DataSource],
+    pub ecosystems: &'a [EcosystemPayload],
+    pub tables: &'a [TablePayload],
 }
 
 /// One ecosystem of the header.
@@ -146,21 +209,46 @@ impl DatabaseFile {
                 .map_err(|e| format!("{}: {ecosystem}: {e}", self.path.display())),
         )
     }
+
+    /// The uncompressed JSON of the table `name` (`kev`, `epss`), `None`
+    /// when the file does not hold it.
+    pub fn table_json(&self, name: &str) -> Option<Result<Vec<u8>, String>> {
+        let entry = self.header.tables.iter().find(|t| t.name == name)?;
+        let start = entry.offset as usize;
+        let end = start.checked_add(entry.length as usize)?;
+        let Some(member) = self.body.get(start..end) else {
+            return Some(Err(format!(
+                "{}: table {name} lies outside the file",
+                self.path.display()
+            )));
+        };
+        Some(
+            decompress_capped(member, MAX_ECOSYSTEM_BYTES)
+                .map_err(|e| format!("{}: table {name}: {e}", self.path.display())),
+        )
+    }
 }
 
-/// The bytes of a database holding `ecosystems`, sorted by name so that
-/// the order they are given in does not change the file.
-pub fn encode(source: &str, ecosystems: &[EcosystemPayload]) -> std::io::Result<Vec<u8>> {
-    let mut sorted: Vec<&EcosystemPayload> = ecosystems.iter().collect();
+/// One gzip member of `json`, with a zero time and no file name, so that
+/// the same content always gives the same bytes.
+fn gzip_member(json: &[u8]) -> std::io::Result<Vec<u8>> {
+    let mut encoder = flate2::GzBuilder::new()
+        .mtime(0)
+        .write(Vec::new(), Compression::best());
+    encoder.write_all(json)?;
+    encoder.finish()
+}
+
+/// The bytes of a database holding `contents`. Ecosystems, tables and
+/// sources are sorted by name, so that the order they are given in does
+/// not change the file.
+pub fn encode(contents: &Contents<'_>) -> std::io::Result<Vec<u8>> {
+    let mut sorted: Vec<&EcosystemPayload> = contents.ecosystems.iter().collect();
     sorted.sort_by(|a, b| a.name.cmp(&b.name));
     let mut body = Vec::new();
     let mut entries = Vec::new();
     for eco in sorted {
-        let mut encoder = flate2::GzBuilder::new()
-            .mtime(0)
-            .write(Vec::new(), Compression::best());
-        encoder.write_all(&eco.json)?;
-        let member = encoder.finish()?;
+        let member = gzip_member(&eco.json)?;
         entries.push(EcosystemEntry {
             name: eco.name.clone(),
             advisories: eco.advisories,
@@ -170,14 +258,32 @@ pub fn encode(source: &str, ecosystems: &[EcosystemPayload]) -> std::io::Result<
         });
         body.extend_from_slice(&member);
     }
+    let mut sorted_tables: Vec<&TablePayload> = contents.tables.iter().collect();
+    sorted_tables.sort_by(|a, b| a.name.cmp(&b.name));
+    let mut tables = Vec::new();
+    for table in sorted_tables {
+        let member = gzip_member(&table.json)?;
+        tables.push(TableEntry {
+            name: table.name.clone(),
+            date: table.date.clone(),
+            rows: table.rows,
+            offset: body.len() as u64,
+            length: member.len() as u64,
+        });
+        body.extend_from_slice(&member);
+    }
+    let mut sources = contents.sources.to_vec();
+    sources.sort_by(|a, b| a.name.cmp(&b.name));
     let created = newest_date(entries.iter().map(|e| e.last_modified.as_str()))
         .unwrap_or("")
         .to_string();
     let header = Header {
         format: FORMAT_VERSION,
         created,
-        source: source.to_string(),
+        source: contents.source.to_string(),
+        sources,
         ecosystems: entries,
+        tables,
     };
     let header_json = serde_json::to_vec(&header).map_err(std::io::Error::other)?;
     let mut out = Vec::with_capacity(12 + header_json.len() + body.len());
@@ -203,8 +309,8 @@ fn newest_date<'a>(dates: impl Iterator<Item = &'a str>) -> Option<&'a str> {
 /// Writes the database to `path` through a temporary file renamed over
 /// it, so that a scan running at the same time reads either the old or
 /// the new file, never half of one.
-pub fn write(path: &Path, source: &str, ecosystems: &[EcosystemPayload]) -> std::io::Result<()> {
-    let bytes = encode(source, ecosystems)?;
+pub fn write(path: &Path, contents: &Contents<'_>) -> std::io::Result<()> {
+    let bytes = encode(contents)?;
     let tmp = path.with_extension("sadb.tmp");
     std::fs::write(&tmp, bytes)?;
     std::fs::rename(&tmp, path)
@@ -255,6 +361,16 @@ pub fn read(path: &Path) -> Result<Option<DatabaseFile>, String> {
 mod tests {
     use super::*;
 
+    /// Contents with `ecosystems` only, as written before ADR-0051.
+    fn plain<'a>(source: &'a str, ecosystems: &'a [EcosystemPayload]) -> Contents<'a> {
+        Contents {
+            source,
+            sources: &[],
+            ecosystems,
+            tables: &[],
+        }
+    }
+
     fn payload(name: &str, n: usize, date: &str) -> EcosystemPayload {
         EcosystemPayload {
             name: name.to_string(),
@@ -272,7 +388,7 @@ mod tests {
             payload("PyPI", 3, "2026-11-10T00:00:00Z"),
             payload("npm", 5, "2026-11-11T00:00:00Z"),
         ];
-        let bytes = encode("OSV", &a).unwrap();
+        let bytes = encode(&plain("OSV", &a)).unwrap();
         let db = decode(Path::new("x.sadb"), bytes.clone()).unwrap();
         assert_eq!(db.header.created, "2026-11-11T00:00:00Z");
         assert_eq!(db.header.source, "OSV");
@@ -296,16 +412,16 @@ mod tests {
             payload("PyPI", 3, "2026-11-10T00:00:00Z"),
         ];
         let b = [a[1].clone(), a[0].clone()];
-        let first = encode("OSV", &a).unwrap();
+        let first = encode(&plain("OSV", &a)).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(1100));
-        assert_eq!(first, encode("OSV", &b).unwrap());
+        assert_eq!(first, encode(&plain("OSV", &b)).unwrap());
     }
 
     /// An unknown format, another file or a truncated one is refused
     /// with the path, never misread; a missing file is `None`.
     #[test]
     fn test_unknown_or_broken_files_are_refused() {
-        let good = encode("OSV", &[payload("PyPI", 1, "2026-01-01T00:00:00Z")]).unwrap();
+        let good = encode(&plain("OSV", &[payload("PyPI", 1, "2026-01-01T00:00:00Z")])).unwrap();
         let mut newer = good.clone();
         newer[4..8].copy_from_slice(&2u32.to_le_bytes());
         let err = decode(Path::new("db.sadb"), newer).unwrap_err();
@@ -345,7 +461,7 @@ mod tests {
             payload("PyPI", 1, "2026-11-07T10:00:00Z"),
             payload("npm", 1, "2026-11-07T10:00:00.5Z"),
         ];
-        let db = decode(Path::new("x.sadb"), encode("OSV", &a).unwrap()).unwrap();
+        let db = decode(Path::new("x.sadb"), encode(&plain("OSV", &a)).unwrap()).unwrap();
         assert_eq!(db.header.created, "2026-11-07T10:00:00.5Z");
         assert_eq!(
             newest_date(["garbage", "2026-01-01T00:00:00+02:00"].into_iter()),
@@ -359,10 +475,58 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("sadb-write-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(FILE_NAME);
-        write(&path, "OSV", &[payload("NuGet", 2, "2026-01-01T00:00:00Z")]).unwrap();
+        write(
+            &path,
+            &plain("OSV", &[payload("NuGet", 2, "2026-01-01T00:00:00Z")]),
+        )
+        .unwrap();
         let db = read(&path).unwrap().unwrap();
         assert_eq!(db.header.ecosystems[0].name, "NuGet");
         assert!(!dir.join("advisories.sadb.tmp").exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ADR-0051: the sources and the tables are written and read back; a
+    /// header without them (a file written before) reads as having none.
+    #[test]
+    fn test_sources_and_tables_are_read_back_and_optional() {
+        let ecosystems = [payload("PyPI", 1, "2026-11-10T00:00:00Z")];
+        let sources = [DataSource {
+            name: "CISA KEV".to_string(),
+            url: "https://www.cisa.gov/known-exploited-vulnerabilities-catalog".to_string(),
+            license: "CC0-1.0".to_string(),
+            records: 1,
+        }];
+        let tables = [TablePayload {
+            name: "kev".to_string(),
+            date: "2026-11-18".to_string(),
+            rows: 1,
+            json: br#"{"CVE-2021-44228":{}}"#.to_vec(),
+        }];
+        let contents = Contents {
+            source: "OSV",
+            sources: &sources,
+            ecosystems: &ecosystems,
+            tables: &tables,
+        };
+        let db = decode(Path::new("x.sadb"), encode(&contents).unwrap()).unwrap();
+        assert_eq!(db.header.sources, sources);
+        assert_eq!(db.header.tables[0].rows, 1);
+        assert_eq!(db.table_json("kev").unwrap().unwrap(), tables[0].json);
+        assert!(db.table_json("epss").is_none());
+        assert_eq!(
+            db.ecosystem_json("PyPI").unwrap().unwrap(),
+            ecosystems[0].json
+        );
+
+        let old = decode(
+            Path::new("x.sadb"),
+            encode(&plain("OSV", &ecosystems)).unwrap(),
+        )
+        .unwrap();
+        assert!(old.header.sources.is_empty() && old.header.tables.is_empty());
+        let header = r#"{"format":1,"created":"","source":"OSV","ecosystems":[]}"#;
+        let parsed: Header = serde_json::from_str(header).unwrap();
+        assert!(parsed.sources.is_empty() && parsed.tables.is_empty());
     }
 }

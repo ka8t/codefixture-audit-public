@@ -91,7 +91,8 @@
     "dependencies_checked": "Vérifiées : versions non verrouillées et vulnérabilités publiées (règles de version du pack, hors ligne)",
     "dependencies_versions_not_checked": "Versions non verrouillées signalées ; vulnérabilités publiées non vérifiées (le pack de règles n'a pas de règles de version lisibles)",
     "categories": "Catégories",
-    "cli_options": "Options CLI"
+    "cli_options": "Options CLI",
+    "vulnerability_sources": "Données de vulnérabilités"
   },
   "cli_options_desc": {
     "quick": "Mode rapide : les étapes lentes facultatives, dont la vérification des dépendances, ne tournent pas",
@@ -127,7 +128,11 @@
     "vulnerable_solution_replace": "Remplacez ou retirez {name} : aucune version publiée ne corrige toutes ses vulnérabilités.",
     "unpinned_name": "Dépendance sans version fixée",
     "unpinned_risk": "Sans version fixée, {name} peut s'installer dans une autre version à chaque installation, y compris une version vulnérable.",
-    "unpinned_solution": "Indiquez la version exacte de {name} dans {file}."
+    "unpinned_solution": "Indiquez la version exacte de {name} dans {file}.",
+    "exploited": "exploitée dans des attaques, CISA KEV depuis le {date}",
+    "exploited_ransomware": "exploitée dans des attaques, y compris par rançongiciel, CISA KEV depuis le {date}",
+    "epss": "EPSS {percent} %",
+    "decimal_mark": ","
   },
   "severity_filter_banner": "⚠️ Scan filtré — sévérités incluses : {levels}",
   "all": "tous",

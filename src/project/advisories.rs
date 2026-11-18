@@ -18,6 +18,11 @@
 //! such as `>=2.0` or `^1.2.0` names a lower bound, not the installed
 //! version, and matching that bound would report a version the project
 //! may not use.
+//!
+//! The database may also hold two tables keyed by CVE (ADR-0051): CISA's
+//! known exploited vulnerabilities (`kev`) and FIRST's exploit prediction
+//! scores (`epss`). `load` marks each advisory with them, through its id
+//! and its aliases; they rank the vulnerabilities, they detect nothing.
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
@@ -48,6 +53,41 @@ pub struct Advisory {
     #[serde(default)]
     pub cwe: Vec<String>,
     packages: Vec<AffectedPackage>,
+    /// Listed by CISA as exploited in real attacks (ADR-0051): set by
+    /// `load` from the `kev` table, never stored in the record.
+    #[serde(skip)]
+    pub exploited: Option<Exploited>,
+    /// FIRST's exploit prediction score of its CVE (ADR-0051): set by
+    /// `load` from the `epss` table.
+    #[serde(skip)]
+    pub epss: Option<Epss>,
+}
+
+/// One row of the `kev` table: a CVE that CISA lists as exploited.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct Exploited {
+    /// Date CISA added it to the catalog (`YYYY-MM-DD`).
+    pub added: String,
+    /// CISA knows it to be used in ransomware campaigns.
+    #[serde(default)]
+    pub ransomware: bool,
+}
+
+/// One row of the `epss` table.
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+pub struct Epss {
+    /// Probability of exploitation in the next 30 days, 0 to 1.
+    pub epss: f64,
+    /// Share of all scored CVEs with this score or lower, 0 to 1.
+    pub percentile: f64,
+}
+
+/// Layout of a table keyed by CVE, as `codefixture-audit-advisories`
+/// writes it (`tools/codefixture-audit-advisories/src/format.rs`).
+#[derive(Debug, Deserialize)]
+struct CveTable<T> {
+    format: u32,
+    cves: BTreeMap<String, T>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -65,9 +105,19 @@ struct Event {
     fixed: Option<String>,
     last_affected: Option<String>,
     limit: Option<String>,
+    /// Exclusive lower bound, which OSV lacks: written for the `>X`
+    /// constraints of FriendsOfPHP (ADR-0051). The range opens just after
+    /// this version.
+    #[serde(default)]
+    introduced_after: Option<String>,
 }
 
 impl Advisory {
+    /// Its id and aliases, the keys of the tables by CVE.
+    fn identifiers(&self) -> impl Iterator<Item = &str> {
+        std::iter::once(self.id.as_str()).chain(self.aliases.iter().map(String::as_str))
+    }
+
     /// The identifier to show first: the CVE when there is one (aliases
     /// list CVEs first), else the OSV id.
     pub fn display_id(&self) -> &str {
@@ -127,6 +177,8 @@ pub fn load(
 ) -> (AdvisoryDb, Vec<String>) {
     let mut db = AdvisoryDb::default();
     let mut errors = Vec::new();
+    let kev: BTreeMap<String, Exploited> = load_table(file, "kev", &mut errors);
+    let epss: BTreeMap<String, Epss> = load_table(file, "epss", &mut errors);
     for ecosystem in ecosystems {
         let content = match file.ecosystem_json(ecosystem) {
             None => continue,
@@ -151,7 +203,11 @@ pub fn load(
             ));
             continue;
         }
-        for advisory in parsed.advisories {
+        for mut advisory in parsed.advisories {
+            let exploited = advisory.identifiers().find_map(|id| kev.get(id)).cloned();
+            let score = advisory.identifiers().find_map(|id| epss.get(id)).copied();
+            advisory.exploited = exploited;
+            advisory.epss = score;
             let advisory = Arc::new(advisory);
             let names: BTreeSet<String> = advisory
                 .packages
@@ -168,6 +224,39 @@ pub fn load(
         db.loaded_ecosystems.push(ecosystem.clone());
     }
     (db, errors)
+}
+
+/// The table `name` of `file`, empty when the file has none (written
+/// before ADR-0051). A table that cannot be read is reported in `errors`
+/// and read as empty: the advisories still match without their marks.
+fn load_table<T: serde::de::DeserializeOwned>(
+    file: &crate::project::advisory_file::DatabaseFile,
+    name: &str,
+    errors: &mut Vec<String>,
+) -> BTreeMap<String, T> {
+    let content = match file.table_json(name) {
+        None => return BTreeMap::new(),
+        Some(Ok(content)) => content,
+        Some(Err(e)) => {
+            errors.push(e);
+            return BTreeMap::new();
+        }
+    };
+    let label = format!("{} (table {name})", file.path.display());
+    match serde_json::from_slice::<CveTable<T>>(&content) {
+        Ok(table) if table.format == FORMAT_VERSION => table.cves,
+        Ok(table) => {
+            errors.push(format!(
+                "{label}: format {} not supported by this engine (expected {FORMAT_VERSION})",
+                table.format
+            ));
+            BTreeMap::new()
+        }
+        Err(e) => {
+            errors.push(format!("{label}: {e}"));
+            BTreeMap::new()
+        }
+    }
 }
 
 /// Returns the dependencies of `deps` whose exact version is affected,
@@ -191,11 +280,18 @@ pub fn find_vulnerable(deps: &[Dependency], db: &AdvisoryDb) -> Vec<VulnerableDe
             .cloned()
             .collect();
         let mut advisories = merge_aliases(hits);
-        // Most severe first, so a report truncating the list keeps the
+        // Exploited first, then most severe, then most likely to be
+        // exploited (ADR-0051), so a report truncating the list keeps the
         // ones that matter (Log4Shell before a log formatting bug).
         advisories.sort_by(|a, b| {
-            severity_rank(&b.severity)
-                .cmp(&severity_rank(&a.severity))
+            b.exploited
+                .is_some()
+                .cmp(&a.exploited.is_some())
+                .then_with(|| severity_rank(&b.severity).cmp(&severity_rank(&a.severity)))
+                .then_with(|| {
+                    let score = |x: &Advisory| x.epss.map_or(-1.0, |e| e.epss);
+                    score(b).total_cmp(&score(a))
+                })
                 .then_with(|| a.display_id().cmp(b.display_id()))
         });
         if advisories.is_empty() {
@@ -296,7 +392,8 @@ fn affects(advisory: &Advisory, ecosystem: &str, package_key: &str, version: &st
 /// events sorted by version, then walked in order — `introduced` opens
 /// the range, `fixed`/`limit` close it at that version, `last_affected`
 /// closes it after that version. `introduced: "0"` is below every
-/// version.
+/// version. `introduced_after`, not in OSV (ADR-0051), opens the range
+/// just after its version.
 fn in_range(events: &[Event], version: &str) -> bool {
     let mut sorted: Vec<(&str, &Event)> = events
         .iter()
@@ -304,6 +401,7 @@ fn in_range(events: &[Event], version: &str) -> bool {
             let v = e
                 .introduced
                 .as_deref()
+                .or(e.introduced_after.as_deref())
                 .or(e.fixed.as_deref())
                 .or(e.last_affected.as_deref())
                 .or(e.limit.as_deref())?;
@@ -319,6 +417,10 @@ fn in_range(events: &[Event], version: &str) -> bool {
             if bound == "0" || cmp != Ordering::Less {
                 affected = true;
             }
+        } else if event.introduced_after.is_some() {
+            if cmp == Ordering::Greater {
+                affected = true;
+            }
         } else if event.fixed.is_some() || event.limit.is_some() {
             if cmp != Ordering::Less {
                 affected = false;
@@ -332,19 +434,28 @@ fn in_range(events: &[Event], version: &str) -> bool {
 
 /// Merges advisories that describe the same vulnerability (shared id or
 /// alias, e.g. a `PYSEC-` record and its `GHSA-` twin), keeping the
-/// most severe record of each group.
+/// most severe record of each group. The kept record takes the KEV and
+/// EPSS marks a twin carries and it lacks: they describe the same CVE.
 fn merge_aliases(hits: Vec<Arc<Advisory>>) -> Vec<Arc<Advisory>> {
     let mut groups: Vec<(BTreeSet<String>, Arc<Advisory>)> = Vec::new();
     for advisory in hits {
-        let ids: BTreeSet<String> = std::iter::once(advisory.id.clone())
-            .chain(advisory.aliases.iter().cloned())
-            .collect();
+        let ids: BTreeSet<String> = advisory.identifiers().map(str::to_string).collect();
         match groups.iter_mut().find(|(g, _)| !g.is_disjoint(&ids)) {
             Some((group_ids, kept)) => {
                 group_ids.extend(ids);
-                if severity_rank(&advisory.severity) > severity_rank(&kept.severity) {
-                    *kept = advisory;
+                let (mut winner, other) =
+                    if severity_rank(&advisory.severity) > severity_rank(&kept.severity) {
+                        (advisory, kept.clone())
+                    } else {
+                        (kept.clone(), advisory)
+                    };
+                if winner.exploited.is_none() && other.exploited.is_some() {
+                    Arc::make_mut(&mut winner).exploited = other.exploited.clone();
                 }
+                if winner.epss.is_none() && other.epss.is_some() {
+                    Arc::make_mut(&mut winner).epss = other.epss;
+                }
+                *kept = winner;
             }
             None => groups.push((ids, advisory)),
         }
@@ -503,7 +614,26 @@ mod tests {
     /// A database holding `json` as the payload of `ecosystem`, built
     /// in memory with the real container (`advisory_file.rs`).
     fn db_file(payloads: &[(&str, &str)]) -> crate::project::advisory_file::DatabaseFile {
-        use crate::project::advisory_file::{EcosystemPayload, decode, encode};
+        db_file_with_tables(payloads, &[])
+    }
+
+    /// [`db_file`] with tables keyed by CVE (`(name, json)`, ADR-0051).
+    fn db_file_with_tables(
+        payloads: &[(&str, &str)],
+        tables: &[(&str, &str)],
+    ) -> crate::project::advisory_file::DatabaseFile {
+        use crate::project::advisory_file::{
+            Contents, EcosystemPayload, TablePayload, decode, encode,
+        };
+        let tables: Vec<TablePayload> = tables
+            .iter()
+            .map(|(name, json)| TablePayload {
+                name: name.to_string(),
+                date: "2026-11-18".to_string(),
+                rows: 0,
+                json: json.as_bytes().to_vec(),
+            })
+            .collect();
         let payloads: Vec<EcosystemPayload> = payloads
             .iter()
             .map(|(name, json)| EcosystemPayload {
@@ -513,7 +643,13 @@ mod tests {
                 json: json.as_bytes().to_vec(),
             })
             .collect();
-        decode(Path::new("test.sadb"), encode("test", &payloads).unwrap()).unwrap()
+        let contents = Contents {
+            source: "test",
+            sources: &[],
+            ecosystems: &payloads,
+            tables: &tables,
+        };
+        decode(Path::new("test.sadb"), encode(&contents).unwrap()).unwrap()
     }
 
     fn db_from(ecosystem: &str, json: &str) -> AdvisoryDb {
@@ -565,6 +701,9 @@ mod tests {
                         fixed: (*kind == "fixed").then(|| v.clone()).flatten(),
                         last_affected: (*kind == "last_affected").then(|| v.clone()).flatten(),
                         limit: None,
+                        introduced_after: (*kind == "introduced_after")
+                            .then(|| v.clone())
+                            .flatten(),
                     }
                 })
                 .collect()
@@ -586,6 +725,13 @@ mod tests {
         assert!(!in_range(&last, "0.9"));
         let open = range(&[("introduced", "0")]);
         assert!(in_range(&open, "99.0"));
+        // ADR-0051: `>3.2,<3.4` excludes 3.2 itself.
+        let after = range(&[("introduced_after", "3.2"), ("fixed", "3.4")]);
+        assert!(!in_range(&after, "3.2"));
+        assert!(in_range(&after, "3.2.1"));
+        assert!(in_range(&after, "3.3"));
+        assert!(!in_range(&after, "3.4"));
+        assert!(!in_range(&after, "3.1"));
     }
 
     #[test]
@@ -657,6 +803,82 @@ mod tests {
             "PYSEC twin merged, most severe first"
         );
         assert_eq!(hit.fixed_version.as_deref(), Some("4.6.5"), "fixes both");
+    }
+
+    /// ADR-0051: a vulnerability CISA lists as exploited comes first,
+    /// whatever its severity; then severity, then EPSS. The marks reach a
+    /// record through its CVE alias, and a merged twin keeps them.
+    #[test]
+    fn test_kev_and_epss_mark_and_rank_the_vulnerabilities() {
+        let file = db_file_with_tables(
+            &[(
+                "Maven",
+                r#"{"format":1,"ecosystem":"Maven","last_modified":"x","advisories":[
+                  {"id":"GHSA-high","aliases":["CVE-2026-1"],"summary":"High","severity":"HIGH",
+                   "packages":[{"name":"g:a","ranges":[[{"introduced":"0"},{"fixed":"2.0"}]]}]},
+                  {"id":"GHSA-high-likely","aliases":["CVE-2026-2"],"summary":"High, likely","severity":"HIGH",
+                   "packages":[{"name":"g:a","ranges":[[{"introduced":"0"},{"fixed":"2.0"}]]}]},
+                  {"id":"GHSA-low","aliases":["CVE-2026-3"],"summary":"Exploited","severity":"LOW",
+                   "packages":[{"name":"g:a","ranges":[[{"introduced":"0"},{"fixed":"2.0"}]]}]},
+                  {"id":"OTHER-low","aliases":["GHSA-low"],"summary":"Twin","severity":"MEDIUM",
+                   "packages":[{"name":"g:a","ranges":[[{"introduced":"0"},{"fixed":"2.0"}]]}]}
+                ]}"#,
+            )],
+            &[
+                (
+                    "kev",
+                    r#"{"format":1,"cves":{"CVE-2026-3":{"added":"2026-11-01","ransomware":true}}}"#,
+                ),
+                (
+                    "epss",
+                    r#"{"format":1,"cves":{"CVE-2026-1":{"epss":0.01,"percentile":0.5},
+                                          "CVE-2026-2":{"epss":0.9,"percentile":0.99}}}"#,
+                ),
+            ],
+        );
+        let (db, errors) = load(&file, &BTreeSet::from(["Maven".to_string()]));
+        assert!(errors.is_empty(), "{errors:?}");
+        let found = find_vulnerable(&[dep("Maven", "g:a", Some("1.0"), "1.0")], &db);
+        let ids: Vec<&str> = found[0].advisories.iter().map(|a| a.display_id()).collect();
+        // `OTHER-low`, the more severe twin of `GHSA-low`, is kept; it
+        // names no CVE itself, hence its own id.
+        assert_eq!(ids, vec!["OTHER-low", "CVE-2026-2", "CVE-2026-1"]);
+        let exploited = &found[0].advisories[0];
+        assert_eq!(exploited.severity, "MEDIUM", "the twin is more severe");
+        assert_eq!(
+            exploited.exploited,
+            Some(Exploited {
+                added: "2026-11-01".to_string(),
+                ransomware: true
+            }),
+            "the kept twin carries the KEV mark of its CVE"
+        );
+        assert_eq!(found[0].advisories[1].epss.map(|e| e.epss), Some(0.9));
+    }
+
+    /// A database written before ADR-0051 has no table: the advisories
+    /// match, without marks. A broken table is reported and ignored.
+    #[test]
+    fn test_missing_or_broken_tables_leave_the_matching_intact() {
+        let json = r#"{"format":1,"ecosystem":"npm","last_modified":"x","advisories":[
+              {"id":"GHSA-1","aliases":["CVE-2026-9"],"summary":"x","severity":"HIGH",
+               "packages":[{"name":"a","versions":["1.0.0"]}]}]}"#;
+        let npm = BTreeSet::from(["npm".to_string()]);
+        let (db, errors) = load(&db_file(&[("npm", json)]), &npm);
+        assert!(errors.is_empty());
+        let found = find_vulnerable(&[dep("npm", "a", Some("1.0.0"), r#""a": "1.0.0""#)], &db);
+        assert!(found[0].advisories[0].exploited.is_none());
+
+        let broken = db_file_with_tables(&[("npm", json)], &[("kev", r#"{"format":9,"cves":{}}"#)]);
+        let (db, errors) = load(&broken, &npm);
+        assert!(
+            errors[0].contains("table kev") && errors[0].contains("format 9"),
+            "{errors:?}"
+        );
+        assert_eq!(
+            find_vulnerable(&[dep("npm", "a", Some("1.0.0"), r#""a": "1.0.0""#)], &db).len(),
+            1
+        );
     }
 
     #[test]

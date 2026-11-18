@@ -466,6 +466,7 @@ fn version_rules_line(
             pack,
             created,
             counts,
+            ..
         } => {
             let total: usize = counts.iter().map(|(_, n)| n).sum();
             let counts: Vec<String> = counts
@@ -675,6 +676,7 @@ mod tests {
                 pack: PathBuf::from("/x/rules.cfpack"),
                 created: "2026-11-11T00:00:00Z".into(),
                 counts: vec![("PyPI".into(), 12), ("npm".into(), 30)],
+                sources: vec![],
             },
             say,
         );
@@ -2080,6 +2082,14 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
                     }
                 },
                 database_configured: config.database.is_some(),
+                // ADR-0051: the databases of the version rules, credited.
+                vulnerability_sources: match &report.version_rules {
+                    Some(codefixture_audit::scan::orchestrator::VersionRulesStatus::Read {
+                        sources,
+                        ..
+                    }) => sources.clone(),
+                    _ => Vec::new(),
+                },
                 severity_levels: config.severity_levels.clone(),
                 report_lang: ctx.report_lang.clone(),
             };

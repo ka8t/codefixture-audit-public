@@ -91,7 +91,8 @@
     "dependencies_checked": "Geprüft: nicht festgelegte Versionen und veröffentlichte Schwachstellen (Versionsregeln des Regelpakets, offline)",
     "dependencies_versions_not_checked": "Nicht festgelegte Versionen gemeldet; veröffentlichte Schwachstellen nicht geprüft (das Regelpaket hat keine lesbaren Versionsregeln)",
     "categories": "Kategorien",
-    "cli_options": "CLI-Optionen"
+    "cli_options": "CLI-Optionen",
+    "vulnerability_sources": "Schwachstellendaten"
   },
   "cli_options_desc": {
     "quick": "Schnellmodus: die langsamen optionalen Schritte, darunter die Abhängigkeitsprüfung, laufen nicht",
@@ -127,7 +128,11 @@
     "vulnerable_solution_replace": "Ersetzen oder entfernen Sie {name}: keine veröffentlichte Version behebt alle Schwachstellen.",
     "unpinned_name": "Abhängigkeit ohne feste Version",
     "unpinned_risk": "Ohne feste Version kann {name} bei jeder Installation in einer anderen Version landen, auch in einer verwundbaren.",
-    "unpinned_solution": "Tragen Sie die genaue Version von {name} in {file} ein."
+    "unpinned_solution": "Tragen Sie die genaue Version von {name} in {file} ein.",
+    "exploited": "in Angriffen ausgenutzt, CISA KEV seit {date}",
+    "exploited_ransomware": "in Angriffen ausgenutzt, auch durch Ransomware, CISA KEV seit {date}",
+    "epss": "EPSS {percent} %",
+    "decimal_mark": ","
   },
   "severity_filter_banner": "⚠️ Gefilterter Scan — eingeschlossene Schweregrade: {levels}",
   "all": "alle",

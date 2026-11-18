@@ -55,6 +55,10 @@ pub struct AuditParamsInfo {
     /// What the dependencies phase did in this scan.
     pub dependencies: DependencyCheck,
     pub database_configured: bool,
+    /// The databases of the version rules the scan used, with their
+    /// licenses (ADR-0051): credited in a row of their own. Empty when no
+    /// version rules were read, or for a pack built before 2026-11-18.
+    pub vulnerability_sources: Vec<crate::project::advisory_file::DataSource>,
     pub severity_levels: Option<Vec<String>>,
     pub report_lang: String,
 }
@@ -357,6 +361,10 @@ pub fn render_audit_params_html(
             &escape(&t(report_locale, info.dependencies.i18n_key())),
         )
         .replace(
+            "{{vulnerability_sources_row}}",
+            &vulnerability_sources_row(&info.vulnerability_sources, report_locale),
+        )
+        .replace(
             "{{i18n_categories}}",
             &t(report_locale, "audit_params.categories"),
         )
@@ -372,6 +380,36 @@ pub fn render_audit_params_html(
             "{{cli_options_html}}",
             &cli_options_html(info, report_locale),
         )
+}
+
+/// The row crediting the databases of the version rules (ADR-0051):
+/// each name links to where the data is published, followed by its
+/// license. Their licenses (CC-BY 4.0, Apache 2.0…) ask for this credit
+/// wherever the data is redistributed, and a report shows the findings
+/// made from it. Empty without sources.
+fn vulnerability_sources_row(
+    sources: &[crate::project::advisory_file::DataSource],
+    report_locale: &Value,
+) -> String {
+    if sources.is_empty() {
+        return String::new();
+    }
+    let items: Vec<String> = sources
+        .iter()
+        .map(|s| {
+            format!(
+                "<a href=\"{}\" target=\"_blank\" rel=\"noopener noreferrer\">{}</a> ({})",
+                escape(&s.url),
+                escape(&s.name),
+                escape(&s.license)
+            )
+        })
+        .collect();
+    format!(
+        "<div class=\"param-item param-full\">\n            <span class=\"param-label\">{}</span>\n            <span class=\"param-value\">{}</span>\n        </div>",
+        escape(&t(report_locale, "audit_params.vulnerability_sources")),
+        items.join(", ")
+    )
 }
 
 #[cfg(test)]
@@ -393,9 +431,39 @@ mod tests {
             with_deps: false,
             dependencies: DependencyCheck::NotRun,
             database_configured: false,
+            vulnerability_sources: vec![],
             severity_levels: None,
             report_lang: "en".to_string(),
         }
+    }
+
+    /// ADR-0051: the databases of the version rules are credited with a
+    /// link and their license, escaped; no row without them.
+    #[test]
+    fn test_vulnerability_sources_are_credited_with_their_license() {
+        let locale = load_report_locale("en");
+        assert_eq!(vulnerability_sources_row(&[], &locale), "");
+        let row = vulnerability_sources_row(
+            &[crate::project::advisory_file::DataSource {
+                name: "GitHub Advisory Database <GHSA>".to_string(),
+                url: "https://github.com/advisories".to_string(),
+                license: "CC-BY-4.0".to_string(),
+                records: 3,
+            }],
+            &locale,
+        );
+        assert!(
+            row.contains(&escape(&t(&locale, "audit_params.vulnerability_sources"))),
+            "{row}"
+        );
+        assert!(
+            row.contains(r#"href="https://github.com/advisories""#),
+            "{row}"
+        );
+        assert!(
+            row.contains("GitHub Advisory Database &lt;GHSA&gt;</a> (CC-BY-4.0)"),
+            "{row}"
+        );
     }
 
     /// Builds a minimal `ReportContext` for the tests — only the 5

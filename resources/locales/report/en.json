@@ -91,7 +91,8 @@
     "dependencies_checked": "Checked: unpinned versions and published vulnerabilities (version rules of the rule pack, offline)",
     "dependencies_versions_not_checked": "Unpinned versions reported; published vulnerabilities not checked (the rule pack has no readable version rules)",
     "categories": "Categories",
-    "cli_options": "CLI Options"
+    "cli_options": "CLI Options",
+    "vulnerability_sources": "Vulnerability data"
   },
   "cli_options_desc": {
     "quick": "Quick mode: the slow optional steps, including the dependency check, do not run",
@@ -127,7 +128,11 @@
     "vulnerable_solution_replace": "Replace or remove {name}: no published version fixes all its vulnerabilities.",
     "unpinned_name": "Unpinned dependency",
     "unpinned_risk": "Without a fixed version, {name} can install as a different version each time, including a vulnerable one.",
-    "unpinned_solution": "Write the exact version of {name} in {file}."
+    "unpinned_solution": "Write the exact version of {name} in {file}.",
+    "exploited": "exploited in attacks, CISA KEV since {date}",
+    "exploited_ransomware": "exploited in attacks including ransomware, CISA KEV since {date}",
+    "epss": "EPSS {percent}%",
+    "decimal_mark": "."
   },
   "severity_filter_banner": "⚠️ Filtered scan — severity levels included: {levels}",
   "all": "all",
