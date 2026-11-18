@@ -306,8 +306,67 @@ fn render_fix_proposal(f: &ReportFinding, report_locale: &Value) -> String {
     }
 }
 
-fn render_finding_item(f: &ReportFinding, severity: &str, report_locale: &Value) -> String {
+/// Which texts of a rule group differ between its findings, and are
+/// therefore shown in each finding rather than once for the group
+/// (ticket #205). A code rule writes the same risk and solution for every
+/// occurrence. The dependency rules write them per finding: the package,
+/// its CVEs with their KEV and EPSS marks, the version to upgrade to.
+/// Showing the first finding's texts for the whole group hid the others'.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct OwnTexts {
+    risk: bool,
+    solution: bool,
+}
+
+impl OwnTexts {
+    /// The texts that differ between `findings`, one rule group. The risk
+    /// counts only without `catalog_risk`, the rule's own risk text, which
+    /// is then the one shown for the whole group.
+    fn of(findings: &[&ReportFinding], catalog_risk: bool) -> Self {
+        let first = findings[0];
+        OwnTexts {
+            risk: !catalog_risk && findings.iter().any(|f| f.risk != first.risk),
+            solution: findings.iter().any(|f| f.solution != first.solution),
+        }
+    }
+}
+
+/// The risk block of a finding or of a group.
+fn risk_block(report_locale: &Value, risk: &str) -> String {
+    format!(
+        r#"<details class="finding-risk-block" open><summary>⚠️ {}</summary><p>{}</p></details>"#,
+        t(report_locale, "finding_risk"),
+        linkify_acronyms(report_locale, &escape(risk))
+    )
+}
+
+/// The solution block of a finding or of a group.
+fn solution_block(report_locale: &Value, solution: &str) -> String {
+    format!(
+        r#"<details class="finding-solution-block" open><summary>🛠️ {}</summary><p>{}</p></details>"#,
+        t(report_locale, "finding_solution"),
+        linkify_acronyms(report_locale, &escape(solution))
+    )
+}
+
+/// One finding of a group, with the texts of `own` shown in it.
+fn render_finding_item(
+    f: &ReportFinding,
+    severity: &str,
+    report_locale: &Value,
+    own: OwnTexts,
+) -> String {
     let mut item = load_template("finding-item.html").to_string();
+    let mut own_html = String::new();
+    if own.risk && !f.risk.is_empty() {
+        own_html.push_str(&risk_block(report_locale, &f.risk));
+    }
+    if own.solution
+        && let Some(solution) = f.solution.as_deref().filter(|s| !s.is_empty())
+    {
+        own_html.push_str(&solution_block(report_locale, solution));
+    }
+    item = item.replace("{{own_texts}}", &own_html);
     item = item.replace("{{severity_class}}", &severity.to_lowercase());
     item = item.replace(
         "{{i18n_suppress_title}}",
@@ -424,8 +483,6 @@ fn render_findings(
         entry.push(f);
     }
 
-    let i18n_risk = t(report_locale, "finding_risk");
-    let i18n_solution = t(report_locale, "finding_solution");
     let rule_group_tpl = load_template("findings-rule-group.html");
 
     let mut html = String::new();
@@ -441,25 +498,28 @@ fn render_findings(
         // the rule's short `message`, also used for the console line, and
         // a report showed it instead of the explanation (2026-11-14).
         let lang = t(report_locale, "locale_code");
-        let risk_text = rule_catalog
+        let catalog_risk = rule_catalog
             .get(&rule_id)
             .map(|rule| crate::scan::orchestrator::extract_i18n_block(rule, "risk", &lang))
-            .filter(|r| !r.is_empty())
-            .unwrap_or_else(|| first.risk.clone());
-        if !risk_text.is_empty() {
-            shared_html.push_str(&format!(
-                r#"<details class="finding-risk-block" open><summary>⚠️ {i18n_risk}</summary><p>{}</p></details>"#,
-                linkify_acronyms(report_locale, &escape(&risk_text))
-            ));
+            .filter(|r| !r.is_empty());
+        let own = OwnTexts::of(rule_findings, catalog_risk.is_some());
+        let risk_text = catalog_risk.unwrap_or_else(|| first.risk.clone());
+        if !own.risk && !risk_text.is_empty() {
+            shared_html.push_str(&risk_block(report_locale, &risk_text));
         }
-        if let Some(solution) = &first.solution
-            && !solution.is_empty()
+        if !own.solution
+            && let Some(solution) = first.solution.as_deref().filter(|s| !s.is_empty())
         {
-            shared_html.push_str(&format!(
-                r#"<details class="finding-solution-block" open><summary>🛠️ {i18n_solution}</summary><p>{}</p></details>"#,
-                linkify_acronyms(report_locale, &escape(solution))
-            ));
+            shared_html.push_str(&solution_block(report_locale, solution));
         }
+        // The playbook's code step repeats the solution: with a solution
+        // per finding, it points to them rather than to the first one.
+        let own_solution_step = t(report_locale, "playbook_step_own_solution");
+        let playbook_solution = if own.solution {
+            Some(own_solution_step.as_str())
+        } else {
+            first.solution.as_deref()
+        };
         if !rk.is_empty() {
             shared_html.push_str(&render_file_check_explanation(
                 rule_catalog,
@@ -469,7 +529,7 @@ fn render_findings(
             shared_html.push_str(&render_playbook_inline(
                 rk,
                 report_locale,
-                first.solution.as_deref(),
+                playbook_solution,
                 &first.benefit,
             ));
             shared_html.push_str(&generate_fix_suggestion(
@@ -481,7 +541,7 @@ fn render_findings(
 
         let items_html: String = rule_findings
             .iter()
-            .map(|f| render_finding_item(f, severity, report_locale))
+            .map(|f| render_finding_item(f, severity, report_locale, own))
             .collect();
 
         let group = rule_group_tpl
@@ -657,7 +717,7 @@ mod tests {
         let render = |source: &str| {
             let mut f = finding("SECURITY", "r", "R", "app.py");
             f.rule_source = source.to_string();
-            render_finding_item(&f, "HIGH", &en)
+            render_finding_item(&f, "HIGH", &en, OwnTexts::default())
         };
         let client = render("json_custom");
         let builtin = render("json_builtin");
@@ -676,7 +736,7 @@ mod tests {
         );
         f.line = 91;
         f.code = r#"        logger.error(f"Error for '{username}': {e}")"#.to_string();
-        let html = render_finding_item(&f, "LOW", &fr);
+        let html = render_finding_item(&f, "LOW", &fr, OwnTexts::default());
         assert!(
             html.contains("Votre code — app/auth/router.py:91"),
             "{html}"
@@ -692,7 +752,7 @@ mod tests {
         );
 
         f.rule_key = "xss_unsafe_html_construction".to_string();
-        let html = render_finding_item(&f, "HIGH", &fr);
+        let html = render_finding_item(&f, "HIGH", &fr, OwnTexts::default());
         assert!(html.contains("Pas de correction automatique"), "{html}");
         assert!(!html.contains("Correction proposée"), "{html}");
     }
@@ -847,7 +907,7 @@ mod tests {
             "SQL Injection",
             "src/app.py",
         );
-        let html = render_finding_item(&f, "HIGH", &en);
+        let html = render_finding_item(&f, "HIGH", &en, OwnTexts::default());
         assert!(html.contains("SQL Injection"));
         assert!(html.contains("src/app.py"));
         assert!(html.contains('🛡')); // category icon SECURITY
@@ -860,7 +920,7 @@ mod tests {
     fn test_render_finding_item_no_taint_class_when_no_flow() {
         let en = load_report_locale("en");
         let f = finding("SECURITY", "r1", "Rule", "a.py");
-        let html = render_finding_item(&f, "HIGH", &en);
+        let html = render_finding_item(&f, "HIGH", &en, OwnTexts::default());
         assert!(!html.contains("has-taint"));
         assert!(!html.contains("finding-badge-taint"));
     }
@@ -877,6 +937,52 @@ mod tests {
         assert!(html.contains("Risque de test"));
         assert!(html.contains("Solution de test"));
         assert!(html.contains(r#"class="rule-group-badge">2<"#));
+    }
+
+    /// Ticket #205: the dependency rules write their risk and solution per
+    /// finding. Each finding of the group shows its own, none is shown
+    /// for the whole group, and the playbook's code step points to them
+    /// instead of repeating the first finding's solution.
+    #[test]
+    fn test_render_findings_shows_texts_that_differ_in_each_finding() {
+        let fr = load_report_locale("fr");
+        let dependency = |file: &str, package: &str, fixed: &str| {
+            let mut f = finding("DEPENDENCIES", "vulnerable_dependency", "Dépendance", file);
+            f.risk = format!("{package} est touchée par CVE-2021-44228 (CISA KEV)");
+            f.solution = Some(format!("Upgrade {package} to {fixed} or later."));
+            f
+        };
+        let log4j = dependency("pom.xml", "log4j-core 2.14.1", "2.17.1");
+        let drupal = dependency("composer.json", "drupal/core 8.5.0", "8.5.1");
+        let refs = [&log4j, &drupal];
+        let html = render_findings(&refs, "CRITICAL", &fr, &RuleCatalog::new());
+        assert_eq!(html.matches("class=\"rule-group\"").count(), 1);
+        for text in [
+            "log4j-core 2.14.1 est touchée",
+            "drupal/core 8.5.0 est touchée",
+            "Upgrade log4j-core 2.14.1 to 2.17.1 or later.",
+            "Upgrade drupal/core 8.5.0 to 8.5.1 or later.",
+        ] {
+            assert_eq!(html.matches(text).count(), 1, "{text} once: {html}");
+        }
+        // Each finding's texts sit inside that finding, after its header.
+        let log4j_item = html.find(r#"data-file="pom.xml""#).unwrap();
+        let drupal_item = html.find(r#"data-file="composer.json""#).unwrap();
+        let log4j_risk = html.find("log4j-core 2.14.1 est touchée").unwrap();
+        let drupal_risk = html.find("drupal/core 8.5.0 est touchée").unwrap();
+        assert!(log4j_item < log4j_risk && log4j_risk < drupal_item);
+        assert!(drupal_item < drupal_risk);
+        assert!(
+            html.contains(&t(&fr, "playbook_step_own_solution")),
+            "{html}"
+        );
+
+        // A group whose findings share their texts keeps one block.
+        let one = finding("SECURITY", "r1", "Rule One", "a.py");
+        let two = finding("SECURITY", "r1", "Rule One", "b.py");
+        let html = render_findings(&[&one, &two], "HIGH", &fr, &RuleCatalog::new());
+        assert_eq!(html.matches("Risque de test").count(), 1, "{html}");
+        assert_eq!(html.matches("Solution de test").count(), 1, "{html}");
     }
 
     #[test]

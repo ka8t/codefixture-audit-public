@@ -10,3 +10,4 @@ pub mod dependencies;
 pub mod project_config;
 pub mod suppress;
 pub mod testing;
+pub mod version_constraint;

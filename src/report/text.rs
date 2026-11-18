@@ -215,28 +215,54 @@ fn glossary_entries(report_locale: &Value) -> Vec<AcronymEntry> {
 /// tooltip — port of `_linkify_acronyms`. Applies to text that has
 /// already been escaped (see `escape`); for full HTML, see
 /// `linkify_acronyms_in_html`.
+///
+/// Deliberate deviation from the Python source (ticket #203, 2026-11-18):
+/// Python replaced the terms one after the other, longest first, so a
+/// later term was also found inside the `data-tooltip` of a link already
+/// inserted when an acronym's definition names another one (EPSS names
+/// CVE, XPath and SVG name XML). The link then landed inside the
+/// attribute, cut it short, and HTML showed in the report. All the terms
+/// are now replaced in one pass of a combined pattern, like
+/// `linkify_acronyms_in_html`: a replacement is never searched again. The
+/// alternation lists the longest terms first, so HTTPS still wins over
+/// HTTP at the same position.
 pub fn linkify_acronyms(report_locale: &Value, text: &str) -> String {
     let entries = glossary_entries(report_locale);
     if entries.is_empty() {
         return text.to_string();
     }
-    let mut out = text.to_string();
-    for e in &entries {
-        let escaped_term = fancy_regex::escape(&e.term);
-        let pattern = format!(r"(?<![>\w/]){escaped_term}(?![<\w])");
-        let re = Regex::new(&pattern).expect("valid acronym pattern");
-        let tooltip = escape(&e.tooltip);
-        let replacement = format!(
-            r##"<a href="#acr-{}" class="glossary-link" data-tooltip="{}">{}</a>"##,
-            e.key, tooltip, e.term
-        );
-        out = re
-            .replace_all(&out, |_: &fancy_regex::Captures<'_, str>| {
-                replacement.clone()
-            })
-            .into_owned();
-    }
-    out
+    // `glossary_entries` sorts by descending length.
+    let all_terms = entries
+        .iter()
+        .map(|e| fancy_regex::escape(&e.term).into_owned())
+        .collect::<Vec<_>>()
+        .join("|");
+    // Whole word, not right after a tag (`>`) nor inside a path (`/`).
+    let combined = Regex::new(&format!(r"(?<![>\w/])({all_terms})(?![<\w])"))
+        .expect("valid combined acronym pattern");
+    let links: std::collections::HashMap<&str, String> = entries
+        .iter()
+        .map(|e| {
+            (
+                e.term.as_str(),
+                format!(
+                    r##"<a href="#acr-{}" class="glossary-link" data-tooltip="{}">{}</a>"##,
+                    e.key,
+                    escape(&e.tooltip),
+                    e.term
+                ),
+            )
+        })
+        .collect();
+    combined
+        .replace_all(text, |caps: &fancy_regex::Captures<'_, str>| {
+            let matched = caps.get(0).expect("group 0 always present").as_str();
+            links
+                .get(matched)
+                .cloned()
+                .unwrap_or_else(|| matched.to_string())
+        })
+        .into_owned()
 }
 
 /// Applies acronym linkification to the full report HTML — port of
@@ -469,6 +495,27 @@ mod tests {
         let html = "<!-- GLOSSARY_NO_LINKIFY -->ASVS<!-- /GLOSSARY_NO_LINKIFY --><p>ASVS</p>";
         let out = linkify_acronyms_in_html(&en, html);
         assert_eq!(out.matches("glossary-link").count(), 1);
+    }
+
+    /// Ticket #203: the definition of EPSS names CVE, and those of XPath
+    /// and SVG name XML. A link is never inserted inside the tooltip of
+    /// another: each acronym of the text gets exactly one link, and the
+    /// tooltips hold no tag.
+    #[test]
+    fn test_linkify_acronyms_never_links_inside_a_tooltip() {
+        for lang in ["en", "fr", "de", "es"] {
+            let locale = load_report_locale(lang);
+            let out = linkify_acronyms(
+                &locale,
+                "CVE-2025-1 (CRITICAL, EPSS 0.6 %); XPath; SVG; JNDI",
+            );
+            assert_eq!(out.matches("<a ").count(), 5, "{lang}: {out}");
+            let tooltip = Regex::new(r#"data-tooltip="([^"]*)""#).unwrap();
+            for caps in tooltip.captures_iter(&out) {
+                let text = caps.unwrap().get(1).unwrap().as_str();
+                assert!(!text.contains('<'), "{lang}: tag in tooltip {text}");
+            }
+        }
     }
 
     #[test]

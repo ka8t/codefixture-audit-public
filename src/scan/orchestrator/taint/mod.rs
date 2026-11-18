@@ -201,10 +201,13 @@ fn cached_rule_runs<'a, L: TaintLanguage<'a>>(
 ) -> Vec<Option<Vec<TaintFindings>>> {
     let config = context.config;
     let cache_path = context.cache.map(|c| TaintCache::path(&c.dir, L::NAME));
-    let previous = context
+    let loaded = context
         .cache
         .zip(cache_path.as_ref())
-        .and_then(|(c, p)| TaintCache::load(p, &c.key));
+        .map(|(c, p)| TaintCache::load(p, &c.key));
+    // Ticket #204: why the previous cache could not serve, for the line.
+    let miss = loaded.as_ref().and_then(|r| r.as_ref().err().cloned());
+    let previous = loaded.and_then(Result::ok);
     let file_states: BTreeMap<String, FileState> = files
         .iter()
         .map(|pf| {
@@ -302,6 +305,7 @@ fn cached_rule_runs<'a, L: TaintLanguage<'a>>(
             dirty: dirty.len(),
             analysed,
             total,
+            full: miss,
         });
     }
     runs.into_iter()

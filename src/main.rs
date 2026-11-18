@@ -360,6 +360,44 @@ fn rule_source_lines(report: &ScanReport, script_locale: &serde_json::Value) -> 
     lines
 }
 
+/// The console line of one pass's cache (`scan_cache`). A re-scan that
+/// reused the previous cache says how many files changed and how much was
+/// redone. A pass that could not use it at all says that the analysis was
+/// a full one, and why (ticket #204): saying "changed since the last
+/// scan" there named a false reason, for example after a change of
+/// `--lang`, where no file had changed.
+fn cache_stat_line(
+    stat: &codefixture_audit::scan::scan_cache::CacheStat,
+    t: impl Fn(&str) -> String,
+) -> String {
+    use codefixture_audit::scan::scan_cache::CacheMiss;
+    let patterns = stat.language == "patterns";
+    let template = match (&stat.full, patterns) {
+        (None, true) => t("scan_cache_patterns_line"),
+        (None, false) => t("scan_cache_line"),
+        (Some(_), true) => t("scan_cache_patterns_full_line"),
+        (Some(_), false) => t("scan_cache_full_line"),
+    };
+    let reason = match &stat.full {
+        None => String::new(),
+        Some(CacheMiss::Missing) => t("scan_cache_reason_missing"),
+        Some(CacheMiss::Unreadable) => t("scan_cache_reason_unreadable"),
+        Some(CacheMiss::Format) => t("scan_cache_reason_format"),
+        Some(CacheMiss::Engine) => t("scan_cache_reason_engine"),
+        Some(CacheMiss::Language { previous, current }) => t("scan_cache_reason_language")
+            .replace("{previous}", previous)
+            .replace("{current}", current),
+        Some(CacheMiss::Rules) => t("scan_cache_reason_rules"),
+    };
+    template
+        .replace("{language}", &stat.language)
+        .replace("{dirty}", &stat.dirty.to_string())
+        .replace("{files}", &stat.files.to_string())
+        .replace("{analysed}", &stat.analysed.to_string())
+        .replace("{total}", &stat.total.to_string())
+        .replace("{reason}", &reason)
+}
+
 /// Console line naming the folders the walk skipped as holding no project
 /// code (tickets #148 and #152): their path relative to the project, with
 /// a trailing `/`, and why — `docs/ (documentation)`. Past
@@ -659,6 +697,63 @@ mod tests {
             // Called outside the macro so the code graph sees the call.
             let formatted = format_duration(duration);
             assert_eq!(formatted, expected);
+        }
+    }
+
+    /// Ticket #204: a pass that reused its cache says how many files
+    /// changed; one that could not use it says the analysis was a full
+    /// one and why, never that every file changed.
+    #[test]
+    fn test_cache_stat_line_names_why_the_analysis_was_full() {
+        use codefixture_audit::scan::scan_cache::{CacheMiss, CacheStat};
+        let fr = codefixture_audit::i18n::load_script_locale("fr");
+        let say = |k: &str| codefixture_audit::i18n::t(&fr, k);
+        let stat = |language: &str, dirty: usize, full: Option<CacheMiss>| CacheStat {
+            language: language.into(),
+            files: 460,
+            dirty,
+            analysed: 10,
+            total: 20,
+            full,
+        };
+        assert_eq!(
+            cache_stat_line(&stat("python", 3, None), say),
+            "Cache (python) : 3/460 fichier(s) modifié(s) depuis la dernière analyse, \
+             10/20 analyses de flux refaites."
+        );
+        let language = CacheMiss::Language {
+            previous: "en".into(),
+            current: "fr".into(),
+        };
+        assert_eq!(
+            cache_stat_line(&stat("python", 460, Some(language.clone())), say),
+            "Cache (python) : analyse complète des 460 fichier(s), langue du rapport \
+             changée (en → fr) ; 10/20 analyses de flux faites."
+        );
+        assert_eq!(
+            cache_stat_line(&stat("patterns", 460, Some(language)), say),
+            "Cache (règles de motif) : analyse complète des 460 fichier(s), langue du \
+             rapport changée (en → fr)."
+        );
+        // Every reason has a text in every language.
+        for lang in ["en", "fr", "de", "es"] {
+            let locale = codefixture_audit::i18n::load_script_locale(lang);
+            let say = |k: &str| codefixture_audit::i18n::t(&locale, k);
+            for miss in [
+                CacheMiss::Missing,
+                CacheMiss::Unreadable,
+                CacheMiss::Format,
+                CacheMiss::Engine,
+                CacheMiss::Rules,
+            ] {
+                for language in ["python", "patterns"] {
+                    let line = cache_stat_line(&stat(language, 460, Some(miss.clone())), say);
+                    assert!(
+                        !line.contains('{') && !line.contains("scan_cache"),
+                        "{lang}: {line}"
+                    );
+                }
+            }
         }
     }
 
@@ -1967,28 +2062,24 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
             emit_progress(quiet, &format!("[codefixture-audit] {line}"));
         }
     }
+    // Ticket #209: a lockfile that gave no version is named once, as a
+    // warning, never hidden by `--quiet`: the versions checked for its
+    // manifest are declared minimums, not the installed ones.
+    for (file, reason) in &report.lockfiles_not_used {
+        let line = match reason {
+            Some(reason) => codefixture_audit::i18n::t(&script_locale, "scan_lockfile_unreadable")
+                .replace("{reason}", reason)
+                .replace("{file}", file),
+            None => codefixture_audit::i18n::t(&script_locale, "scan_lockfile_not_read")
+                .replace("{file}", file),
+        };
+        emit_warning(&format!("[codefixture-audit] {line}"));
+    }
     // Taint cache (`scan_cache`): what a re-scan redid, so that a slow one
     // shows why (many files changed) and a fast one that it reused work.
     for stat in &report.cache_stats {
-        emit_progress(
-            quiet,
-            &format!(
-                "[codefixture-audit] {}",
-                codefixture_audit::i18n::t(
-                    &script_locale,
-                    if stat.language == "patterns" {
-                        "scan_cache_patterns_line"
-                    } else {
-                        "scan_cache_line"
-                    },
-                )
-                .replace("{language}", &stat.language)
-                .replace("{dirty}", &stat.dirty.to_string())
-                .replace("{files}", &stat.files.to_string())
-                .replace("{analysed}", &stat.analysed.to_string())
-                .replace("{total}", &stat.total.to_string())
-            ),
-        );
+        let line = cache_stat_line(stat, |key| codefixture_audit::i18n::t(&script_locale, key));
+        emit_progress(quiet, &format!("[codefixture-audit] {line}"));
     }
     if !report.undeclared_languages.is_empty() {
         emit_warning(&format!(

@@ -568,6 +568,12 @@ pub struct ScanReport {
     /// in discovery order. Printed by the CLI for the same reason as
     /// `skipped_dirs`.
     pub skipped_saved_pages: Vec<String>,
+    /// The lockfiles next to a manifest that gave no version (ticket
+    /// #209): unreadable, or of a format the engine does not read yet,
+    /// as `(lockfile path relative to the project, reason)`, the reason
+    /// empty for a format not read. Their manifests' ranges are checked
+    /// at their declared minimum; the CLI names each one once.
+    pub lockfiles_not_used: Vec<(String, Option<String>)>,
     /// Catalog of compiled rules, indexed by identity (language + name):
     /// where the reports read each finding's rule texts (risk, solution,
     /// `fix_before`/`fix_after`), see `rules::identity`.
@@ -795,7 +801,10 @@ fn vulnerable_dependency_findings(
                 risk: texts
                     .get(risk_key)
                     .replace("{name}", &dep.name)
-                    .replace("{version}", &hit.version)
+                    .replace(
+                        "{version}",
+                        &checked_version_label(dep, &hit.version, texts),
+                    )
                     .replace("{count}", &hit.advisories.len().to_string())
                     .replace("{list}", &listed.join("; ")),
                 file: project_relative_path(root, &dep.file),
@@ -819,6 +828,73 @@ fn vulnerable_dependency_findings(
             }
         })
         .collect()
+}
+
+/// The version a finding names, with where it comes from when the
+/// manifest does not pin it exactly (ticket #209): the lockfile that
+/// records it, or the range it is the declared minimum of and why no
+/// lockfile gave the installed version.
+fn checked_version_label(
+    dep: &crate::project::dependencies::Dependency,
+    version: &str,
+    texts: &DependencyTexts,
+) -> String {
+    use crate::project::dependencies::{LockStatus, VersionSource};
+    match &dep.version_source {
+        VersionSource::Manifest => version.to_string(),
+        VersionSource::Lockfile { file } => texts
+            .get("version_locked")
+            .replace("{version}", version)
+            .replace("{file}", file),
+        VersionSource::DeclaredMinimum { constraint, lock } => {
+            let reason = match lock {
+                LockStatus::Absent => texts.get("lock_absent"),
+                LockStatus::NotListed { file } => {
+                    texts.get("lock_not_listed").replace("{file}", file)
+                }
+                LockStatus::NotAVersion { file, value } => texts
+                    .get("lock_not_a_version")
+                    .replace("{file}", file)
+                    .replace("{value}", value),
+                LockStatus::Unreadable { file, .. } => {
+                    texts.get("lock_unreadable").replace("{file}", file)
+                }
+                LockStatus::NotRead { file } => texts.get("lock_not_read").replace("{file}", file),
+            };
+            texts
+                .get("version_minimum")
+                .replace("{version}", version)
+                .replace("{reason}", &reason)
+                .replace("{constraint}", constraint)
+        }
+    }
+}
+
+/// The lockfiles of `deps` that gave no version because they cannot be
+/// read, or have a format the engine does not read yet, each once, with
+/// the reason for an unreadable one (ticket #209).
+fn lockfiles_not_used_by(
+    deps: &[crate::project::dependencies::Dependency],
+    root: &Path,
+) -> Vec<(String, Option<String>)> {
+    use crate::project::dependencies::{LockStatus, VersionSource};
+    let mut found: Vec<(String, Option<String>)> = Vec::new();
+    for dep in deps {
+        let VersionSource::DeclaredMinimum { lock, .. } = &dep.version_source else {
+            continue;
+        };
+        let (file, reason) = match lock {
+            LockStatus::Unreadable { file, reason } => (file, Some(reason.clone())),
+            LockStatus::NotRead { file } => (file, None),
+            _ => continue,
+        };
+        let path = dep.file.parent().unwrap_or(root).join(file);
+        let entry = (project_relative_path(root, &path), reason);
+        if !found.contains(&entry) {
+            found.push(entry);
+        }
+    }
+    found
 }
 
 /// What a finding says of one vulnerability between parentheses: its
@@ -1882,9 +1958,11 @@ pub fn run_scan(config: &ScanConfig) -> ScanReport {
     // (mirrors `runner.py::_compute_phase_total`/`run`).
     let mut dependency_stats = None;
     let mut version_rules = None;
+    let mut lockfiles_not_used = Vec::new();
     if deps_phase_active {
         let t_deps = std::time::Instant::now();
         let all_deps = declared_dependencies.take().unwrap_or_default();
+        lockfiles_not_used = lockfiles_not_used_by(&all_deps, &config.root);
         let unpinned: Vec<_> = all_deps.iter().filter(|d| d.version.is_none()).collect();
         // Ticket #189: the texts follow `--lang`; the unpinned finding had
         // no message and no solution at all before (2026-11-16).
@@ -2116,6 +2194,7 @@ pub fn run_scan(config: &ScanConfig) -> ScanReport {
         skipped_dirs,
         skipped_minified,
         skipped_saved_pages,
+        lockfiles_not_used,
         rule_catalog,
         test_results,
         dependency_stats,
@@ -2218,6 +2297,71 @@ pub(crate) fn adjust_injection_confidence(findings: &mut Vec<ReportFinding>) {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// Ticket #209: a finding says where the version it checked comes
+    /// from when the manifest does not pin it, in every language.
+    #[test]
+    fn test_checked_version_label_says_where_the_version_comes_from() {
+        use crate::project::dependencies::{Dependency, LockStatus, VersionSource};
+        let dep = |source: VersionSource| Dependency {
+            name: "lodash".into(),
+            version: Some("4.17.0".into()),
+            ecosystem: "npm".into(),
+            file: PathBuf::from("package.json"),
+            line: 1,
+            raw_line: String::new(),
+            version_source: source,
+        };
+        let fr = DependencyTexts::new("fr");
+        let label = |source| checked_version_label(&dep(source), "4.17.0", &fr);
+        assert_eq!(label(VersionSource::Manifest), "4.17.0");
+        assert_eq!(
+            label(VersionSource::Lockfile {
+                file: "package-lock.json".into()
+            }),
+            "4.17.0 (installée selon package-lock.json)"
+        );
+        assert_eq!(
+            label(VersionSource::DeclaredMinimum {
+                constraint: "^4.17.0".into(),
+                lock: LockStatus::Absent
+            }),
+            "4.17.0 (minimum de « ^4.17.0 », aucun fichier de verrouillage)"
+        );
+        let reasons = [
+            LockStatus::Absent,
+            LockStatus::NotListed {
+                file: "package-lock.json".into(),
+            },
+            LockStatus::NotAVersion {
+                file: "package-lock.json".into(),
+                value: "file:../x".into(),
+            },
+            LockStatus::Unreadable {
+                file: "composer.lock".into(),
+                reason: "EOF".into(),
+            },
+            LockStatus::NotRead {
+                file: "yarn.lock".into(),
+            },
+        ];
+        for lang in ["en", "fr", "de", "es"] {
+            let texts = DependencyTexts::new(lang);
+            for lock in &reasons {
+                let source = VersionSource::DeclaredMinimum {
+                    constraint: "^4.17.0".into(),
+                    lock: lock.clone(),
+                };
+                let text = checked_version_label(&dep(source), "4.17.0", &texts);
+                assert!(
+                    text.contains("^4.17.0")
+                        && !text.contains('{')
+                        && !text.contains("dependency_findings"),
+                    "{lang}: {text}"
+                );
+            }
+        }
+    }
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
 

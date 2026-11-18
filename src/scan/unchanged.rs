@@ -101,13 +101,30 @@ impl ScanInputs {
             .par_iter()
             .map(|path| (relative(path), hash_file(path)))
             .collect();
-        let manifests = crate::project::dependencies::find_dependency_files(
+        // The lockfiles next to each manifest too (ticket #209): they give
+        // the versions checked, so changing one must trigger a scan.
+        let manifest_files: Vec<PathBuf> = crate::project::dependencies::find_dependency_files(
             &config.root,
             &config.include_paths,
         )
-        .iter()
-        .map(|(path, _)| (relative(path), hash_file(path)))
+        .into_iter()
+        .map(|(path, _)| path)
         .collect();
+        let lockfiles: Vec<PathBuf> = manifest_files
+            .iter()
+            .filter_map(|path| path.parent())
+            .flat_map(|dir| {
+                crate::project::dependencies::LOCKFILE_NAMES
+                    .iter()
+                    .map(move |name| dir.join(name))
+            })
+            .filter(|path| path.is_file())
+            .collect();
+        let manifests = manifest_files
+            .iter()
+            .chain(&lockfiles)
+            .map(|path| (relative(path), hash_file(path)))
+            .collect();
         ScanInputs {
             engine: CacheKey::current(&config.lang),
             options: ScanOptions {
@@ -289,6 +306,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("src")).unwrap();
         std::fs::write(root.join("src/app.py"), "print('hello')\n").unwrap();
+        // A manifest, so that a lockfile added next to it is an input.
+        std::fs::write(root.join("requirements.txt"), "flask==2.0\n").unwrap();
         let rules = root.join("rules.cfpack");
         std::fs::write(&rules, b"pack bytes").unwrap();
         let datas = root.join("audit-reports/audit-datas");
@@ -347,7 +366,7 @@ mod tests {
     fn test_each_input_of_the_scan_breaks_the_match() {
         // Each change is made on a fresh project that matched before it.
         type Change = fn(&Path, &mut ScanConfig);
-        let changes: [(&str, Change); 7] = [
+        let changes: [(&str, Change); 8] = [
             ("file", |root, _| {
                 std::fs::write(root.join("src/app.py"), "print('bye')\n").unwrap()
             }),
@@ -356,6 +375,9 @@ mod tests {
             }),
             ("manifest", |root, _| {
                 std::fs::write(root.join("requirements.txt"), "flask==3.0\n").unwrap()
+            }),
+            ("lockfile", |root, _| {
+                std::fs::write(root.join("poetry.lock"), "# new lock\n").unwrap()
             }),
             ("pack", |root, _| {
                 std::fs::write(root.join("rules.cfpack"), b"other pack").unwrap()

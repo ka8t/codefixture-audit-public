@@ -219,10 +219,12 @@ impl TaintCache {
     }
 
     /// The previous cache, when it exists, reads, and was written by the
-    /// same engine for the same language; `None` otherwise (full scan).
-    pub fn load(path: &Path, key: &CacheKey) -> Option<Self> {
-        let cache: TaintCache = read_gz_json(path)?;
-        (cache.format == FORMAT && &cache.key == key).then_some(cache)
+    /// same engine for the same language; otherwise why it cannot be used
+    /// (full scan).
+    pub fn load(path: &Path, key: &CacheKey) -> Result<Self, CacheMiss> {
+        let cache: TaintCache = read_cache_file(path)?;
+        check_cache(cache.format, &cache.key, key)?;
+        Ok(cache)
     }
 
     /// Writes the cache atomically (temporary file, then rename): an
@@ -284,11 +286,14 @@ impl PatternCache {
     }
 
     /// The previous cache when it was written by the same engine, for the
-    /// same language and the same rules; `None` otherwise.
-    pub fn load(path: &Path, key: &CacheKey, rules_hash: &str) -> Option<Self> {
-        let cache: PatternCache = read_gz_json(path)?;
-        (cache.format == FORMAT && &cache.key == key && cache.rules_hash == rules_hash)
-            .then_some(cache)
+    /// same language and the same rules; otherwise why it cannot be used.
+    pub fn load(path: &Path, key: &CacheKey, rules_hash: &str) -> Result<Self, CacheMiss> {
+        let cache: PatternCache = read_cache_file(path)?;
+        check_cache(cache.format, &cache.key, key)?;
+        if cache.rules_hash != rules_hash {
+            return Err(CacheMiss::Rules);
+        }
+        Ok(cache)
     }
 
     /// Writes the cache atomically.
@@ -401,6 +406,57 @@ fn remove_files_of_the_old_layout(base: &Path) {
 /// the scan is simply a full one.
 const MAX_CACHE_DECOMPRESSED: u64 = 1 << 30;
 
+/// Why a pass could not reuse the previous cache at all and analysed
+/// every file again, for its console line (ticket #204): without it, the
+/// line read as if every file had changed since the last scan.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "reason", rename_all = "snake_case")]
+pub enum CacheMiss {
+    /// No cache file: the first scan of the project by this engine build
+    /// (each build has its own folder, see `CacheKey::engine_dir`).
+    Missing,
+    /// A cache file that cannot be read: damaged, over the size bound, or
+    /// of a layout this engine cannot decode.
+    Unreadable,
+    /// A cache file written with another `FORMAT`.
+    Format,
+    /// A cache written by another engine build. Each build has its own
+    /// folder, so this only happens with a folder copied by hand.
+    Engine,
+    /// A cache written for another report language: the rule messages it
+    /// holds are in that language.
+    Language { previous: String, current: String },
+    /// Pattern pass only: the loaded rules changed.
+    Rules,
+}
+
+/// Reads the cache file at `path`, telling a missing file from one that
+/// cannot be read.
+fn read_cache_file<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, CacheMiss> {
+    if !path.exists() {
+        return Err(CacheMiss::Missing);
+    }
+    read_gz_json(path).ok_or(CacheMiss::Unreadable)
+}
+
+/// Whether a cache of `format` written under `found` can serve the scan
+/// whose key is `expected`.
+fn check_cache(format: u32, found: &CacheKey, expected: &CacheKey) -> Result<(), CacheMiss> {
+    if format != FORMAT {
+        return Err(CacheMiss::Format);
+    }
+    if found.engine != expected.engine {
+        return Err(CacheMiss::Engine);
+    }
+    if found.lang != expected.lang {
+        return Err(CacheMiss::Language {
+            previous: found.lang.clone(),
+            current: expected.lang.clone(),
+        });
+    }
+    Ok(())
+}
+
 fn read_gz_json<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
     let file = std::fs::File::open(path).ok()?;
     // Read one byte past the cap so an over-the-cap stream is detected
@@ -445,6 +501,10 @@ pub struct CacheStat {
     /// (rule, file) analyses run, over the total.
     pub analysed: usize,
     pub total: usize,
+    /// Why the previous cache was not used at all, `None` when it was:
+    /// every file was then analysed again for that reason, not because it
+    /// changed.
+    pub full: Option<CacheMiss>,
 }
 
 #[cfg(test)]
@@ -475,14 +535,33 @@ mod tests {
             engine: "e2".to_string(),
             lang: "fr".to_string(),
         };
-        assert!(
-            TaintCache::load(&path, &other).is_none(),
+        assert_eq!(
+            TaintCache::load(&path, &other).unwrap_err(),
+            CacheMiss::Engine,
             "another engine: full scan"
         );
+        let english = CacheKey {
+            engine: "e1".to_string(),
+            lang: "en".to_string(),
+        };
+        assert_eq!(
+            TaintCache::load(&path, &english).unwrap_err(),
+            CacheMiss::Language {
+                previous: "fr".to_string(),
+                current: "en".to_string()
+            },
+            "another language: full scan, named"
+        );
         std::fs::write(&path, b"garbage").unwrap();
-        assert!(
-            TaintCache::load(&path, &key).is_none(),
+        assert_eq!(
+            TaintCache::load(&path, &key).unwrap_err(),
+            CacheMiss::Unreadable,
             "unreadable: full scan"
+        );
+        assert_eq!(
+            TaintCache::load(&dir.join("none.json.gz"), &key).unwrap_err(),
+            CacheMiss::Missing,
+            "no cache yet: full scan"
         );
         std::fs::remove_dir_all(&dir).ok();
     }

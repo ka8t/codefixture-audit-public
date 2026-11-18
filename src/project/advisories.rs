@@ -30,7 +30,7 @@ use std::sync::Arc;
 
 use serde::Deserialize;
 
-use crate::project::dependencies::Dependency;
+use crate::project::dependencies::{Dependency, VersionSource};
 
 /// File layout version this engine understands — must match
 /// `FORMAT_VERSION` in `tools/codefixture-audit-advisories/src/format.rs`.
@@ -259,12 +259,13 @@ fn load_table<T: serde::de::DeserializeOwned>(
     }
 }
 
-/// Returns the dependencies of `deps` whose exact version is affected,
-/// in input order.
+/// Returns the dependencies of `deps` whose version to check
+/// (`Dependency::version`) is affected, in input order.
 pub fn find_vulnerable(deps: &[Dependency], db: &AdvisoryDb) -> Vec<VulnerableDependency> {
     let mut found = Vec::new();
     for dep in deps {
-        let Some(version) = exact_version(dep) else {
+        // The exact, locked or minimum version (ticket #209).
+        let Some(version) = dep.version.as_deref() else {
             continue;
         };
         let key = (
@@ -321,27 +322,20 @@ pub fn find_vulnerable(deps: &[Dependency], db: &AdvisoryDb) -> Vec<VulnerableDe
     found
 }
 
-/// The exact version a dependency is pinned to, or `None` for a range.
-/// `dependencies.rs` keeps the lower bound of a range in `version`
-/// (mirroring Python), so exactness is read back from the manifest line:
-/// `==` for PyPI, a bare version for npm/Packagist. The Maven and NuGet
-/// parsers only fill `version` for a pinned value already. Shared by the
-/// version rules and the SBOM export (ticket #196), so both treat a range
-/// the same way.
+/// The installed version of a dependency as far as its manifest or its
+/// lockfile tell: the version the manifest pins exactly, or the one the
+/// lockfile records; `None` for the declared minimum of a range and for an
+/// unpinned dependency. The SBOM export (ticket #196) lists only these.
+///
+/// Until ticket #209 (2026-11-18) the version rules used it too, so a
+/// range was never checked, and nothing said so. They now check
+/// `Dependency::version`, which holds the declared minimum of a range,
+/// and the finding states it.
 pub fn exact_version(dep: &Dependency) -> Option<&str> {
-    let version = dep.version.as_deref()?;
-    let exact = match dep.ecosystem.as_str() {
-        "PyPI" => dep.raw_line.contains("==") && !version.contains('*'),
-        "npm" | "Packagist" => {
-            // `raw_line` is `"name": "spec"`: the spec is the last
-            // quoted string.
-            let spec = dep.raw_line.rsplit('"').nth(1).unwrap_or_default().trim();
-            spec == version
-        }
-        "Maven" | "NuGet" => true,
-        _ => false,
-    };
-    exact.then_some(version)
+    match dep.version_source {
+        VersionSource::DeclaredMinimum { .. } => None,
+        VersionSource::Manifest | VersionSource::Lockfile { .. } => dep.version.as_deref(),
+    }
 }
 
 /// Package name normalization per ecosystem, applied to both sides:
@@ -607,6 +601,7 @@ fn compare_segment(a: &Segment, b: &Segment) -> Ordering {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::project::dependencies::LockStatus;
     use std::path::Path;
     use std::path::PathBuf;
 
@@ -618,6 +613,7 @@ mod tests {
             file: PathBuf::from("manifest"),
             line: 1,
             raw_line: raw_line.to_string(),
+            version_source: VersionSource::Manifest,
         }
     }
 
@@ -746,37 +742,40 @@ mod tests {
 
     #[test]
     fn test_exact_version_ignores_ranges() {
-        assert_eq!(
-            exact_version(&dep("PyPI", "lxml", Some("4.6.2"), "lxml==4.6.2")),
-            Some("4.6.2")
-        );
-        assert_eq!(
-            exact_version(&dep("PyPI", "lxml", Some("4.6.2"), "lxml>=4.6.2")),
-            None
-        );
-        assert_eq!(
-            exact_version(&dep(
-                "npm",
-                "lodash",
-                Some("4.17.20"),
-                "\"lodash\": \"4.17.20\""
-            )),
-            Some("4.17.20")
-        );
-        assert_eq!(
-            exact_version(&dep(
-                "npm",
-                "lodash",
-                Some("4.17.20"),
-                "\"lodash\": \"^4.17.20\""
-            )),
-            None
-        );
-        assert_eq!(
-            exact_version(&dep("Maven", "g:a", Some("1.0"), "g:a 1.0")),
-            Some("1.0")
-        );
+        let exact = dep("PyPI", "lxml", Some("4.6.2"), "lxml==4.6.2");
+        assert_eq!(exact_version(&exact), Some("4.6.2"));
+        let mut minimum = dep("PyPI", "lxml", Some("4.6.2"), "lxml>=4.6.2");
+        minimum.version_source = VersionSource::DeclaredMinimum {
+            constraint: ">=4.6.2".to_string(),
+            lock: LockStatus::Absent,
+        };
+        assert_eq!(exact_version(&minimum), None);
+        let mut locked = dep("npm", "lodash", Some("4.17.21"), "\"lodash\": \"^4.17.20\"");
+        locked.version_source = VersionSource::Lockfile {
+            file: "package-lock.json".to_string(),
+        };
+        assert_eq!(exact_version(&locked), Some("4.17.21"));
         assert_eq!(exact_version(&dep("Maven", "g:a", None, "g:a ${v}")), None);
+    }
+
+    /// Ticket #209: a range is checked at its declared minimum, which
+    /// `exact_version` refused before, so nothing was checked.
+    #[test]
+    fn test_find_vulnerable_checks_the_declared_minimum_of_a_range() {
+        let db = db_from(
+            "PyPI",
+            r#"{"format":1,"ecosystem":"PyPI","last_modified":"x","updated_at":0,"advisories":[
+              {"id":"GHSA-1","aliases":[],"summary":"XSS","severity":"MEDIUM",
+               "packages":[{"name":"lxml","ranges":[[{"introduced":"0"},{"fixed":"4.6.3"}]]}]}]}"#,
+        );
+        let mut minimum = dep("PyPI", "lxml", Some("4.6.2"), "lxml>=4.6.2");
+        minimum.version_source = VersionSource::DeclaredMinimum {
+            constraint: ">=4.6.2".to_string(),
+            lock: LockStatus::Absent,
+        };
+        let found = find_vulnerable(&[minimum], &db);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].version, "4.6.2");
     }
 
     #[test]
@@ -796,15 +795,12 @@ mod tests {
         );
         let deps = [
             dep("PyPI", "lxml", Some("4.6.2"), "lxml==4.6.2"),
-            dep("PyPI", "lxml", Some("4.6.2"), "lxml>=4.6.2"),
             dep("PyPI", "requests", Some("2.0"), "requests==2.0"),
         ];
+        // A range is checked at its declared minimum since ticket #209:
+        // `test_find_vulnerable_checks_the_declared_minimum_of_a_range`.
         let found = find_vulnerable(&deps, &db);
-        assert_eq!(
-            found.len(),
-            1,
-            "range spec and unknown package are not reported"
-        );
+        assert_eq!(found.len(), 1, "an unknown package is not reported");
         let hit = &found[0];
         let ids: Vec<&str> = hit.advisories.iter().map(|a| a.display_id()).collect();
         assert_eq!(

@@ -51,10 +51,13 @@ pub(super) fn run_pattern_pass(
     );
     let governance = governance_names(rule_jsons);
     let cache_path = context.cache.map(|c| PatternCache::path(&c.dir));
-    let previous = context
+    let loaded = context
         .cache
         .zip(cache_path.as_ref())
-        .and_then(|(c, p)| PatternCache::load(p, &c.key, &rules_hash));
+        .map(|(c, p)| PatternCache::load(p, &c.key, &rules_hash));
+    // Ticket #204: why the previous cache could not serve, for the line.
+    let miss = loaded.as_ref().and_then(|r| r.as_ref().err().cloned());
+    let previous = loaded.and_then(Result::ok);
 
     let runs: Vec<FileRun> = parsed_files
         .par_iter()
@@ -87,6 +90,7 @@ pub(super) fn run_pattern_pass(
             dirty: redone,
             analysed: redone,
             total: parsed_files.len(),
+            full: miss,
         });
     }
     for findings in reportable {

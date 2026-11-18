@@ -201,6 +201,7 @@ mod tests {
             file: std::path::PathBuf::from("x"),
             line: 1,
             raw_line: raw_line.to_string(),
+            version_source: Default::default(),
         }
     }
 
@@ -209,9 +210,25 @@ mod tests {
     /// instead of the range's lower bound presented as the version.
     #[test]
     fn test_build_dependency_sbom_leaves_ranges_without_version() {
+        // Ticket #209: a range keeps its declared minimum in `version`,
+        // for the version rules, with the source saying so.
+        let minimum = |name: &str, version: &str, ecosystem: &str, spec: &str, line: &str| {
+            let mut dep = dep_line(name, Some(version), ecosystem, line);
+            dep.version_source = crate::project::dependencies::VersionSource::DeclaredMinimum {
+                constraint: spec.to_string(),
+                lock: crate::project::dependencies::LockStatus::Absent,
+            };
+            dep
+        };
         let deps = vec![
-            dep_line("flask", Some("2.0"), "PyPI", "flask>=2.0"),
-            dep_line("lodash", Some("4.17.0"), "npm", "\"lodash\": \"^4.17.0\""),
+            minimum("flask", "2.0", "PyPI", ">=2.0", "flask>=2.0"),
+            minimum(
+                "lodash",
+                "4.17.0",
+                "npm",
+                "^4.17.0",
+                "\"lodash\": \"^4.17.0\"",
+            ),
             dep_line("express", Some("4.18.2"), "npm", "\"express\": \"4.18.2\""),
         ];
         let sbom = build_dependency_sbom(&deps, "p", "", "codefixture-audit", "0.1.0", "t");
@@ -242,7 +259,7 @@ mod tests {
                 "pkg:pypi/requests@2.31.0",
                 "pkg:maven/org.springframework/spring-core@6.1.0",
                 "pkg:composer/monolog/monolog",
-                "pkg:generic/weird",
+                "pkg:generic/weird@1",
             ]
         );
         assert!(
