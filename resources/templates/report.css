@@ -127,7 +127,8 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .exec-card { background: white; border-radius: 10px; padding: 1.2rem; box-shadow: 0 2px 8px rgba(0,0,0,0.06); border-top: 4px solid var(--gray-200); }
 .exec-card h3 { font-size: 0.85rem; color: var(--gray-500); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.8rem; }
 .exec-severity { border-top-color: var(--danger); }
-.exec-severity-row { display: flex; gap: 1.5rem; justify-content: center; margin-top: 0.75rem; }
+/* 2 x 2: five severities no longer fit on one row of this card (CRITICAL added, ticket #220). */
+.exec-severity-row { display: grid; grid-template-columns: repeat(2, 1fr); gap: 0.75rem 1rem; margin-top: 0.75rem; }
 .exec-severity-cell { display: flex; flex-direction: column; align-items: center; min-width: 4rem; }
 .exec-severity-value { font-size: 1.8rem; font-weight: 800; line-height: 1.1; }
 .exec-severity-label { font-size: 0.75rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--gray-600); margin-top: 0.25rem; }
