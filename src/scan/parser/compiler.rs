@@ -174,6 +174,7 @@ pub fn compile_to_json(node: &RuleNode) -> Value {
         let not_has_empty = fc["not_has"].as_array().is_some_and(|a| a.is_empty());
         let has_extra = fc.get("min_lines").is_some()
             || fc.get("path_contains").is_some()
+            || fc.get("not_path_contains").is_some()
             || fc.get("not_path_has_file").is_some();
         if !has_empty || !not_has_empty || has_extra {
             result.insert("file_contains".to_string(), fc);
@@ -295,6 +296,7 @@ fn compile_file_conditions(node: &RuleNode) -> Value {
     let mut not_has: Vec<String> = Vec::new();
     let mut scope = "file".to_string();
     let mut path_contains: Option<Vec<String>> = None;
+    let mut not_path_contains: Option<Vec<String>> = None;
     let mut not_path_has_file: Option<Vec<String>> = None;
     let mut min_lines: Option<i64> = None;
 
@@ -311,6 +313,9 @@ fn compile_file_conditions(node: &RuleNode) -> Value {
         not_has.extend(fc.not_has_patterns.clone());
         if !fc.path_contains.is_empty() {
             path_contains = Some(fc.path_contains.clone());
+        }
+        if !fc.not_path_contains.is_empty() {
+            not_path_contains = Some(fc.not_path_contains.clone());
         }
         if !fc.not_path_has_file.is_empty() {
             not_path_has_file = Some(fc.not_path_has_file.clone());
@@ -329,6 +334,9 @@ fn compile_file_conditions(node: &RuleNode) -> Value {
     result.insert("scope".to_string(), json!(scope));
     if let Some(pc) = path_contains {
         result.insert("path_contains".to_string(), json!(pc));
+    }
+    if let Some(npc) = not_path_contains {
+        result.insert("not_path_contains".to_string(), json!(npc));
     }
     if let Some(npf) = not_path_has_file {
         result.insert("not_path_has_file".to_string(), json!(npf));

@@ -106,6 +106,7 @@
 
   "mapping": {
     "hardcoded_secret":              ["A.8.28", "A.8.4", "A.5.33", "A.8.12"],
+    "hardcoded_secret_local_config": ["A.8.28", "A.8.4", "A.5.33", "A.8.12"],
     "sql_injection_fstring":         ["A.8.28", "A.8.26"],
     "sql_injection_concat":          ["A.8.28", "A.8.26"],
     "taint_codeinj":                  ["A.8.28", "A.8.26", "A.8.7"],

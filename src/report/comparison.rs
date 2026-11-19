@@ -19,13 +19,21 @@ use crate::report::exports::sarif::ReportFinding;
 /// — port of `_finding_key`. Excludes the line number so it
 /// survives a line shift caused by an unrelated change
 /// elsewhere in the file.
+///
+/// Deliberate deviation from Python (ticket #227): the rule part is the
+/// rule's key, not its name. The name is the translated text in the
+/// report language, so a baseline written in another language would have
+/// made every finding new. Catalog findings kept their key as name until
+/// then, so their keys match an older baseline; the two dependency
+/// findings (`vulnerable_dependency`, `unpinned_dependency`) carried a
+/// translated name and show as new and resolved once.
 fn finding_key(f: &ReportFinding) -> String {
     let hash = if f.code.is_empty() {
         0
     } else {
         line_hash(&f.code)
     };
-    format!("{}:{}:{hash}", f.file, f.rule_name)
+    format!("{}:{}:{hash}", f.file, f.rule_key)
 }
 
 /// Indexes a list of findings by unique key — port of
@@ -99,11 +107,11 @@ pub fn compare_with_baseline(
 mod tests {
     use super::*;
 
-    fn finding(file: &str, rule_name: &str, code: &str, line: usize) -> ReportFinding {
+    fn finding(file: &str, rule_key: &str, code: &str, line: usize) -> ReportFinding {
         ReportFinding {
-            rule_key: "r".to_string(),
+            rule_key: rule_key.to_string(),
             rule_language: "python".to_string(),
-            rule_name: rule_name.to_string(),
+            rule_name: format!("Name of {rule_key}"),
             category: "SECURITY".to_string(),
             severity: "HIGH".to_string(),
             risk: String::new(),
@@ -123,6 +131,23 @@ mod tests {
             rule_source: "json_builtin".to_string(),
             file_scope: None,
         }
+    }
+
+    /// A finding keeps its identity when its rule name changes, as from a
+    /// report in English to one in French (ticket #227).
+    #[test]
+    fn test_a_renamed_rule_keeps_its_findings_unchanged() {
+        let baseline = vec![finding("a.py", "sqli", "eval(x)", 10)];
+        let mut current = baseline.clone();
+        current[0].rule_name = "Injection SQL".to_string();
+        let result = compare_with_baseline(
+            &current,
+            &baseline,
+            "2026-01-01".to_string(),
+            BTreeMap::new(),
+        );
+        assert_eq!(result.unchanged_findings.len(), 1);
+        assert!(result.new_findings.is_empty());
     }
 
     #[test]

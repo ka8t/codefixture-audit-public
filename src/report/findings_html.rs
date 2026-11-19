@@ -500,7 +500,9 @@ fn render_findings(
     let mut order: Vec<RuleId> = Vec::new();
     let mut by_rule: BTreeMap<RuleId, Vec<&ReportFinding>> = BTreeMap::new();
     for f in findings {
-        let id = RuleId::new(&f.rule_language, &f.rule_name);
+        // By identity (language + key), not by name: the name is the
+        // translated text since ticket #227.
+        let id = f.rule_id();
         let entry = by_rule.entry(id.clone()).or_insert_with(|| {
             order.push(id);
             Vec::new()

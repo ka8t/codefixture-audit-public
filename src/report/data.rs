@@ -20,8 +20,9 @@ fn file_score_weight(sev: &str) -> i64 {
         _ => 1,
     }
 }
-/// Health-score penalties (SECURITY findings only) —
-/// `security_penalties` on the Python side.
+/// Health-score penalties (findings that count for the security score,
+/// see `counts_for_security_score`) — `security_penalties` on the
+/// Python side.
 fn health_penalty_weight(sev: &str) -> i64 {
     match sev {
         "CRITICAL" => 10,
@@ -30,6 +31,36 @@ fn health_penalty_weight(sev: &str) -> i64 {
         "LOW" => 1,
         _ => 0,
     }
+}
+
+/// CWE identifiers of a credential or key written in the code: hard-coded
+/// credentials (CWE-798), hard-coded password (CWE-259), hard-coded
+/// cryptographic key (CWE-321).
+const HARDCODED_SECRET_CWES: [&str; 3] = ["CWE-798", "CWE-259", "CWE-321"];
+
+/// Categories whose findings all count for the security score: the
+/// security rules, and the CI/CD rules, which describe flaws of the build
+/// pipeline (code injection through a workflow expression, reverse shell,
+/// poisoned artifact or cache, excessive permissions).
+const SECURITY_SCORE_CATEGORIES: [&str; 2] = ["SECURITY", "CICD"];
+
+/// Whether a finding counts for the security score (health score).
+///
+/// Deliberate deviation from Python (ADR-0054), which counts the SECURITY
+/// category only:
+/// - the CI/CD category counts too (ticket #228);
+/// - a secret written in the code counts whatever its category,
+///   recognized by its CWE (`HARDCODED_SECRET_CWES`).
+///
+/// On a tester's project (2026-11-19) the 17 CRITICAL findings of
+/// `hardcoded_secret_cicd`, filed under CI/CD, were the most severe of
+/// the report, yet the score and its chart showed no critical finding.
+pub fn counts_for_security_score(f: &ReportFinding) -> bool {
+    SECURITY_SCORE_CATEGORIES.contains(&f.category.as_str())
+        || f
+            .cwe
+            .iter()
+            .any(|cwe| HARDCODED_SECRET_CWES.contains(&cwe.as_str()))
 }
 
 /// Normalizes an unknown severity to `"MEDIUM"` — same fallback as
@@ -166,11 +197,12 @@ pub fn compute_report_data(findings: &[ReportFinding], total_lines_code: usize) 
         })
         .collect();
 
-    // Health score — SECURITY findings only.
+    // Health score — findings that count for the security score
+    // (SECURITY category and secrets written in the code).
     let mut health_penalty_detail: BTreeMap<&'static str, usize> =
         SEVERITIES.iter().map(|s| (*s, 0)).collect();
     let mut total_penalty: i64 = 0;
-    for f in findings.iter().filter(|f| f.category == "SECURITY") {
+    for f in findings.iter().filter(|f| counts_for_security_score(f)) {
         let sev = normalize_severity(&f.severity);
         *health_penalty_detail.get_mut(sev).unwrap() += 1;
         total_penalty += health_penalty_weight(sev);
@@ -371,5 +403,27 @@ mod tests {
         assert_eq!(hs.count, 2);
         assert_eq!(hs.penalty_each, 5);
         assert_eq!(hs.penalty_total, 10);
+    }
+
+    /// The security score counts the SECURITY and CI/CD categories, and a
+    /// secret written in the code whatever its category; the other
+    /// categories stay out (ADR-0054).
+    #[test]
+    fn test_security_score_counts_security_cicd_and_hardcoded_secrets() {
+        let mut secret = finding("MAINTENANCE", "CRITICAL", "app.py", 1);
+        secret.cwe = vec!["CWE-798".to_string()];
+        let findings = [
+            secret,
+            finding("CICD", "HIGH", "ci.yml", 2),
+            finding("SECURITY", "MEDIUM", "a.py", 3),
+            finding("UX", "HIGH", "page.html", 4),
+            finding("ARCH", "LOW", "b.py", 5),
+        ];
+        let data = compute_report_data(&findings, 1000);
+        assert_eq!(data.health_penalty_detail["CRITICAL"], 1);
+        assert_eq!(data.health_penalty_detail["HIGH"], 1);
+        assert_eq!(data.health_penalty_detail["MEDIUM"], 1);
+        assert_eq!(data.health_penalty_detail["LOW"], 0);
+        assert_eq!(data.total_penalty, 10 + 5 + 2);
     }
 }

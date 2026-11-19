@@ -3,7 +3,7 @@
   "tool": "codefixture-audit",
   "tool_version": "1.4.0",
   "description": "Remediation playbook — structured steps for each detection rule. Readable by humans and machines.",
-  "total_rules": 560,
+  "total_rules": 561,
   "rules": {
     "autoplay_media": {
       "title": "A video or a sound starts playing by itself",
@@ -5965,7 +5965,7 @@
       }
     },
     "hardcoded_secret_cicd": {
-      "title": "A password or access key is written in clear in a configuration file",
+      "title": "A password or access key is written in clear in an automation file",
       "severity": "CRITICAL",
       "category": "security",
       "language": "yaml",
@@ -6003,6 +6003,49 @@
           "A.8.12",
           "A.8.13",
           "A.8.28"
+        ]
+      }
+    },
+    "hardcoded_secret_local_config": {
+      "title": "A password is written in clear in a local or test configuration file",
+      "severity": "MEDIUM",
+      "category": "security",
+      "language": "yaml",
+      "risk": "A password, token (access key) or API key is written in clear in this local or test configuration file. It is often a development value, but it travels with every copy of the project, and the same password is often reused on a shared server or in production.",
+      "steps": [
+        {
+          "order": 1,
+          "action": "Identify the passwords, tokens and keys written with a literal value in the local or test configuration files",
+          "type": "diagnostic",
+          "action_i18n": {
+            "fr": "Repérez les mots de passe, jetons et clés écrits avec une valeur littérale dans les fichiers de configuration locale ou de test",
+            "es": "Identifique las contraseñas, tokens y claves escritos con un valor literal en los archivos de configuración local o de prueba",
+            "de": "Ermitteln Sie Passwörter, Token und Schlüssel, die mit einem literalen Wert in den lokalen oder Test-Konfigurationsdateien stehen"
+          }
+        },
+        {
+          "order": 2,
+          "action": "Take the value out of the file: 1) replace it with the name of an environment variable, for example password: ${DB_PASSWORD}; 2) give it its value in a file that stays on the developer's machine, such as a .env file listed in .gitignore, or in the test settings; 3) if the same password is used elsewhere, change it there.",
+          "type": "code_change"
+        },
+        {
+          "order": 3,
+          "action": "Run the audit again to verify the finding is resolved",
+          "type": "verification",
+          "action_i18n": {
+            "fr": "Relancez l'audit pour vérifier que le finding est résolu",
+            "es": "Vuelva a ejecutar la auditoría para verificar que el hallazgo está resuelto",
+            "de": "Führen Sie das Audit erneut aus, um zu prüfen, dass der Befund behoben ist"
+          }
+        }
+      ],
+      "benefit": "The project no longer carries any password, even a development one.",
+      "references": {
+        "iso27001": [
+          "A.8.28",
+          "A.8.4",
+          "A.5.33",
+          "A.8.12"
         ]
       }
     },

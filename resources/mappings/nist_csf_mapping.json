@@ -56,6 +56,7 @@
     "dynamic_import": ["PR.PS-05"],
     "taint_deserialization": ["PR.DS-10", "PR.PS-05"],
     "hardcoded_secret": ["PR.AA-01", "PR.DS-01"],
+    "hardcoded_secret_local_config": ["PR.AA-01", "PR.DS-01"],
     "hardcoded_internal_ip": ["PR.DS-01"],
     "jwt_hardcoded_secret": ["PR.AA-01", "PR.DS-01"],
     "jwt_none_algorithm": ["PR.AA-04"],

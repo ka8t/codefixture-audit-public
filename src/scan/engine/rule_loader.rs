@@ -130,6 +130,7 @@ pub fn compile_file_contains_rule_from_json(rule_json: &Value) -> Option<Compile
         .and_then(|v| v.as_i64())
         .unwrap_or(0);
     let path_contains = json_str_array(fc_json, "path_contains");
+    let not_path_contains = json_str_array(fc_json, "not_path_contains");
     let not_path_has_file = json_str_array(fc_json, "not_path_has_file");
 
     Some(CompiledFileContainsRule {
@@ -142,6 +143,7 @@ pub fn compile_file_contains_rule_from_json(rule_json: &Value) -> Option<Compile
             not_has,
             min_lines,
             path_contains,
+            not_path_contains,
             not_path_has_file,
         },
     })

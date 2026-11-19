@@ -1078,7 +1078,10 @@ fn engine_finding_to_report(
     ReportFinding {
         rule_key: f.rule_id.clone(),
         rule_language: rule_language(rule_json),
-        rule_name: f.rule_id.clone(),
+        // The rule's name in the report language (its `name` block), not
+        // its key: the report showed `hardcoded_secret_cicd` everywhere
+        // (ticket #227). The key stays in `rule_key`.
+        rule_name: crate::report::text::rule_display_name(rule_json, lang),
         category: f.category.clone(),
         severity: f.severity.clone(),
         risk: rule_display_message(rule_json, lang),
@@ -1208,7 +1211,9 @@ fn taint_finding_to_report(
     ReportFinding {
         rule_key: f.rule_id.clone(),
         rule_language: rule_language(rule_json),
-        rule_name: f.rule_id.clone(),
+        // Name in the report language, like `engine_finding_to_report`
+        // (ticket #227).
+        rule_name: crate::report::text::rule_display_name(rule_json, lang),
         // Category declared by the DSL rule, not a pseudo-category
         // "Taint" — mirrors `cat_key = flow.category.upper()` on the
         // `rule_engine.py::_integrate_taint_flow` side (a taint finding
@@ -2207,8 +2212,17 @@ pub fn run_scan(config: &ScanConfig) -> ScanReport {
     let mut history = Vec::new();
     if let Some(datas_dir) = &config.datas_dir {
         if let Some(baseline_path) = find_baseline(config)
-            && let Ok(baseline) = crate::report::export_json::load_export(&baseline_path)
+            && let Ok(mut baseline) = crate::report::export_json::load_export(&baseline_path)
         {
+            // The baseline's findings carry the rule names of the scan that
+            // wrote them: the key itself before ticket #227, or another
+            // language. The resolved findings listed in this report take
+            // the name of the current catalog, in the report's language.
+            for f in &mut baseline.findings {
+                if let Some(rule) = rule_catalog.get(&f.rule_id()) {
+                    f.rule_name = crate::report::text::rule_display_name(rule, &config.lang);
+                }
+            }
             comparison = Some(crate::report::comparison::compare_with_baseline(
                 &all_findings,
                 &baseline.findings,

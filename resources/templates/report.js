@@ -49,10 +49,19 @@ function togglePrintMode() {
 function scrollToSection(id) {
     const el = document.getElementById(id);
     if (!el) return;
-    // Ouvrir si c'est un accordion fermé (section severity)
-    const sectionEl = el.closest('.section') || el;
-    if (sectionEl.classList.contains('section') && !sectionEl.classList.contains('open')) {
+    // Open every folded accordion that holds the target: its own section
+    // and the enclosing ones (a severity section sits inside "Detected
+    // issues", which may be folded too), plus the business/dependency
+    // sub-groups of a severity section, so the link lands on findings.
+    let sectionEl = el.closest('.section');
+    while (sectionEl) {
         sectionEl.classList.add('open');
+        sectionEl = sectionEl.parentElement && sectionEl.parentElement.closest('.section');
+    }
+    if (el.classList.contains('section')) {
+        el.querySelectorAll(':scope > .section-content > .sub-group').forEach(function(sg) {
+            sg.classList.add('open');
+        });
     }
     // Ouvrir tout <details> ancêtre fermé (ex : paramètres d'audit dans Technical Details)
     let details = el.closest('details');
@@ -310,11 +319,16 @@ document.addEventListener('DOMContentLoaded', function() {
         findingsSection.classList.add('open');
     }
 
-    // Ouvrir automatiquement la section HIGH si elle a des éléments
-    const highSection = document.getElementById('section-HIGH');
-    if (highSection && highSection.querySelector('.finding')) {
-        highSection.classList.add('open');
-    }
+    // Open the CRITICAL and HIGH sections when they hold findings. Only
+    // HIGH used to open: the critical findings announced at the top of the
+    // report stayed folded above it, and a tester never found them
+    // (2026-11-19, follow-up of ticket #220).
+    ['section-CRITICAL', 'section-HIGH'].forEach(function(id) {
+        const severitySection = document.getElementById(id);
+        if (severitySection && severitySection.querySelector('.finding')) {
+            severitySection.classList.add('open');
+        }
+    });
 
     // Initialiser les graphiques (fonction définie dynamiquement)
     if (typeof initCharts === 'function') {

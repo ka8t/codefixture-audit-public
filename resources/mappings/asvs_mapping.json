@@ -295,6 +295,7 @@
     "hardcoded_internal_ip": [],
     "hardcoded_iv_nonce": ["11.3.1"],
     "hardcoded_secret": [],
+    "hardcoded_secret_local_config": [],
     "hardcoded_tmp_path": [],
     "homebrew_auth": [],
     "host_allowlist_substring_bypass": [],

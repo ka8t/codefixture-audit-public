@@ -254,10 +254,46 @@ impl<'a> DslParser<'a> {
         }
     }
 
+    /// Parses the keywords of a regex `match` block up to its `end`.
+    ///
+    /// Deliberate deviation from Python (ticket #226): a keyword given
+    /// twice in one block used to replace the first value without a word.
+    /// `path_traversal_os_join` listed three `text-not` and only the last
+    /// one applied. Now:
+    /// - several `pattern-not`/`text-not` lines are all kept: a line is
+    ///   left out as soon as one of them matches (`combine_negatives`);
+    /// - any other keyword given twice (`pattern`/`text`, `with`/
+    ///   `with-text`, `scope`, `pattern-inside`, `pattern-not-inside`) is
+    ///   a syntax error naming it, since two values of one slot have no
+    ///   single meaning.
     fn parse_match_regex(&mut self, start_line: usize) -> PResult<MatchRegexBlock> {
         let mut block = MatchRegexBlock::new(start_line);
+        // Slots already given in this block; `pattern`/`text` share one,
+        // like `with`/`with-text`.
+        let mut seen: HashSet<&'static str> = HashSet::new();
         while !self.at_end() {
             let kw = self.keyword();
+            let slot = match kw.as_str() {
+                "pattern" | "text" => Some("pattern"),
+                "with" | "with-text" => Some("with"),
+                "scope" => Some("scope"),
+                "pattern-inside" => Some("pattern-inside"),
+                "pattern-not-inside" => Some("pattern-not-inside"),
+                _ => None,
+            };
+            if let Some(slot) = slot
+                && !seen.insert(slot)
+            {
+                return Err(self.err(&format!(
+                    "« {kw} » est donné deux fois dans le même bloc 'match' : la seconde valeur remplacerait la première. Écrivez un seul « {slot} » par bloc, ou un bloc 'match' par motif."
+                )));
+            }
+            if matches!(kw.as_str(), "pattern-not" | "text-not") {
+                let is_text = kw == "text-not";
+                let value = self.parse_raw_after_keyword()?;
+                combine_negatives(&mut block, value, is_text);
+                continue;
+            }
             match kw.as_str() {
                 "end" => {
                     self.advance();
@@ -279,14 +315,6 @@ impl<'a> DslParser<'a> {
                 "with-text" => {
                     block.with_pattern = self.parse_raw_after_keyword()?;
                     block.with_is_text = true;
-                }
-                "pattern-not" => {
-                    block.pattern_not = self.parse_raw_after_keyword()?;
-                    block.pattern_not_is_text = false;
-                }
-                "text-not" => {
-                    block.pattern_not = self.parse_raw_after_keyword()?;
-                    block.pattern_not_is_text = true;
                 }
                 "pattern-inside" => block.pattern_inside = self.parse_raw_after_keyword()?,
                 "pattern-not-inside" => {
@@ -652,6 +680,7 @@ impl<'a> DslParser<'a> {
             "scope",
             "min_lines",
             "path_contains",
+            "not_path_contains",
             "not_path_has_file",
         ];
         if file_keys.iter().any(|k| keys_found.contains(*k)) {
@@ -708,6 +737,17 @@ impl<'a> DslParser<'a> {
                         .push(rest_after_first_word(&line.raw_content));
                     self.advance();
                 }
+                // Deliberate addition to the Python DSL (ticket #229): the
+                // reverse of `path_contains`, so that rules can share out
+                // one kind of file by its path (a CI workflow, a local
+                // configuration, any other configuration) with no file
+                // falling between them or under two of them.
+                "not_path_contains" => {
+                    block
+                        .not_path_contains
+                        .push(rest_after_first_word(&line.raw_content));
+                    self.advance();
+                }
                 "not_path_has_file" => {
                     block
                         .not_path_has_file
@@ -737,6 +777,32 @@ fn rest_after_first_word(raw: &str) -> String {
 
 fn count_char(s: &str, c: char) -> usize {
     s.chars().filter(|&ch| ch == c).count()
+}
+
+/// Adds one `pattern-not` (`is_text == false`) or `text-not` value to the
+/// block's negative pattern (ticket #226). The first value is stored as
+/// written, so a block with a single negative compiles exactly as before.
+/// A further value turns both into regexes and joins them as alternatives,
+/// `(?:first)|(?:second)`: a line is left out as soon as one of them
+/// matches. Each side keeps its inline flags, since `(?i)` set inside a
+/// group stops at the end of that group.
+fn combine_negatives(block: &mut MatchRegexBlock, value: String, is_text: bool) {
+    if block.pattern_not.is_empty() {
+        block.pattern_not = value;
+        block.pattern_not_is_text = is_text;
+        return;
+    }
+    let as_regex = |v: &str, text: bool| {
+        if text {
+            compiler::text_to_regex(v)
+        } else {
+            v.to_string()
+        }
+    };
+    let first = as_regex(&block.pattern_not, block.pattern_not_is_text);
+    let second = as_regex(&value, is_text);
+    block.pattern_not = format!("(?:{first})|(?:{second})");
+    block.pattern_not_is_text = false;
 }
 
 // --- High-level entry point (mirrors sca/dsl/__init__.py) ---
@@ -776,6 +842,53 @@ mod tests {
     use super::*;
 
     const RULE_WITH_NAME: &str = "rule base64_eval\n  language  python\n  category  security\n  severity  HIGH\n  match\n    pattern  eval\\s*\\(\n    scope    line\n  end\n  name\n    en: Obfuscated base64 code execution\n    fr: Exécution de code obfusqué en base64\n  end\n  risk\n    en: Hidden code runs.\n  end\nend\n";
+
+    /// A rule with one `match` block whose body is `body`.
+    fn rule_with_match(body: &str) -> String {
+        format!(
+            "rule r\n  language  python\n  category  security\n  severity  HIGH\n  match\n{body}  end\nend\n"
+        )
+    }
+
+    /// Several `pattern-not`/`text-not` lines are all kept: a line matching
+    /// any of them is left out (ticket #226; before, the last one replaced
+    /// the others, and `path_traversal_os_join` lost two of its three).
+    #[test]
+    fn test_repeated_negatives_are_all_kept() {
+        let source = rule_with_match(
+            "    text  os.path.join(\n    text-not  realpath\n    pattern-not  (?i)SAFE\n    text-not  startswith\n    scope  line\n",
+        );
+        let rules = compile_sca_to_json(&source, "python/security/r.sca").unwrap();
+        let negative = rules[0]["patterns"][0]["pattern-not"].as_str().unwrap();
+        let negative = fancy_regex::Regex::new(negative).unwrap();
+        for line in ["p = realpath(x)", "p = safe(x)", "if p.startswith(root):"] {
+            assert!(negative.is_match(line).unwrap(), "{line}");
+        }
+        assert!(!negative.is_match("os.path.join(base, name)").unwrap());
+    }
+
+    /// A single negative compiles as written, as before ticket #226.
+    #[test]
+    fn test_single_negative_is_unchanged() {
+        let source = rule_with_match("    pattern  eval\\(\n    pattern-not  (?i)safe\n");
+        let rules = compile_sca_to_json(&source, "python/security/r.sca").unwrap();
+        assert_eq!(rules[0]["patterns"][0]["pattern-not"], "(?i)safe");
+    }
+
+    /// Any other keyword given twice in one block is an error naming it.
+    #[test]
+    fn test_other_repeated_keyword_is_an_error() {
+        for body in [
+            "    pattern  a\n    text  b\n",
+            "    pattern  a\n    with  b\n    with-text  c\n",
+            "    pattern  a\n    scope  line\n    scope  file\n",
+        ] {
+            let error = compile_sca_to_json(&rule_with_match(body), "python/security/r.sca")
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("deux fois"), "{body}: {error}");
+        }
+    }
 
     #[test]
     fn test_the_name_block_compiles_to_one_text_per_language() {

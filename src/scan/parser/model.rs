@@ -143,6 +143,9 @@ pub struct FileConditionBlock {
     pub has_patterns: Vec<String>,
     pub not_has_patterns: Vec<String>,
     pub path_contains: Vec<String>,
+    /// Segments none of which the file's project-relative path may
+    /// contain (ticket #229, no Python counterpart).
+    pub not_path_contains: Vec<String>,
     pub not_path_has_file: Vec<String>,
     pub min_lines: i64,
     pub scope: String,

@@ -935,7 +935,10 @@ function initCharts() {
                 meta.data.forEach(function(bar, i) {
                     const count = sevCounts[i];
                     if (!count) return;
-                    const label = count;
+                    // "count × weight": the bar length is in penalty
+                    // points, a bare count next to it read as a second,
+                    // different total (tester feedback, 2026-11-19).
+                    const label = count + ' × ' + (hs[sevKeys[i]] ? hs[sevKeys[i]].penaltyEach : 0);
                     ctx.save();
                     ctx.font = 'bold 12px sans-serif';
                     ctx.textBaseline = 'middle';
@@ -976,6 +979,15 @@ function initCharts() {
                 },
                 plugins: {
                     legend: { display: false },
+                    // Title stating what the chart counts: the findings of
+                    // the security score only, out of all the findings, so
+                    // its total is not mistaken for the other charts' one.
+                    title: {
+                        display: true,
+                        text: (i18n.healthSeverityChart || 'Security score penalties: {count} findings counted out of {total}')
+                            .replace('{count}', sevCounts.reduce((a, b) => a + b, 0))
+                            .replace('{total}', totalFindings)
+                    },
                     tooltip: {
                         callbacks: {
                             label: function(ctx) {

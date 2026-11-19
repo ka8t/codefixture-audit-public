@@ -127,15 +127,40 @@ fn format_priority_rule_list(ranked: &[RankedRule], report_locale: &Value) -> St
         .join(", ")
 }
 
-/// Prioritized recommendations (P1/P2/P3) for the executive summary —
-/// port of `_build_exec_recommendations`.
+/// One line of the prioritized recommendations.
+struct Recommendation {
+    /// `Some("p0")`…`Some("p3")` for an action, `None` for the health
+    /// note, which states a diagnosis rather than a task.
+    priority: Option<&'static str>,
+    text: String,
+    /// Id of the severity section of the findings list this line is
+    /// about, linked at the end of the line.
+    section_id: Option<&'static str>,
+}
+
+/// Prioritized recommendations for the executive summary — port of
+/// `_build_exec_recommendations`.
 ///
-/// Deliberate deviation from Python, which predates the CRITICAL
-/// severity: critical findings get their own P1 line, written first and
-/// naming their top rules, and the HIGH line names HIGH rules only. The
-/// Python line counted the HIGH findings but ranked CRITICAL and HIGH
-/// rules together, and a report with critical findings never said so
-/// (Juice Shop, 2026-11-19: 9 critical findings, ticket #220).
+/// Deliberate deviations from Python, so that a reader sees at once what
+/// to fix first (tester feedback on a 2 947-finding project, 2026-11-19,
+/// follow-up of ticket #220):
+/// - one priority level per severity, never shared: P0 critical, P1 high,
+///   P2/P3 medium. Python predates the CRITICAL severity; the first port
+///   (#220) gave critical findings their own line but still labeled it
+///   P1, like the HIGH line, so two P1 lines competed.
+/// - no line for verified taint flows. Python added a third P1, "verified
+///   exploitation path, absolute priority", with no count and no rule,
+///   whatever the severity of the flows: on the tester's project 166 of
+///   the 167 flows were MEDIUM log injections, yet the line outranked
+///   the HIGH findings. A verified flow already raises its rule's rank in
+///   each line (`compute_top_priority_rules`) and is named there.
+/// - the health score line carries no priority badge: it states a
+///   diagnosis, which the severity lines already turn into tasks; with a
+///   badge it was a second P1 next to the HIGH line.
+/// - each severity line links to its section of the findings list, which
+///   it opens: the tester read "17 critical findings" in the summary and
+///   could not find them below, the critical section being the only one
+///   left folded.
 pub fn build_exec_recommendations(
     findings: &[ReportFinding],
     total_critical: usize,
@@ -144,7 +169,7 @@ pub fn build_exec_recommendations(
     health_score: i64,
     report_locale: &Value,
 ) -> String {
-    let mut recs: Vec<(&'static str, String)> = Vec::new();
+    let mut recs: Vec<Recommendation> = Vec::new();
     let of_severity = |severity: &str| -> Vec<ReportFinding> {
         findings
             .iter()
@@ -152,68 +177,105 @@ pub fn build_exec_recommendations(
             .cloned()
             .collect()
     };
-
-    if total_critical > 0 {
-        let top_rules = compute_top_priority_rules(&of_severity("CRITICAL"), 3);
-        let text = if top_rules.is_empty() {
-            t(report_locale, "exec_rec_critical").replace("{count}", &total_critical.to_string())
+    // Line for a severity: the ranked template naming its top rules, or
+    // the plain one when no rule can be ranked (findings without a key).
+    let severity_line = |severity: &str, count: usize, plain_key: &str, ranked_key: &str| {
+        let top_rules = compute_top_priority_rules(&of_severity(severity), 3);
+        if top_rules.is_empty() {
+            t(report_locale, plain_key).replace("{count}", &count.to_string())
         } else {
-            t(report_locale, "exec_rec_critical_ranked")
-                .replace("{count}", &total_critical.to_string())
+            t(report_locale, ranked_key)
+                .replace("{count}", &count.to_string())
                 .replace(
                     "{rules}",
                     &format_priority_rule_list(&top_rules, report_locale),
                 )
-        };
-        recs.push(("p1", text));
+        }
+    };
+
+    if total_critical > 0 {
+        recs.push(Recommendation {
+            priority: Some("p0"),
+            text: severity_line(
+                "CRITICAL",
+                total_critical,
+                "exec_rec_critical",
+                "exec_rec_critical_ranked",
+            ),
+            section_id: Some("section-CRITICAL"),
+        });
     }
 
     if total_high > 0 {
-        let top_rules = compute_top_priority_rules(&of_severity("HIGH"), 3);
-        if !top_rules.is_empty() {
-            let tpl = t(report_locale, "exec_rec_high_ranked");
-            let text = tpl.replace("{count}", &total_high.to_string()).replace(
-                "{rules}",
-                &format_priority_rule_list(&top_rules, report_locale),
-            );
-            recs.push(("p1", text));
-        } else {
-            let tpl = t(report_locale, "exec_rec_high");
-            recs.push(("p1", tpl.replace("{count}", &total_high.to_string())));
-        }
-    }
-
-    let taint_findings = findings.iter().filter(|f| f.taint_flow.is_some()).count();
-    if taint_findings > 0 {
-        recs.push(("p1", t(report_locale, "exec_rec_taint")));
+        recs.push(Recommendation {
+            priority: Some("p1"),
+            text: severity_line("HIGH", total_high, "exec_rec_high", "exec_rec_high_ranked"),
+            section_id: Some("section-HIGH"),
+        });
     }
 
     if total_medium > 20 {
-        recs.push(("p2", t(report_locale, "exec_rec_medium")));
+        recs.push(Recommendation {
+            priority: Some("p2"),
+            text: t(report_locale, "exec_rec_medium"),
+            section_id: Some("section-MEDIUM"),
+        });
     } else if total_medium > 0 {
-        recs.push(("p3", t(report_locale, "exec_rec_medium_low")));
+        recs.push(Recommendation {
+            priority: Some("p3"),
+            text: t(report_locale, "exec_rec_medium_low"),
+            section_id: Some("section-MEDIUM"),
+        });
     }
 
-    if health_score < 50 {
-        recs.push(("p1", t(report_locale, "exec_rec_health_critical")));
+    let health_key = if health_score < 50 {
+        Some("exec_rec_health_critical")
     } else if health_score < 80 {
-        recs.push(("p2", t(report_locale, "exec_rec_health_warning")));
+        Some("exec_rec_health_warning")
+    } else {
+        None
+    };
+
+    if recs.is_empty() && health_key.is_none() {
+        recs.push(Recommendation {
+            priority: Some("p3"),
+            text: t(report_locale, "exec_rec_good"),
+            section_id: None,
+        });
     }
 
-    if recs.is_empty() {
-        recs.push(("p3", t(report_locale, "exec_rec_good")));
+    // The actions are pushed in priority order (P0, P1, then P2 or P3),
+    // so no sort is needed; the health note closes the list.
+    if let Some(key) = health_key {
+        recs.push(Recommendation {
+            priority: None,
+            text: t(report_locale, key),
+            section_id: None,
+        });
     }
 
-    // Stable sort by priority (P1 before P2 before P3) — `sort_by_key`
-    // is stable in Rust, preserving insertion order for equal
-    // priorities, like `list.sort()` on the Python side.
-    recs.sort_by_key(|(p, _)| *p);
-
+    let see_list = t(report_locale, "exec_rec_see_findings");
     recs.into_iter()
-        .take(4)
-        .map(|(priority, text)| {
-            let digit = &priority[1..];
-            format!(r#"<div class="exec-rec-item"><span class="exec-rec-priority {priority}">P{digit}</span> {text}</div>"#)
+        .map(|rec| {
+            let badge = match rec.priority {
+                Some(priority) => {
+                    let digit = &priority[1..];
+                    format!(r#"<span class="exec-rec-priority {priority}">P{digit}</span> "#)
+                }
+                None => String::new(),
+            };
+            let link = match rec.section_id {
+                Some(id) => format!(
+                    r##" <a class="exec-rec-link" href="#{id}" onclick="scrollToSection('{id}');return false;">{see_list}</a>"##
+                ),
+                None => String::new(),
+            };
+            let class = if rec.priority.is_some() {
+                "exec-rec-item"
+            } else {
+                "exec-rec-item exec-rec-note"
+            };
+            format!(r#"<div class="{class}">{badge}{}{link}</div>"#, rec.text)
         })
         .collect()
 }
@@ -431,7 +493,7 @@ mod tests {
         let critical = html
             .find("Fix the 1 critical findings first, starting with: Secret in CI")
             .expect("critical line");
-        let high = html.find("high-risk vulnerabilities").expect("high line");
+        let high = html.find("high-risk findings").expect("high line");
         assert!(critical < high, "{html}");
         let high_line = &html[high..];
         let high_line = &high_line[..high_line.find("</div>").unwrap()];
@@ -459,6 +521,74 @@ mod tests {
             )),
             "{both}"
         );
+    }
+
+    /// One priority level per severity: P0 critical, P1 high, P2 medium,
+    /// each level used once, in that order (tester feedback, 2026-11-19).
+    #[test]
+    fn test_build_exec_recommendations_one_level_per_severity() {
+        let en = load_report_locale("en");
+        let findings = vec![
+            finding("r1", "SQL Injection", "HIGH", 90),
+            finding("r2", "Secret in CI", "CRITICAL", 90),
+        ];
+        let html = build_exec_recommendations(&findings, 1, 1, 25, 100, &en);
+        let badges: Vec<&str> = html
+            .match_indices("exec-rec-priority ")
+            .map(|(i, _)| &html[i + 18..i + 20])
+            .collect();
+        assert_eq!(badges, ["p0", "p1", "p2"], "{html}");
+    }
+
+    /// A verified taint flow no longer adds a priority line of its own:
+    /// the flows of the tester's project were mostly MEDIUM, yet the line
+    /// claimed "absolute priority" next to the HIGH line.
+    #[test]
+    fn test_build_exec_recommendations_no_taint_line() {
+        let en = load_report_locale("en");
+        let mut medium = finding("r1", "Log Injection", "MEDIUM", 90);
+        medium.taint_flow = Some(
+            serde_json::from_value(serde_json::json!({
+                "source_file": "a.py", "source_line": 1, "source_expr": "request.args",
+                "chain": [], "sink_file": "a.py", "sink_line": 2, "sink_expr": "log.info(x)"
+            }))
+            .expect("taint flow"),
+        );
+        let html = build_exec_recommendations(&[medium], 0, 0, 1, 100, &en);
+        assert!(!html.contains("absolute priority"), "{html}");
+        assert_eq!(html.matches("exec-rec-item").count(), 1, "{html}");
+    }
+
+    /// Each severity line links to its section of the findings list, and
+    /// the link opens it through `scrollToSection`.
+    #[test]
+    fn test_build_exec_recommendations_links_to_severity_sections() {
+        let en = load_report_locale("en");
+        let findings = vec![
+            finding("r1", "SQL Injection", "HIGH", 90),
+            finding("r2", "Secret in CI", "CRITICAL", 90),
+        ];
+        let html = build_exec_recommendations(&findings, 1, 1, 0, 100, &en);
+        for id in ["section-CRITICAL", "section-HIGH"] {
+            assert!(
+                html.contains(&format!(
+                    r##"href="#{id}" onclick="scrollToSection('{id}');return false;""##
+                )),
+                "{id}: {html}"
+            );
+        }
+    }
+
+    /// The health score line is a note without a priority badge, written
+    /// after the actions.
+    #[test]
+    fn test_build_exec_recommendations_health_note_has_no_badge() {
+        let en = load_report_locale("en");
+        let findings = vec![finding("r1", "SQL Injection", "HIGH", 90)];
+        let html = build_exec_recommendations(&findings, 0, 1, 0, 30, &en);
+        let note = html.find("exec-rec-note").expect("health note");
+        assert!(html.find("exec-rec-priority p1").unwrap() < note, "{html}");
+        assert_eq!(html.matches("exec-rec-priority").count(), 1, "{html}");
     }
 
     #[test]

@@ -18,7 +18,10 @@ pub struct FileContainsCondition {
     /// NONE may match.
     pub not_has: Vec<Regex>,
     pub min_lines: i64,
+    /// ANY must be contained in the project-relative path.
     pub path_contains: Vec<String>,
+    /// NONE may be contained in the project-relative path (ticket #229).
+    pub not_path_contains: Vec<String>,
     /// "Governance" file names whose presence (walking up the
     /// directory tree from the scanned file's folder, up to 5
     /// levels) suppresses the finding.
@@ -94,6 +97,20 @@ pub fn matches(
         let relative_lower = loc.relative.to_lowercase().replace('\\', "/");
         if !fc
             .path_contains
+            .iter()
+            .any(|seg| relative_lower.contains(&seg.to_lowercase()))
+        {
+            return false;
+        }
+    }
+
+    // The reverse of `path_contains`, on the same lower-cased path.
+    if !fc.not_path_contains.is_empty()
+        && let Some(loc) = location
+    {
+        let relative_lower = loc.relative.to_lowercase().replace('\\', "/");
+        if fc
+            .not_path_contains
             .iter()
             .any(|seg| relative_lower.contains(&seg.to_lowercase()))
         {
@@ -213,8 +230,24 @@ mod tests {
             not_has: vec![],
             min_lines: 0,
             path_contains: vec![],
+            not_path_contains: vec![],
             not_path_has_file: vec![],
         }
+    }
+
+    /// `not_path_contains` rejects a file whose project-relative path
+    /// holds one of its segments, case aside (ticket #229).
+    #[test]
+    fn test_not_path_contains_rejects_a_listed_segment() {
+        let mut fc = empty_condition();
+        fc.not_path_contains = vec![".github/workflows/".to_string(), "-local.".to_string()];
+        let at = |relative: &'static str| FileLocation {
+            absolute: Path::new("/p/x"),
+            relative,
+        };
+        assert!(!matches(&fc, "", Some(at(".GitHub/Workflows/ci.yml")), 1));
+        assert!(!matches(&fc, "", Some(at("config/app-local.yml")), 1));
+        assert!(matches(&fc, "", Some(at("config/application.yml")), 1));
     }
 
     #[test]

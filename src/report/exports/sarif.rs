@@ -395,7 +395,10 @@ pub fn build_sarif_report(
         }
         rules_list.push(SarifRule {
             id: rule_id.to_string(),
-            name: f.rule_name.clone(),
+            // SARIF `name` is an identifier; the readable name goes in
+            // `shortDescription` (ticket #227: `rule_name` is now the
+            // translated name).
+            name: f.rule_key.clone(),
             short_description: SarifText {
                 text: f.rule_name.clone(),
             },
