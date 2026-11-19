@@ -6,6 +6,9 @@
 use fancy_regex::Regex;
 use serde_json::Value;
 
+use crate::report::exports::sarif::ReportFinding;
+use crate::scan::engine::FileScope;
+
 /// The display name of a compiled rule in `lang`: its `name` block (the
 /// rule file is the only source of its texts), in English when `lang` is
 /// missing, or the rule's identifier when it has no name at all (a client
@@ -363,6 +366,31 @@ pub fn linkify_acronyms_in_html(report_locale: &Value, html: &str) -> String {
     }
 
     segments.concat()
+}
+
+/// Where a finding is, as the report writes it (not escaped): `file:line`
+/// for a finding on a line, `file (whole file)` in the report's language
+/// for a finding about the whole file, which has no faulty line to point
+/// at (ticket #214).
+pub fn finding_location(f: &ReportFinding, report_locale: &Value) -> String {
+    if f.file_scope.is_some() {
+        crate::i18n::t(report_locale, "finding_whole_file").replace("{file}", &f.file)
+    } else {
+        format!("{}:{}", f.file, f.line)
+    }
+}
+
+/// The sentence that says what a whole-file finding measured, in the
+/// report's language (not escaped): the file's line count against the
+/// rule's threshold for a length rule, otherwise that the rule is about
+/// the whole file (ticket #214).
+pub fn file_scope_sentence(scope: &FileScope, report_locale: &Value) -> String {
+    match scope.min_lines {
+        Some(min) => crate::i18n::t(report_locale, "finding_file_lines")
+            .replace("{count}", &scope.line_count.to_string())
+            .replace("{min}", &min.to_string()),
+        None => crate::i18n::t(report_locale, "finding_file_scope"),
+    }
 }
 
 #[cfg(test)]

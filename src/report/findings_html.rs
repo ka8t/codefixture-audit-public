@@ -279,7 +279,18 @@ fn render_taint_trace(f: &ReportFinding, report_locale: &Value) -> String {
 /// automatic fix. A traced (taint) finding has its own "To fix" block
 /// instead, and a finding without code has nothing to rewrite.
 fn render_fix_proposal(f: &ReportFinding, report_locale: &Value) -> String {
-    if f.taint_flow.is_some() || f.code.trim().is_empty() {
+    if f.taint_flow.is_some() {
+        return String::new();
+    }
+    // A whole-file finding has no line a fix could rewrite: its `code` is
+    // only the file's first line (ticket #214).
+    if f.file_scope.is_some() {
+        return format!(
+            r#"<p class="fix-proposal-none">{}</p>"#,
+            escape(&t(report_locale, "fix_none_file"))
+        );
+    }
+    if f.code.trim().is_empty() {
         return String::new();
     }
     match crate::report::fix_proposal::propose_fix(&f.rule_key, &f.code) {
@@ -386,25 +397,6 @@ fn render_finding_item(
         &category_title(report_locale, &f.category),
     );
     item = item.replace("{{file}}", &escape(&f.file));
-    item = item.replace("{{line}}", &f.line.to_string());
-    item = item.replace(
-        "{{context_before_html}}",
-        &render_context_lines(&f.context_before),
-    );
-    item = item.replace("{{code}}", &escape(&f.code));
-    item = item.replace(
-        "{{context_after_html}}",
-        &render_context_lines(&f.context_after),
-    );
-    let location = format!("{}:{}", f.file, f.line);
-    item = item.replace(
-        "{{code_label}}",
-        &escape(&t(report_locale, "finding_your_code").replace("{location}", &location)),
-    );
-    item = item.replace(
-        "{{highlight_title}}",
-        &escape(&t(report_locale, "finding_detected_line").replace("{line}", &f.line.to_string())),
-    );
     item = item.replace("{{fix_html}}", &render_fix_proposal(f, report_locale));
 
     let committer_display = match &f.committer {
@@ -457,8 +449,41 @@ fn render_finding_item(
     }
     item = item.replace("{{taint_badges}}", &badges_html);
     item = item.replace("{{taint_trace}}", &render_taint_trace(f, report_locale));
+    // Last: the location and the code block hold the client's file name
+    // and code, which must not be read as placeholders by a later replace.
+    item = item.replace(
+        "{{location}}",
+        &escape(&crate::report::text::finding_location(f, report_locale)),
+    );
+    item = item.replace("{{code_block}}", &render_code_block(f, report_locale));
 
     item
+}
+
+/// The block under a finding's header that shows where it is: the
+/// detected line with its context for a finding on a line, or, for a
+/// finding about the whole file, the sentence saying what was measured
+/// instead of the first line of the file, which is not at fault
+/// (ticket #214).
+fn render_code_block(f: &ReportFinding, report_locale: &Value) -> String {
+    let location = crate::report::text::finding_location(f, report_locale);
+    let label = escape(&t(report_locale, "finding_your_code").replace("{location}", &location));
+    if let Some(scope) = &f.file_scope {
+        return format!(
+            r#"<div class="finding-code-block finding-file-scope"><div class="finding-code-label">{label}</div><p class="finding-file-scope-text">📄 {}</p></div>"#,
+            escape(&crate::report::text::file_scope_sentence(
+                scope,
+                report_locale
+            ))
+        );
+    }
+    format!(
+        r#"<div class="finding-code-block"><div class="finding-code-label">{label}</div>{}<div class="finding-code-highlight" title="{}">{}</div>{}</div>"#,
+        render_context_lines(&f.context_before),
+        escape(&t(report_locale, "finding_detected_line").replace("{line}", &f.line.to_string())),
+        escape(&f.code),
+        render_context_lines(&f.context_after),
+    )
 }
 
 /// Groups a list of findings by rule (first-encounter order), with the
@@ -520,6 +545,16 @@ fn render_findings(
         } else {
             first.solution.as_deref()
         };
+        // Every CWE of the group, each once, in order of first sight: a
+        // catalog rule gives all its findings the same, but the dependency
+        // findings of one group each carry their advisories' own, and the
+        // first finding's alone hid the others' (found 2026-11-19, #217).
+        let mut group_cwe: Vec<String> = Vec::new();
+        for id in rule_findings.iter().flat_map(|f| f.cwe.iter()) {
+            if !group_cwe.contains(id) {
+                group_cwe.push(id.clone());
+            }
+        }
         if !rk.is_empty() {
             shared_html.push_str(&render_file_check_explanation(
                 rule_catalog,
@@ -531,6 +566,9 @@ fn render_findings(
                 report_locale,
                 playbook_solution,
                 &first.benefit,
+                crate::report::playbook::FindingTarget::of(rule_findings),
+                &group_cwe,
+                rule_catalog.contains_key(&rule_id),
             ));
             shared_html.push_str(&generate_fix_suggestion(
                 rule_catalog,
@@ -706,6 +744,7 @@ mod tests {
             benefit: String::new(),
             committer: None,
             rule_source: "json_builtin".to_string(),
+            file_scope: None,
         }
     }
 
@@ -755,6 +794,67 @@ mod tests {
         let html = render_finding_item(&f, "HIGH", &fr, OwnTexts::default());
         assert!(html.contains("Pas de correction automatique"), "{html}");
         assert!(!html.contains("Correction proposée"), "{html}");
+    }
+
+    /// A whole-file finding as `execute_file_contains_rule` builds it:
+    /// line 1, the file's first line as `code`, no context.
+    fn whole_file_finding(min_lines: Option<usize>) -> ReportFinding {
+        let mut f = finding("ARCH", "file_too_long", "file_too_long", "app/ingest_v2.py");
+        f.severity = "LOW".to_string();
+        f.line = 1;
+        f.code = r#"""""#.to_string();
+        f.context_before = String::new();
+        f.context_after = String::new();
+        f.file_scope = Some(crate::scan::engine::FileScope {
+            line_count: 1363,
+            min_lines,
+        });
+        f
+    }
+
+    /// Ticket #214: the card of a whole-file finding names the file, says
+    /// what was measured, and shows neither line 1 nor the first line of
+    /// the file as the detected code.
+    #[test]
+    fn test_render_finding_item_whole_file_states_the_measure_not_line_1() {
+        let fr = load_report_locale("fr");
+        let html = render_finding_item(
+            &whole_file_finding(Some(500)),
+            "LOW",
+            &fr,
+            OwnTexts::default(),
+        );
+        assert!(html.contains("app/ingest_v2.py (fichier entier)"), "{html}");
+        assert!(!html.contains("app/ingest_v2.py:1"), "{html}");
+        assert!(
+            html.contains(
+                "Ce fichier fait 1363 lignes ; la règle s&#39;applique à partir de 500 lignes."
+            ),
+            "{html}"
+        );
+        assert!(!html.contains("Ligne détectée"), "{html}");
+        assert!(!html.contains("finding-code-highlight"), "{html}");
+        assert!(html.contains("Aucune ligne à corriger"), "{html}");
+        assert!(!html.contains("Pas de correction automatique"), "{html}");
+        // The suppression identity is unchanged: still the hash of `code`.
+        assert!(
+            html.contains(&format!(r#"data-code-hash="{}""#, line_hash(r#"""""#))),
+            "{html}"
+        );
+    }
+
+    /// Ticket #214: a whole-file rule without a length threshold (a
+    /// governance rule) says the rule is about the whole file.
+    #[test]
+    fn test_render_finding_item_whole_file_without_threshold() {
+        let en = load_report_locale("en");
+        let html = render_finding_item(&whole_file_finding(None), "LOW", &en, OwnTexts::default());
+        assert!(html.contains("app/ingest_v2.py (whole file)"), "{html}");
+        assert!(
+            html.contains("This rule is about the whole file, not one of its lines."),
+            "{html}"
+        );
+        assert!(!html.contains("Detected line"), "{html}");
     }
 
     #[test]
@@ -983,6 +1083,45 @@ mod tests {
         let html = render_findings(&[&one, &two], "HIGH", &fr, &RuleCatalog::new());
         assert_eq!(html.matches("Risque de test").count(), 1, "{html}");
         assert_eq!(html.matches("Solution de test").count(), 1, "{html}");
+    }
+
+    /// Ticket #217: a catalog rule without a playbook entry shows its CWE
+    /// in the playbook derived from it; a key no catalog rule has shows no
+    /// playbook.
+    #[test]
+    fn test_catalog_rule_without_playbook_entry_shows_its_cwe() {
+        let en = load_report_locale("en");
+        let mut f = finding("MAINTENANCE", "rule_without_entry_xyz", "R", "a.py");
+        f.cwe = vec!["CWE-396".to_string()];
+        let mut catalog = RuleCatalog::new();
+        catalog.insert(
+            f.rule_id(),
+            serde_json::json!({"id": "rule_without_entry_xyz"}),
+        );
+        let html = render_findings(&[&f], "LOW", &en, &catalog);
+        assert!(html.contains("playbook-details"), "{html}");
+        assert!(html.contains("definitions/396.html"), "{html}");
+        let html = render_findings(&[&f], "LOW", &en, &RuleCatalog::new());
+        assert!(!html.contains("playbook-details"), "{html}");
+    }
+
+    /// The group's playbook lists the CWE of every finding, each once: the
+    /// dependency findings of one group carry different ones.
+    #[test]
+    fn test_group_playbook_lists_every_finding_cwe_once() {
+        let en = load_report_locale("en");
+        let dependency = |file: &str, cwe: &[&str]| {
+            let mut f = finding("DEPENDENCIES", "vulnerable_dependency", "Dependency", file);
+            f.cwe = cwe.iter().map(|c| c.to_string()).collect();
+            f
+        };
+        let a = dependency("pom.xml", &["CWE-502", "CWE-20"]);
+        let b = dependency("composer.json", &["CWE-79", "CWE-502"]);
+        let html = render_findings(&[&a, &b], "HIGH", &en, &RuleCatalog::new());
+        for n in ["502", "20", "79"] {
+            let link = format!("definitions/{n}.html");
+            assert_eq!(html.matches(&link).count(), 1, "CWE-{n} once: {html}");
+        }
     }
 
     #[test]

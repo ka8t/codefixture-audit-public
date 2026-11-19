@@ -850,6 +850,7 @@ fn vulnerable_dependency_findings(
                 benefit: String::new(),
                 committer: None,
                 rule_source: "advisory_db".to_string(),
+                file_scope: None,
             }
         })
         .collect()
@@ -1066,8 +1067,14 @@ fn engine_finding_to_report(
     lang: &str,
 ) -> ReportFinding {
     use crate::report::text::{clip_line, clip_lines};
-    let (context_before, context_after) =
-        crate::report::text::context_lines(source_lines, f.line, 2);
+    // A whole-file finding has no line around which context means
+    // anything: the lines after line 1 would read as the faulty code
+    // (ticket #214).
+    let (context_before, context_after) = if f.file_scope.is_some() {
+        (String::new(), String::new())
+    } else {
+        crate::report::text::context_lines(source_lines, f.line, 2)
+    };
     ReportFinding {
         rule_key: f.rule_id.clone(),
         rule_language: rule_language(rule_json),
@@ -1096,6 +1103,7 @@ fn engine_finding_to_report(
         benefit: extract_i18n_block(rule_json, "benefit", lang),
         committer: None,
         rule_source: rule_source_of(rule_json).to_string(),
+        file_scope: f.file_scope,
     }
 }
 
@@ -1226,6 +1234,7 @@ fn taint_finding_to_report(
         benefit: extract_i18n_block(rule_json, "benefit", lang),
         committer: None,
         rule_source: rule_source_of(rule_json).to_string(),
+        file_scope: None,
     }
 }
 
@@ -2056,6 +2065,7 @@ pub fn run_scan(config: &ScanConfig) -> ScanReport {
                     benefit: String::new(),
                     committer: None,
                     rule_source: "json_builtin".to_string(),
+                    file_scope: None,
                 }
             })
             .collect();
@@ -2543,6 +2553,7 @@ mod tests {
             benefit: String::new(),
             committer: None,
             rule_source: "json_builtin".to_string(),
+            file_scope: None,
         }
     }
 

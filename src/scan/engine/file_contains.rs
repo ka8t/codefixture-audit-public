@@ -6,7 +6,7 @@
 //! `execute_file_contains_rule()` (produces a file-level
 //! finding, line 1, if the conditions are met).
 
-use super::Finding;
+use super::{FileScope, Finding};
 use fancy_regex::Regex;
 use std::path::Path;
 
@@ -189,6 +189,17 @@ pub fn execute_file_contains_rule(
         // A file-level condition points at no spot in the line.
         column: 0,
         confidence: rule.confidence,
+        // Deliberate deviation from `file_check.py::execute`, which only
+        // stores line 1: the report then showed the first line as the
+        // detected code and `file:1` as the place to fix, and readers took
+        // the docstring for the fault (ticket #214). The scope says the
+        // finding is about the whole file, with what was measured.
+        file_scope: Some(FileScope {
+            line_count: all_lines.len(),
+            min_lines: usize::try_from(rule.file_contains.min_lines)
+                .ok()
+                .filter(|&n| n > 0),
+        }),
     })
 }
 
@@ -341,6 +352,42 @@ mod tests {
         .expect("finding attendu");
         assert_eq!(finding.line, 1);
         assert_eq!(finding.code, "const app = express();");
+        // Ticket #214: a rule without a length threshold still marks the
+        // finding as about the whole file.
+        assert_eq!(
+            finding.file_scope,
+            Some(FileScope {
+                line_count: 2,
+                min_lines: None
+            })
+        );
+    }
+
+    /// Ticket #214: a length rule (`file_too_long`) records the file's
+    /// line count and its own threshold, so the report can state both.
+    #[test]
+    fn test_execute_records_line_count_and_threshold_of_a_length_rule() {
+        let rule = CompiledFileContainsRule {
+            id: "file_too_long".to_string(),
+            category: "arch".to_string(),
+            severity: "LOW".to_string(),
+            confidence: 80,
+            file_contains: {
+                let mut fc = empty_condition();
+                fc.min_lines = 3;
+                fc
+            },
+        };
+        let all_lines: Vec<(usize, String)> = (1..=4).map(|n| (n, format!("x = {n}"))).collect();
+        let finding = execute_file_contains_rule(&rule, at("long.py").unwrap(), "x", &all_lines)
+            .expect("a 4-line file reaches a 3-line threshold");
+        assert_eq!(
+            finding.file_scope,
+            Some(FileScope {
+                line_count: 4,
+                min_lines: Some(3)
+            })
+        );
     }
 
     #[test]

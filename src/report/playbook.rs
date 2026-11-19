@@ -12,6 +12,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::i18n::t;
+use crate::report::exports::sarif::ReportFinding;
 use crate::report::text::escape;
 
 const PLAYBOOK_JSON: &str = include_str!("../../resources/remediation-playbook.json");
@@ -28,13 +29,26 @@ struct PlaybookStep {
     step_type: String,
 }
 
+/// The references of a playbook entry, every one shown in the report.
+///
+/// No CWE: a rule's CWE is read from the rule itself (ticket #215, see
+/// `render_playbook_inline`). No CVE: no entry ever held one (a
+/// dependency's CVE comes from the advisory database and is written in
+/// its finding's own texts), so the Python report's CVE links never
+/// rendered and were removed (2026-11-19).
+///
+/// `deny_unknown_fields`: a reference key the report does not show makes
+/// the embedded playbook fail to load, naming the key, instead of being
+/// dropped without a word. `iso25010` was dropped that way, from ten
+/// accessibility entries, until 2026-11-19.
 #[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 struct PlaybookRefs {
-    cwe: Option<Value>,
-    cwe_url: Option<String>,
-    cve: Option<Value>,
     owasp: Option<String>,
     iso27001: Option<Vec<String>>,
+    /// ISO/IEC 25010 quality characteristic, as `Characteristic.Sub`
+    /// (`Usability.Accessibility`).
+    iso25010: Option<String>,
     wcag: Option<Value>,
 }
 
@@ -71,6 +85,72 @@ fn as_string_list(v: &Value) -> Vec<String> {
     }
 }
 
+/// One CWE reference of the playbook block: a link to its MITRE page for
+/// a well-formed id (`CWE-` and a number), the escaped text otherwise. A
+/// client rule writes its own `metadata cwe`, so the value is not trusted
+/// to be either.
+fn cwe_reference(id: &str) -> String {
+    let number = id
+        .strip_prefix("CWE-")
+        .filter(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+    match number {
+        Some(n) => format!(
+            r#"<a href="https://cwe.mitre.org/data/definitions/{n}.html" target="_blank" class="playbook-ref">{}</a> "#,
+            escape(id)
+        ),
+        None => format!(r#"<span class="playbook-ref">{}</span> "#, escape(id)),
+    }
+}
+
+/// The W3C "Understanding WCAG 2.1" page of each success criterion the
+/// playbook cites, checked on w3.org on 2026-11-19. The pages are named
+/// after the criterion's title, not its number, so the link cannot be
+/// built from the number (ticket #217).
+const WCAG_PAGES: [(&str, &str); 9] = [
+    ("1.2.2", "captions-prerecorded"),
+    ("1.3.1", "info-and-relationships"),
+    ("1.3.5", "identify-input-purpose"),
+    ("1.3.6", "identify-purpose"),
+    ("1.4.4", "resize-text"),
+    ("2.4.1", "bypass-blocks"),
+    ("3.1.1", "language-of-page"),
+    ("3.1.2", "language-of-parts"),
+    ("4.1.2", "name-role-value"),
+];
+
+/// The criterion numbers of a playbook `wcag` value. The file writes a
+/// string or a list, each item one or several criteria separated by
+/// commas, each with or without a `WCAG ` prefix (`"WCAG 1.3.1, WCAG
+/// 4.1.2"`).
+///
+/// Deliberate deviation from the Python report, which used each item
+/// whole: it showed "WCAG WCAG 1.3.1, WCAG 4.1.2" with a link to a page
+/// that does not exist (ticket #217).
+fn wcag_criteria(value: &Value) -> Vec<String> {
+    as_string_list(value)
+        .iter()
+        .flat_map(|item| item.split(','))
+        .map(|c| c.trim().trim_start_matches("WCAG").trim().to_string())
+        .filter(|c| !c.is_empty())
+        .collect()
+}
+
+/// One WCAG reference: a link to its W3C page when [`WCAG_PAGES`] knows
+/// the criterion, the plain number otherwise (a test keeps every
+/// criterion of the playbook in the table).
+fn wcag_reference(number: &str) -> String {
+    match WCAG_PAGES.iter().find(|(n, _)| *n == number) {
+        Some((_, page)) => format!(
+            r#"<a href="https://www.w3.org/WAI/WCAG21/Understanding/{page}" target="_blank" class="playbook-ref">WCAG {}</a> "#,
+            escape(number)
+        ),
+        None => format!(
+            r#"<span class="playbook-ref">WCAG {}</span> "#,
+            escape(number)
+        ),
+    }
+}
+
 fn step_icon(step_type: &str) -> &'static str {
     match step_type {
         "diagnostic" => "🔍",
@@ -80,9 +160,75 @@ fn step_icon(step_type: &str) -> &'static str {
     }
 }
 
-/// Generates the inline playbook HTML block for a `rule_key`, or an
-/// empty string if the rule has no playbook entry (or no step and no
-/// reference) — port of `_render_playbook_inline`.
+/// What the findings of a rule point at: it decides the text of the
+/// playbook's generic first step (ticket #216).
+///
+/// Deliberate deviation from the Python report, which shows "Locate the
+/// vulnerable code pattern in the file" for every rule: a whole-file rule
+/// (`file_too_long`, `workflow_not_in_codeowners`, `unreviewed_vendor_code`)
+/// has no code pattern to locate, and the step sent readers looking for
+/// one above cards that say "whole file" (#214).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FindingTarget {
+    /// Findings on lines of the file: the generic step stands.
+    Lines,
+    /// Findings about the whole file, for its place or content.
+    WholeFile,
+    /// Findings about the whole file, for its length (`min_lines`).
+    FileLength,
+}
+
+impl FindingTarget {
+    /// The target of a rule's findings. A rule produces either line
+    /// findings or whole-file findings, never both, so the first one
+    /// decides; the group is read as lines unless every finding is about
+    /// the whole file, so a mixed group would keep the generic step.
+    pub fn of(findings: &[&ReportFinding]) -> Self {
+        if findings.is_empty() || findings.iter().any(|f| f.file_scope.is_none()) {
+            return Self::Lines;
+        }
+        if findings
+            .iter()
+            .all(|f| f.file_scope.is_some_and(|s| s.min_lines.is_some()))
+        {
+            Self::FileLength
+        } else {
+            Self::WholeFile
+        }
+    }
+}
+
+/// The playbook of a rule that has no entry: the three steps every entry
+/// starts from (`create-rule` writes them for a new rule), no reference of
+/// its own and no benefit, so the rule's solution, benefit and CWE fill it
+/// in `render_playbook_inline` (ticket #217).
+fn derived_entry() -> PlaybookEntry {
+    let step = |action: &str, step_type: &str| PlaybookStep {
+        action: action.to_string(),
+        action_i18n: BTreeMap::new(),
+        step_type: step_type.to_string(),
+    };
+    PlaybookEntry {
+        steps: vec![
+            step(LOCATE, "diagnostic"),
+            // Replaced by the rule's solution (`step_text`); this English
+            // text only shows when the rule has none.
+            step(APPLY, "code_change"),
+            step(RERUN, "verification"),
+        ],
+        references: PlaybookRefs::default(),
+        benefit: String::new(),
+    }
+}
+
+/// The generic first step of a playbook entry, as the file writes it.
+const LOCATE: &str = "Locate the vulnerable code pattern in the file";
+/// The fix step of a derived entry, shown only for a rule with no
+/// solution (a client rule may have none).
+const APPLY: &str = "Apply the solution above.";
+/// The generic last step of a playbook entry, as the file writes it.
+const RERUN: &str = "Run the audit again to verify the finding is resolved";
+
 /// The text of a playbook step in the report's language.
 ///
 /// The fix step is the rule's own `solution` in the report's language,
@@ -96,18 +242,30 @@ fn step_icon(step_type: &str) -> &'static str {
 /// `action_i18n`. English text stays only as a last resort. Fixed after a
 /// French report showed an English playbook (2026-11-14); the Python
 /// report has the same English-only playbook.
+///
+/// The generic "Locate…" step depends on `target`: for whole-file
+/// findings it says what to look at in the file instead, in every
+/// language, English included (ticket #216).
 fn step_text(
     step: &PlaybookStep,
     lang: &str,
     report_locale: &Value,
     solution: Option<&str>,
+    target: FindingTarget,
 ) -> String {
-    const LOCATE: &str = "Locate the vulnerable code pattern in the file";
-    const RERUN: &str = "Run the audit again to verify the finding is resolved";
     if step.step_type == "code_change"
         && let Some(own) = solution.filter(|s| !s.is_empty())
     {
         return own.to_string();
+    }
+    if step.step_type == "diagnostic" && step.action == LOCATE {
+        match target {
+            FindingTarget::Lines => {}
+            FindingTarget::WholeFile => return t(report_locale, "playbook_step_locate_file"),
+            FindingTarget::FileLength => {
+                return t(report_locale, "playbook_step_locate_long_file");
+            }
+        }
     }
     if lang == "en" {
         return step.action.clone();
@@ -115,6 +273,7 @@ fn step_text(
     match step.step_type.as_str() {
         "diagnostic" if step.action == LOCATE => t(report_locale, "playbook_step_locate"),
         "verification" if step.action == RERUN => t(report_locale, "playbook_step_rerun"),
+        "code_change" if step.action == APPLY => t(report_locale, "playbook_step_apply_solution"),
         "code_change" => step.action.clone(),
         _ => step
             .action_i18n
@@ -127,19 +286,51 @@ fn step_text(
 /// Renders the playbook of `rule_key` in the report's language.
 /// `solution` and `benefit` are the rule's own texts, already in that
 /// language (`ReportFinding`): they replace the English copies the
-/// playbook file holds.
+/// playbook file holds. `target` is what the rule's findings point at
+/// ([`FindingTarget::of`]). `cwe` is the CWE of the rule
+/// (`ReportFinding::cwe`, its `metadata cwe`) — port of
+/// `_render_playbook_inline`.
+///
+/// A rule without a playbook entry gets the playbook every entry is
+/// derived from (`create-rule` writes the same one): locate, the rule's
+/// solution, run the audit again, with the rule's benefit and CWE.
+/// Deliberate deviation from the Python report, which shows nothing for
+/// such a rule: 62 catalog rules with a CWE had no entry, so the HTML
+/// report showed their CWE nowhere (ticket #217). Only for a rule of the
+/// scan's catalog, builtin or client (`in_catalog`): another key without
+/// an entry, which no rule describes, shows nothing.
+///
+/// Every ISO 27001 control and WCAG criterion of the entry is shown: the
+/// Python report kept the first three, and five entries list four ISO
+/// controls, the fourth dropped without a word (ticket #217).
+///
+/// Deliberate deviation from the Python report, which shows the CWE of
+/// the playbook entry: the playbook held its own copy, which differed from
+/// the rule's for 34 rules and was missing for 40 others (measured
+/// 2026-11-19), and one entry serves the rules of the same id in every
+/// language. The rule file is the only source of a rule's CWE, as it is of
+/// its texts (ticket #215).
 pub fn render_playbook_inline(
     rule_key: &str,
     report_locale: &Value,
     solution: Option<&str>,
     benefit: &str,
+    target: FindingTarget,
+    cwe: &[String],
+    in_catalog: bool,
 ) -> String {
     let lang = t(report_locale, "locale_code");
     let playbook = load_playbook();
-    let Some(entry) = playbook.rules.get(rule_key) else {
-        return String::new();
+    let derived;
+    let entry = match playbook.rules.get(rule_key) {
+        Some(entry) => entry,
+        None if in_catalog => {
+            derived = derived_entry();
+            &derived
+        }
+        None => return String::new(),
     };
-    if entry.steps.is_empty() && entry.references.cwe.is_none() && entry.references.cve.is_none() {
+    if entry.steps.is_empty() && cwe.is_empty() {
         return String::new();
     }
 
@@ -152,43 +343,38 @@ pub fn render_playbook_inline(
             format!(
                 "<li>{} {}</li>",
                 step_icon(&s.step_type),
-                escape(&step_text(s, &lang, report_locale, solution))
+                escape(&step_text(s, &lang, report_locale, solution, target))
             )
         })
         .collect();
 
     let mut refs_html = String::new();
-    if let Some(cwe) = &entry.references.cwe {
-        let cwe_text = as_string_list(cwe).join(", ");
-        let url = entry.references.cwe_url.clone().unwrap_or_default();
-        refs_html.push_str(&format!(
-            r#"<a href="{url}" target="_blank" class="playbook-ref">{cwe_text}</a> "#
-        ));
-    }
-    if let Some(cve) = &entry.references.cve {
-        for c in as_string_list(cve) {
-            let nvd_url = format!("https://nvd.nist.gov/vuln/detail/{c}");
-            refs_html.push_str(&format!(
-                r#"<a href="{nvd_url}" target="_blank" class="playbook-ref">{c}</a> "#
-            ));
-        }
+    for id in cwe {
+        refs_html.push_str(&cwe_reference(id));
     }
     if let Some(owasp) = &entry.references.owasp {
-        refs_html.push_str(&format!(r#"<span class="playbook-ref">{owasp}</span> "#));
+        refs_html.push_str(&format!(
+            r#"<span class="playbook-ref">{}</span> "#,
+            escape(owasp)
+        ));
     }
     if let Some(iso) = &entry.references.iso27001 {
-        let iso_list = iso.iter().take(3).cloned().collect::<Vec<_>>().join(", ");
         refs_html.push_str(&format!(
-            r#"<span class="playbook-ref">ISO {iso_list}</span>"#
+            r#"<span class="playbook-ref">ISO {}</span> "#,
+            escape(&iso.join(", "))
+        ));
+    }
+    if let Some(quality) = &entry.references.iso25010 {
+        // `Usability.Accessibility` reads as the characteristic and its
+        // sub-characteristic.
+        refs_html.push_str(&format!(
+            r#"<span class="playbook-ref">ISO 25010 {}</span> "#,
+            escape(&quality.replace('.', " › "))
         ));
     }
     if let Some(wcag) = &entry.references.wcag {
-        for w in as_string_list(wcag).into_iter().take(3) {
-            let slug = w.replace('.', "-");
-            let url = format!("https://www.w3.org/WAI/WCAG21/Understanding/{slug}");
-            refs_html.push_str(&format!(
-                r#"<a href="{url}" target="_blank" class="playbook-ref">WCAG {w}</a> "#
-            ));
+        for number in wcag_criteria(wcag) {
+            refs_html.push_str(&wcag_reference(&number));
         }
     }
 
@@ -239,6 +425,9 @@ mod tests {
             &fr,
             Some("Ajoutez scope=\"col\" ou scope=\"row\"."),
             "Rend les tableaux lisibles au lecteur d'écran.",
+            FindingTarget::Lines,
+            &[],
+            false,
         );
         assert!(
             html.contains("Repérez tous les éléments &lt;th&gt;"),
@@ -256,7 +445,15 @@ mod tests {
         for english in ["Find all", "Test with a screen reader", "Run the audit"] {
             assert!(!html.contains(english), "{english}: {html}");
         }
-        let generic = render_playbook_inline("xss_unsafe_html_construction", &fr, None, "");
+        let generic = render_playbook_inline(
+            "xss_unsafe_html_construction",
+            &fr,
+            None,
+            "",
+            FindingTarget::Lines,
+            &[],
+            false,
+        );
         assert!(generic.contains("Repérez le code vulnérable"), "{generic}");
         assert!(generic.contains("Relancez l"), "{generic}");
     }
@@ -272,6 +469,9 @@ mod tests {
             &en,
             Some("Pass httpOnly: true and secure: true to res.cookie()."),
             "Scripts can no longer read the cookie.",
+            FindingTarget::Lines,
+            &[],
+            false,
         );
         assert!(html.contains("Pass httpOnly: true"), "{html}");
         assert!(
@@ -285,28 +485,330 @@ mod tests {
         );
     }
 
+    /// A whole-file finding of `file_too_long` (`min_lines` 500) or of a
+    /// governance rule (no threshold).
+    fn whole_file(min_lines: Option<usize>) -> ReportFinding {
+        serde_json::from_value(serde_json::json!({
+            "rule_key": "file_too_long", "rule_name": "file_too_long",
+            "category": "ARCH", "severity": "LOW", "risk": "", "file": "a.py",
+            "line": 1, "solution": null, "cwe": [], "owasp": null,
+            "taint_flow": null, "code": "import os", "context_before": "",
+            "context_after": "", "confidence": 80, "benefit": "",
+            "committer": null, "rule_source": "json_builtin",
+            "file_scope": {"line_count": 812, "min_lines": min_lines},
+        }))
+        .expect("valid ReportFinding")
+    }
+
+    /// Ticket #216: the target of a group is whole-file only when every
+    /// finding is, and a length rule only when every finding has a
+    /// threshold.
+    #[test]
+    fn test_finding_target_of_groups() {
+        let long = whole_file(Some(500));
+        let governance = whole_file(None);
+        let mut line = whole_file(None);
+        line.file_scope = None;
+        assert_eq!(FindingTarget::of(&[]), FindingTarget::Lines);
+        assert_eq!(FindingTarget::of(&[&line]), FindingTarget::Lines);
+        assert_eq!(FindingTarget::of(&[&long, &line]), FindingTarget::Lines);
+        assert_eq!(
+            FindingTarget::of(&[&long, &long]),
+            FindingTarget::FileLength
+        );
+        assert_eq!(FindingTarget::of(&[&governance]), FindingTarget::WholeFile);
+        assert_eq!(
+            FindingTarget::of(&[&long, &governance]),
+            FindingTarget::WholeFile
+        );
+    }
+
+    /// Ticket #216: for whole-file findings the first step no longer asks
+    /// to locate a code pattern, in English as in another language.
+    #[test]
+    fn test_render_playbook_whole_file_first_step() {
+        let en = load_report_locale("en");
+        let fr = load_report_locale("fr");
+        let long = render_playbook_inline(
+            "file_too_long",
+            &fr,
+            None,
+            "",
+            FindingTarget::FileLength,
+            &[],
+            false,
+        );
+        assert!(
+            long.contains("Ouvrez chaque fichier cité ci-dessous et notez les sujets"),
+            "{long}"
+        );
+        assert!(!long.contains("Repérez le code vulnérable"), "{long}");
+        let governance = render_playbook_inline(
+            "workflow_not_in_codeowners",
+            &en,
+            None,
+            "",
+            FindingTarget::WholeFile,
+            &[],
+            false,
+        );
+        assert!(
+            governance.contains("the rule is about the file as a whole"),
+            "{governance}"
+        );
+        assert!(
+            !governance.contains("Locate the vulnerable code pattern"),
+            "{governance}"
+        );
+        // The other steps are unchanged.
+        assert!(governance.contains("Run the audit again"), "{governance}");
+    }
+
     #[test]
     fn test_render_playbook_known_rule() {
         let en = load_report_locale("en");
-        let html = render_playbook_inline("autoplay_media", &en, None, "");
+        let html = render_playbook_inline(
+            "autoplay_media",
+            &en,
+            None,
+            "",
+            FindingTarget::Lines,
+            &[],
+            false,
+        );
         assert!(html.contains("playbook-details"));
         assert!(html.contains("Locate the vulnerable code pattern"));
         assert!(html.contains("playbook-benefit"));
     }
 
+    /// Ticket #215: the block shows the rule's CWE, each with its MITRE
+    /// link, and nothing else: the playbook no longer holds one.
     #[test]
     fn test_render_playbook_cwe_reference_link() {
         let en = load_report_locale("en");
-        let html = render_playbook_inline("catch_all_exception", &en, None, "");
-        assert!(html.contains("CWE-396"));
+        let cwe = ["CWE-396".to_string(), "CWE-390".to_string()];
+        let html = render_playbook_inline(
+            "catch_all_exception",
+            &en,
+            None,
+            "",
+            FindingTarget::Lines,
+            &cwe,
+            false,
+        );
         assert!(html.contains("https://cwe.mitre.org/data/definitions/396.html"));
+        assert!(html.contains("https://cwe.mitre.org/data/definitions/390.html"));
+        let none = render_playbook_inline(
+            "catch_all_exception",
+            &en,
+            None,
+            "",
+            FindingTarget::Lines,
+            &[],
+            false,
+        );
+        assert!(!none.contains("CWE-"), "{none}");
+    }
+
+    /// Ticket #215: a client rule's CWE is escaped, and linked only when
+    /// it is `CWE-` and a number.
+    #[test]
+    fn test_cwe_reference_escapes_and_links_only_a_well_formed_id() {
+        assert!(cwe_reference("CWE-79").contains("definitions/79.html"));
+        let odd = cwe_reference("<b>CWE-x</b>");
+        assert!(!odd.contains("href"), "{odd}");
+        assert!(odd.contains("&lt;b&gt;"), "{odd}");
+        assert!(!cwe_reference("CWE-").contains("href"));
+    }
+
+    /// Ticket #215: no playbook entry holds a CWE of its own any more, so
+    /// it cannot differ from the rule's again.
+    #[test]
+    fn test_playbook_entries_hold_no_cwe() {
+        let raw: Value = serde_json::from_str(PLAYBOOK_JSON).unwrap();
+        let with_cwe: Vec<&String> = raw["rules"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .filter(|(_, e)| {
+                e.get("references")
+                    .is_some_and(|r| r.get("cwe").is_some() || r.get("cwe_url").is_some())
+            })
+            .map(|(k, _)| k)
+            .collect();
+        assert!(with_cwe.is_empty(), "{with_cwe:?}");
+    }
+
+    /// The references a playbook entry holds besides the rule's CWE:
+    /// OWASP and ISO 27001 (`PlaybookRefs`), from the embedded playbook.
+    #[test]
+    fn test_render_playbook_shows_owasp_and_iso_references() {
+        let en = load_report_locale("en");
+        let html = render_playbook_inline(
+            "command_injection_csharp",
+            &en,
+            None,
+            "",
+            FindingTarget::Lines,
+            &[],
+            false,
+        );
+        assert!(
+            html.contains(r#"<span class="playbook-ref">A03:2021</span>"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<span class="playbook-ref">ISO A.8.28, A.8.26</span>"#),
+            "{html}"
+        );
+    }
+
+    /// Ticket #217: a catalog rule without a playbook entry gets the
+    /// derived playbook, filled with its solution, benefit and CWE.
+    #[test]
+    fn test_rule_without_entry_gets_the_derived_playbook() {
+        let fr = load_report_locale("fr");
+        let cwe = ["CWE-396".to_string()];
+        let html = render_playbook_inline(
+            "rule_without_entry_xyz",
+            &fr,
+            Some("Attrapez seulement les erreurs attendues."),
+            "Les vraies pannes restent visibles.",
+            FindingTarget::Lines,
+            &cwe,
+            true,
+        );
+        for text in [
+            "Repérez le code vulnérable",
+            "Attrapez seulement les erreurs attendues.",
+            "Relancez l",
+            "Les vraies pannes restent visibles.",
+            "definitions/396.html",
+        ] {
+            assert!(html.contains(text), "{text}: {html}");
+        }
+        // Without a solution, the fix step is still in the report's language.
+        let bare = render_playbook_inline(
+            "rule_without_entry_xyz",
+            &fr,
+            None,
+            "",
+            FindingTarget::Lines,
+            &[],
+            true,
+        );
+        assert!(bare.contains("Appliquez la solution ci-dessus."), "{bare}");
+    }
+
+    /// Ticket #217: every ISO 27001 control of an entry is shown, not the
+    /// first three (`hardcoded_secret` lists four).
+    #[test]
+    fn test_render_playbook_shows_every_iso_control() {
+        let en = load_report_locale("en");
+        let raw: Value = serde_json::from_str(PLAYBOOK_JSON).unwrap();
+        let iso: Vec<String> = raw["rules"]["hardcoded_secret"]["references"]["iso27001"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(iso.len(), 4);
+        let html = render_playbook_inline(
+            "hardcoded_secret",
+            &en,
+            None,
+            "",
+            FindingTarget::Lines,
+            &[],
+            true,
+        );
+        assert!(html.contains(&format!("ISO {}", iso.join(", "))), "{html}");
+    }
+
+    /// Ticket #217: each WCAG criterion gets its own link to its W3C page,
+    /// and every criterion the playbook cites is in [`WCAG_PAGES`].
+    #[test]
+    fn test_wcag_references_link_each_criterion() {
+        let en = load_report_locale("en");
+        let html = render_playbook_inline(
+            "html_aria_hidden_focusable",
+            &en,
+            None,
+            "",
+            FindingTarget::Lines,
+            &[],
+            true,
+        );
+        assert!(html.contains(r#"Understanding/info-and-relationships" target="_blank" class="playbook-ref">WCAG 1.3.1</a>"#), "{html}");
+        assert!(html.contains(r#"Understanding/name-role-value" target="_blank" class="playbook-ref">WCAG 4.1.2</a>"#), "{html}");
+        assert!(!html.contains("WCAG WCAG"), "{html}");
+        assert_eq!(
+            wcag_criteria(&serde_json::json!(["WCAG 1.3.6, WCAG 2.4.1", "3.1.1"])),
+            ["1.3.6", "2.4.1", "3.1.1"]
+        );
+        assert!(
+            wcag_reference("9.9.9").contains("<span"),
+            "unknown criterion stays text"
+        );
+        let raw: Value = serde_json::from_str(PLAYBOOK_JSON).unwrap();
+        for (rule, entry) in raw["rules"].as_object().unwrap() {
+            if let Some(w) = entry.get("references").and_then(|r| r.get("wcag")) {
+                for number in wcag_criteria(w) {
+                    assert!(
+                        WCAG_PAGES.iter().any(|(n, _)| *n == number),
+                        "{rule}: WCAG {number} has no page in WCAG_PAGES"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The ISO 25010 quality characteristic of an accessibility entry is
+    /// shown, not dropped (2026-11-19).
+    #[test]
+    fn test_render_playbook_shows_iso25010() {
+        let en = load_report_locale("en");
+        let html = render_playbook_inline(
+            "html_th_scope_missing",
+            &en,
+            None,
+            "",
+            FindingTarget::Lines,
+            &[],
+            true,
+        );
+        assert!(
+            html.contains(
+                r#"<span class="playbook-ref">ISO 25010 Usability › Accessibility</span>"#
+            ),
+            "{html}"
+        );
+    }
+
+    /// A reference key the report does not show makes the playbook fail
+    /// to load, naming it, instead of being dropped (`deny_unknown_fields`).
+    #[test]
+    fn test_unknown_reference_key_is_refused() {
+        let err = serde_json::from_str::<PlaybookRefs>(r#"{"cve": ["CVE-2021-44228"]}"#)
+            .expect_err("an unknown key is refused");
+        assert!(err.to_string().contains("cve"), "{err}");
+        // The embedded playbook only holds keys the report shows.
+        load_playbook();
     }
 
     #[test]
     fn test_render_playbook_unknown_rule_is_empty() {
         let en = load_report_locale("en");
         assert_eq!(
-            render_playbook_inline("does_not_exist_xyz", &en, None, ""),
+            render_playbook_inline(
+                "does_not_exist_xyz",
+                &en,
+                None,
+                "",
+                FindingTarget::Lines,
+                &[],
+                false
+            ),
             ""
         );
     }

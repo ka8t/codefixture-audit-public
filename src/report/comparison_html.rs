@@ -23,7 +23,7 @@ fn format_delta(d: i64) -> String {
         .replace("{{value}}", &value)
 }
 
-fn render_finding_mini(f: &ReportFinding, resolved: bool) -> String {
+fn render_finding_mini(f: &ReportFinding, resolved: bool, report_locale: &Value) -> String {
     let (severity_class, badge_class, badge_text) = if resolved {
         (
             "resolved".to_string(),
@@ -42,8 +42,12 @@ fn render_finding_mini(f: &ReportFinding, resolved: bool) -> String {
         .replace("{{badge_class}}", &badge_class)
         .replace("{{badge_text}}", &badge_text)
         .replace("{{rule}}", &escape(&f.rule_name))
-        .replace("{{file}}", &escape(&f.file))
-        .replace("{{line}}", &f.line.to_string())
+        // `file:line`, or the file alone for a whole-file finding
+        // (ticket #214).
+        .replace(
+            "{{location}}",
+            &escape(&crate::report::text::finding_location(f, report_locale)),
+        )
 }
 
 fn sort_key(f: &ReportFinding) -> (bool, bool, String) {
@@ -72,14 +76,14 @@ pub fn render_comparison_html(
     new_sorted.sort_by_key(sort_key);
     let new_items: String = new_sorted
         .iter()
-        .map(|f| render_finding_mini(f, false))
+        .map(|f| render_finding_mini(f, false, report_locale))
         .collect();
 
     let mut resolved_sorted = comparison.resolved_findings.clone();
     resolved_sorted.sort_by_key(sort_key);
     let resolved_items: String = resolved_sorted
         .iter()
-        .map(|f| render_finding_mini(f, true))
+        .map(|f| render_finding_mini(f, true, report_locale))
         .collect();
 
     let baseline_high = *comparison.baseline_totals.get("HIGH").unwrap_or(&0);
@@ -226,7 +230,25 @@ mod tests {
             benefit: String::new(),
             committer: None,
             rule_source: "json_builtin".to_string(),
+            file_scope: None,
         }
+    }
+
+    /// Ticket #214: a mini card shows `file:line` for a line finding and
+    /// the file alone for a whole-file finding.
+    #[test]
+    fn test_render_finding_mini_location() {
+        let en = load_report_locale("en");
+        let line = finding("a.py", "HIGH", "R");
+        assert!(render_finding_mini(&line, false, &en).contains("a.py:1"));
+        let mut whole = finding("big.py", "LOW", "R");
+        whole.file_scope = Some(crate::scan::engine::FileScope {
+            line_count: 700,
+            min_lines: Some(500),
+        });
+        let html = render_finding_mini(&whole, true, &en);
+        assert!(html.contains("big.py (whole file)"), "{html}");
+        assert!(!html.contains("big.py:1"), "{html}");
     }
 
     #[test]

@@ -173,6 +173,7 @@ mod tests {
             benefit: String::new(),
             committer: None,
             rule_source: "json_builtin".to_string(),
+            file_scope: None,
         }
     }
 

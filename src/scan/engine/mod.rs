@@ -38,4 +38,27 @@ pub struct Finding {
     #[serde(default)]
     pub column: usize,
     pub confidence: i64,
+    /// `Some` when the finding is about the whole file rather than one of
+    /// its lines (a `file_contains` rule): `line` is then 1 and `code` the
+    /// first non-blank line only by convention, so the report must not
+    /// present them as the faulty spot (ticket #214). `serde(default)`
+    /// reads the findings cached before this field.
+    #[serde(default)]
+    pub file_scope: Option<FileScope>,
+}
+
+/// What a whole-file finding measured, for a report that explains it
+/// instead of pointing at line 1 (ticket #214).
+///
+/// Carried from the engine `Finding` to the `ReportFinding` unchanged, and
+/// written into the history JSON: the comparison with a later scan reads
+/// it back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct FileScope {
+    /// Number of lines of the file when it was scanned.
+    pub line_count: usize,
+    /// The rule's `min_lines` threshold when the rule is about the file's
+    /// length (`file_too_long`); `None` for a rule about the file's place
+    /// or content (`workflow_not_in_codeowners`, `unreviewed_vendor_code`).
+    pub min_lines: Option<usize>,
 }

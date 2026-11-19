@@ -665,6 +665,34 @@ fn emit_error(msg: &str) {
 mod tests {
     use super::*;
 
+    /// Ticket #214: the `text` format writes `file:line:` for a line
+    /// finding and `file:` for a whole-file finding, never `file:1:`.
+    #[test]
+    fn test_format_text_report_whole_file_finding_has_no_line() {
+        let finding = |file_scope: serde_json::Value| -> ReportFinding {
+            serde_json::from_value(serde_json::json!({
+                "rule_key": "file_too_long", "rule_name": "file_too_long",
+                "category": "ARCH", "severity": "LOW", "risk": "Too long.",
+                "file": "app/big.py", "line": 1, "solution": null, "cwe": [],
+                "owasp": null, "taint_flow": null, "code": "import os",
+                "context_before": "", "context_after": "", "confidence": 80,
+                "benefit": "", "committer": null, "rule_source": "json_builtin",
+                "file_scope": file_scope,
+            }))
+            .expect("valid ReportFinding")
+        };
+        let whole = finding(serde_json::json!({"line_count": 812, "min_lines": 500}));
+        let line = finding(serde_json::Value::Null);
+        assert_eq!(
+            format_text_report(&[whole]),
+            "app/big.py: [LOW] file_too_long — Too long.\n"
+        );
+        assert_eq!(
+            format_text_report(&[line]),
+            "app/big.py:1: [LOW] file_too_long — Too long.\n"
+        );
+    }
+
     #[test]
     fn test_rerun_command_is_the_typed_command_ready_to_copy() {
         let args = [
@@ -2477,7 +2505,8 @@ fn report_unchanged_scan(scan: UnchangedScan<'_>) -> ExitCode {
 }
 
 /// The `text` format: one `file:line: [severity] rule — message` line per
-/// finding.
+/// finding, `file: [severity] …` for a finding about the whole file, which
+/// has no line to point an editor at (ticket #214).
 fn format_text_report(findings: &[ReportFinding]) -> String {
     let mut out = String::new();
     for f in findings {
@@ -2486,9 +2515,14 @@ fn format_text_report(findings: &[ReportFinding]) -> String {
         } else {
             &f.risk
         };
+        let location = if f.file_scope.is_some() {
+            f.file.clone()
+        } else {
+            format!("{}:{}", f.file, f.line)
+        };
         out.push_str(&format!(
-            "{}:{}: [{}] {} — {}\n",
-            f.file, f.line, f.severity, f.rule_key, message
+            "{location}: [{}] {} — {}\n",
+            f.severity, f.rule_key, message
         ));
     }
     out

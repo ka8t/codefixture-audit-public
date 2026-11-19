@@ -129,6 +129,7 @@ pub fn execute_ast_rule(
                 code: line_content(m.node_start_line),
                 column: m.node_start_column,
                 confidence: rule.confidence,
+                file_scope: None,
             });
         }
     }

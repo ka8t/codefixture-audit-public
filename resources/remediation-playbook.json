@@ -28,8 +28,7 @@
           "type": "verification"
         }
       ],
-      "benefit": "Visitors choose when the media plays, and screen readers stay audible.",
-      "references": {}
+      "benefit": "Visitors choose when the media plays, and screen readers stay audible."
     },
     "button_no_aria": {
       "title": "A button that shows only an icon has no name",
@@ -54,8 +53,7 @@
           "type": "verification"
         }
       ],
-      "benefit": "Screen reader users know what each button does.",
-      "references": {}
+      "benefit": "Screen reader users know what each button does."
     },
     "catch_all_exception": {
       "title": "An error handler catches everything, even a request to stop the program",
@@ -82,8 +80,6 @@
       ],
       "benefit": "Unexpected failures stay visible and can be fixed.",
       "references": {
-        "cwe": "CWE-396",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/396.html",
         "iso27001": [
           "A.8.28"
         ]
@@ -114,8 +110,6 @@
       ],
       "benefit": "Unexpected failures stay visible and can be fixed.",
       "references": {
-        "cwe": "CWE-396",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/396.html",
         "iso27001": [
           "A.8.28"
         ]
@@ -146,8 +140,6 @@
       ],
       "benefit": "Programming mistakes show up instead of being silently hidden.",
       "references": {
-        "cwe": "CWE-396",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/396.html",
         "iso27001": [
           "A.8.28"
         ]
@@ -178,8 +170,6 @@
       ],
       "benefit": "Unexpected failures stay visible and can be fixed.",
       "references": {
-        "cwe": "CWE-396",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/396.html",
         "iso27001": [
           "A.8.28"
         ]
@@ -210,8 +200,6 @@
       ],
       "benefit": "Changing a value in the browser no longer gives admin rights.",
       "references": {
-        "cwe": "CWE-602",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/602.html",
         "owasp": "A04:2021",
         "iso27001": [
           "A.8.5",
@@ -244,8 +232,6 @@
       ],
       "benefit": "A user value stays a single argument and can no longer start other commands.",
       "references": {
-        "cwe": "CWE-78",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/78.html",
         "owasp": "A03:2021",
         "iso27001": [
           "A.8.28",
@@ -278,8 +264,6 @@
       ],
       "benefit": "Visitor data can no longer add commands on your server.",
       "references": {
-        "cwe": "CWE-78",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/78.html",
         "owasp": "A03:2021",
         "iso27001": [
           "A.8.28",
@@ -312,8 +296,6 @@
       ],
       "benefit": "No user data can turn into a command on your server.",
       "references": {
-        "cwe": "CWE-78",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/78.html",
         "owasp": "A03:2021",
         "iso27001": [
           "A.8.28",
@@ -346,8 +328,6 @@
       ],
       "benefit": "Debug messages no longer reach the people who use your application.",
       "references": {
-        "cwe": "CWE-532",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/532.html",
         "iso27001": [
           "A.8.12"
         ]
@@ -378,8 +358,6 @@
       ],
       "benefit": "Your messages reach the logs with a level, and can be filtered or turned off.",
       "references": {
-        "cwe": "CWE-532",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/532.html",
         "iso27001": [
           "A.8.12",
           "A.8.15"
@@ -411,8 +389,6 @@
       ],
       "benefit": "Only your own sites can read your API answers in the browser.",
       "references": {
-        "cwe": "CWE-942",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/942.html",
         "owasp": "A05:2021",
         "iso27001": [
           "A.8.28",
@@ -444,11 +420,7 @@
           "type": "verification"
         }
       ],
-      "benefit": "Exported files open as plain data, with no formula run.",
-      "references": {
-        "cwe": "CWE-1236",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/1236.html"
-      }
+      "benefit": "Exported files open as plain data, with no formula run."
     },
     "dangerous_eval": {
       "title": "Dangerous Eval/Exec",
@@ -475,8 +447,6 @@
       ],
       "benefit": "Protection against malicious code execution.",
       "references": {
-        "cwe": "CWE-95",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/95.html",
         "iso27001": [
           "A.8.28",
           "A.8.26",
@@ -722,8 +692,6 @@
       ],
       "benefit": "Errors no longer show visitors how your application is built.",
       "references": {
-        "cwe": "CWE-489",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/489.html",
         "owasp": "A05:2021",
         "iso27001": [
           "A.8.9",
@@ -755,8 +723,7 @@
           "type": "verification"
         }
       ],
-      "benefit": "No one can log in with a password everybody knows.",
-      "references": {}
+      "benefit": "No one can log in with a password everybody knows."
     },
     "deprecated_api": {
       "title": "The code calls a Python function that is outdated or removed",
@@ -783,8 +750,6 @@
       ],
       "benefit": "The code keeps working on new Python versions.",
       "references": {
-        "cwe": "CWE-477",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/477.html",
         "iso27001": [
           "A.8.8",
           "A.8.28"
@@ -816,8 +781,6 @@
       ],
       "benefit": "Your code keeps working on new .NET versions and avoids known weaknesses.",
       "references": {
-        "cwe": "CWE-477",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/477.html",
         "iso27001": [
           "A.8.8",
           "A.8.28"
@@ -849,8 +812,6 @@
       ],
       "benefit": "The code keeps working on new Java versions and avoids known bugs.",
       "references": {
-        "cwe": "CWE-477",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/477.html",
         "iso27001": [
           "A.8.8",
           "A.8.28"
@@ -882,8 +843,6 @@
       ],
       "benefit": "Your code keeps working in current and future browsers.",
       "references": {
-        "cwe": "CWE-477",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/477.html",
         "iso27001": [
           "A.8.8",
           "A.8.28"
@@ -915,8 +874,6 @@
       ],
       "benefit": "Your code runs on current PHP versions, which receive security fixes.",
       "references": {
-        "cwe": "CWE-477",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/477.html",
         "iso27001": [
           "A.8.8",
           "A.8.28"
@@ -948,8 +905,6 @@
       ],
       "benefit": "A mistake no longer destroys data you cannot get back.",
       "references": {
-        "cwe": "CWE-1190",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/1190.html",
         "iso27001": [
           "A.8.13",
           "A.8.32"
@@ -981,8 +936,6 @@
       ],
       "benefit": "Another website can no longer act in the name of your logged-in visitors.",
       "references": {
-        "cwe": "CWE-352",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/352.html",
         "owasp": "A01:2021",
         "iso27001": [
           "A.8.28",
@@ -1015,8 +968,6 @@
       ],
       "benefit": "Error pages no longer reveal your code and settings.",
       "references": {
-        "cwe": "CWE-489",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/489.html",
         "owasp": "A05:2021",
         "iso27001": [
           "A.8.28",
@@ -1050,8 +1001,6 @@
       ],
       "benefit": "Reading your code no longer lets anyone forge sessions or links.",
       "references": {
-        "cwe": "CWE-798",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/798.html",
         "iso27001": [
           "A.8.28",
           "A.8.24"
@@ -1083,8 +1032,6 @@
       ],
       "benefit": "Your secrets do not end up in the images you publish.",
       "references": {
-        "cwe": "CWE-250",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/250.html",
         "iso27001": [
           "A.8.9",
           "A.8.12"
@@ -1116,8 +1063,6 @@
       ],
       "benefit": "A flaw in your application does not give administrator rights.",
       "references": {
-        "cwe": "CWE-250",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/250.html",
         "iso27001": [
           "A.8.2",
           "A.8.9"
@@ -1149,8 +1094,6 @@
       ],
       "benefit": "Every build of the image gives the same result, with a version you chose.",
       "references": {
-        "cwe": "CWE-250",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/250.html",
         "iso27001": [
           "A.8.9",
           "A.8.25",
@@ -1181,8 +1124,7 @@
           "type": "verification"
         }
       ],
-      "benefit": "Long lists appear faster, without slowing down the page.",
-      "references": {}
+      "benefit": "Long lists appear faster, without slowing down the page."
     },
     "dynamic_import": {
       "title": "A module is loaded from a name held in a variable",
@@ -1209,8 +1151,6 @@
       ],
       "benefit": "Only the modules you chose can be loaded.",
       "references": {
-        "cwe": "CWE-502",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/502.html",
         "owasp": "A08:2021",
         "iso27001": [
           "A.8.28",
@@ -1243,8 +1183,6 @@
       ],
       "benefit": "Failures show up where they happen and can be fixed.",
       "references": {
-        "cwe": "CWE-391",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/391.html",
         "iso27001": [
           "A.8.28"
         ]
@@ -1305,8 +1243,7 @@
           "type": "verification"
         }
       ],
-      "benefit": "The page no longer keeps old functions in memory or runs them twice.",
-      "references": {}
+      "benefit": "The page no longer keeps old functions in memory or runs them twice."
     },
     "exposed_test_endpoint": {
       "title": "A test or debug page is reachable without logging in",
@@ -1364,8 +1301,6 @@
       ],
       "benefit": "Only your own sites can use your server from a visitor's browser.",
       "references": {
-        "cwe": "CWE-942",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/942.html",
         "iso27001": [
           "A.8.28",
           "A.8.26",
@@ -1398,8 +1333,6 @@
       ],
       "benefit": "The browser receives the instructions that block the most common attacks on your pages.",
       "references": {
-        "cwe": "CWE-693",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/693.html",
         "owasp": "A05:2021",
         "iso27001": [
           "A.8.28",
@@ -1432,8 +1365,6 @@
       ],
       "benefit": "Visitors can no longer change the variables of your code.",
       "references": {
-        "cwe": "CWE-621",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/621.html",
         "iso27001": [
           "A.8.28"
         ]
@@ -1464,8 +1395,6 @@
       ],
       "benefit": "Only the files you chose can be loaded.",
       "references": {
-        "cwe": "CWE-98",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/98.html",
         "iso27001": [
           "A.8.28",
           "A.8.26",
@@ -1498,8 +1427,6 @@
       ],
       "benefit": "Each file covers one subject and is quicker to read and change.",
       "references": {
-        "cwe": "CWE-1080",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/1080.html",
         "iso27001": [
           "A.8.28",
           "A.8.25"
@@ -1531,8 +1458,6 @@
       ],
       "benefit": "Only the files you expect reach your server, and none of them can be run.",
       "references": {
-        "cwe": "CWE-434",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/434.html",
         "owasp": "A04:2021"
       }
     },
@@ -1561,8 +1486,6 @@
       ],
       "benefit": "Visitors can no longer run commands on your server through the debugger.",
       "references": {
-        "cwe": "CWE-489",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/489.html",
         "owasp": "A05:2021",
         "iso27001": [
           "A.8.28",
@@ -1596,8 +1519,6 @@
       ],
       "benefit": "Reading your code no longer lets anyone forge a session.",
       "references": {
-        "cwe": "CWE-798",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/798.html",
         "iso27001": [
           "A.8.28",
           "A.8.24"
@@ -1627,8 +1548,7 @@
           "type": "verification"
         }
       ],
-      "benefit": "Keyboard users always see where they are on the page.",
-      "references": {}
+      "benefit": "Keyboard users always see where they are on the page."
     },
     "format_string_vuln": {
       "title": "Text built with format() includes data from the request",
@@ -1653,11 +1573,7 @@
           "type": "verification"
         }
       ],
-      "benefit": "Request data stays plain data and never changes the text around it.",
-      "references": {
-        "cwe": "CWE-134",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/134.html"
-      }
+      "benefit": "Request data stays plain data and never changes the text around it."
     },
     "gha_excessive_permissions": {
       "title": "The automation gets every write right on the project",
@@ -1839,8 +1755,6 @@
       ],
       "benefit": "Visitors no longer get a map of your API.",
       "references": {
-        "cwe": "CWE-400",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/400.html",
         "owasp": "A04:2021"
       }
     },
@@ -1869,8 +1783,6 @@
       ],
       "benefit": "A single query can no longer use up the server's resources.",
       "references": {
-        "cwe": "CWE-400",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/400.html",
         "owasp": "A04:2021"
       }
     },
@@ -1899,8 +1811,6 @@
       ],
       "benefit": "The code no longer reveals your network and runs in any environment.",
       "references": {
-        "cwe": "CWE-798",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/798.html",
         "iso27001": [
           "A.8.22",
           "A.8.20"
@@ -1932,8 +1842,6 @@
       ],
       "benefit": "Reading your code no longer gives access to your services.",
       "references": {
-        "cwe": "CWE-798",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/798.html",
         "owasp": "A07:2021",
         "iso27001": [
           "A.8.28",
@@ -1998,8 +1906,6 @@
       ],
       "benefit": "Passwords stay unreadable, even for someone who gets the database.",
       "references": {
-        "cwe": "CWE-287",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/287.html",
         "iso27001": [
           "A.8.5",
           "A.8.28"
@@ -2031,8 +1937,6 @@
       ],
       "benefit": "Data exchanged with this address can no longer be read or changed on the way.",
       "references": {
-        "cwe": "CWE-319",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/319.html",
         "owasp": "A02:2021",
         "iso27001": [
           "A.8.24",
@@ -2064,8 +1968,7 @@
           "type": "verification"
         }
       ],
-      "benefit": "Everyone, including blind visitors, gets the information the image carries.",
-      "references": {}
+      "benefit": "Everyone, including blind visitors, gets the information the image carries."
     },
     "inline_style_js": {
       "title": "A style is set directly in JavaScript instead of a CSS class",
@@ -2090,8 +1993,7 @@
           "type": "verification"
         }
       ],
-      "benefit": "The look of the site is defined in one place and stays consistent.",
-      "references": {}
+      "benefit": "The look of the site is defined in one place and stays consistent."
     },
     "input_no_label": {
       "title": "A form field has no label",
@@ -2116,8 +2018,7 @@
           "type": "verification"
         }
       ],
-      "benefit": "Screen reader users know what to type in each field.",
-      "references": {}
+      "benefit": "Screen reader users know what to type in each field."
     },
     "insecure_cloud_config": {
       "title": "A cloud resource is open to the whole internet",
@@ -2144,8 +2045,6 @@
       ],
       "benefit": "Your cloud files and databases are only reachable by those you choose.",
       "references": {
-        "cwe": "CWE-1032",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/1032.html",
         "iso27001": [
           "A.5.23",
           "A.8.9"
@@ -2177,8 +2076,6 @@
       ],
       "benefit": "Scripts cannot read the cookie, and it only travels encrypted.",
       "references": {
-        "cwe": "CWE-614",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/614.html",
         "owasp": "A05:2021",
         "iso27001": [
           "A.8.28",
@@ -2211,8 +2108,6 @@
       ],
       "benefit": "A script injected into the page can no longer read your users' tokens.",
       "references": {
-        "cwe": "CWE-922",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/922.html",
         "owasp": "A04:2021",
         "iso27001": [
           "A.8.1",
@@ -2245,8 +2140,6 @@
       ],
       "benefit": "Unpredictable tokens and keys, resistant to attacks (CWE-330).",
       "references": {
-        "cwe": "CWE-330",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/330.html",
         "iso27001": [
           "A.8.24",
           "A.8.28"
@@ -2276,11 +2169,7 @@
           "type": "verification"
         }
       ],
-      "benefit": "Your encrypted data and signatures stay safe for years.",
-      "references": {
-        "cwe": "CWE-326",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/326.html"
-      }
+      "benefit": "Your encrypted data and signatures stay safe for years."
     },
     "jndi_injection_java": {
       "title": "A JNDI lookup uses a name that may come from outside (Log4Shell)",
@@ -2305,11 +2194,7 @@
           "type": "verification"
         }
       ],
-      "benefit": "Names sent by an attacker can no longer load code onto your server.",
-      "references": {
-        "cwe": "CWE-502",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/502.html"
-      }
+      "benefit": "Names sent by an attacker can no longer load code onto your server."
     },
     "jwt_hardcoded_secret": {
       "title": "The key that signs login tokens (JWT) is written in the code",
@@ -2336,8 +2221,6 @@
       ],
       "benefit": "Reading your code no longer lets anyone make login tokens.",
       "references": {
-        "cwe": "CWE-798",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/798.html",
         "owasp": "A07:2021"
       }
     },
@@ -2366,8 +2249,6 @@
       ],
       "benefit": "Only tokens signed by your server are accepted.",
       "references": {
-        "cwe": "CWE-347",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/347.html",
         "owasp": "A07:2021"
       }
     },
@@ -2396,8 +2277,6 @@
       ],
       "benefit": "A user value can no longer change the meaning of your directory searches.",
       "references": {
-        "cwe": "CWE-90",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/90.html",
         "owasp": "A03:2021",
         "iso27001": [
           "A.8.28",
@@ -2430,8 +2309,6 @@
       ],
       "benefit": "LDAP queries safe from injection attacks.",
       "references": {
-        "cwe": "CWE-90",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/90.html",
         "owasp": "A03:2021",
         "iso27001": [
           "A.8.28",
@@ -2464,8 +2341,6 @@
       ],
       "benefit": "LDAP queries safe from injection attacks.",
       "references": {
-        "cwe": "CWE-90",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/90.html",
         "owasp": "A03:2021",
         "iso27001": [
           "A.8.28",
@@ -2529,8 +2404,6 @@
       ],
       "benefit": "Each line of the log matches a real event.",
       "references": {
-        "cwe": "CWE-117",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/117.html",
         "owasp": "A09:2021"
       }
     },
@@ -2557,8 +2430,7 @@
           "type": "verification"
         }
       ],
-      "benefit": "The structure of the page can be read at a glance and changed safely.",
-      "references": {}
+      "benefit": "The structure of the page can be read at a glance and changed safely."
     },
     "mass_assignment_laravel": {
       "title": "A record is created or updated with every field of the request",
@@ -2585,8 +2457,6 @@
       ],
       "benefit": "Visitors can only change the fields you chose.",
       "references": {
-        "cwe": "CWE-915",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/915.html",
         "owasp": "A04:2021",
         "iso27001": [
           "A.8.28",
@@ -2619,8 +2489,6 @@
       ],
       "benefit": "Only logged-in users can reach your sensitive pages.",
       "references": {
-        "cwe": "CWE-862",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/862.html",
         "owasp": "A01:2021",
         "iso27001": [
           "A.5.15",
@@ -2685,8 +2553,6 @@
       ],
       "benefit": "A script inserted by an attacker is blocked by the browser.",
       "references": {
-        "cwe": "CWE-1021",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/1021.html",
         "owasp": "A05:2021",
         "iso27001": [
           "A.8.23",
@@ -2717,11 +2583,7 @@
           "type": "verification"
         }
       ],
-      "benefit": "You keep personal data only as long as needed, as the GDPR requires.",
-      "references": {
-        "cwe": "CWE-1057",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/1057.html"
-      }
+      "benefit": "You keep personal data only as long as needed, as the GDPR requires."
     },
     "missing_frame_protection": {
       "title": "Missing X-Frame-Options",
@@ -2746,8 +2608,7 @@
           "type": "verification"
         }
       ],
-      "benefit": "Prevents clickjacking attacks by blocking unauthorized framing of the page.",
-      "references": {}
+      "benefit": "Prevents clickjacking attacks by blocking unauthorized framing of the page."
     },
     "missing_health_check": {
       "title": "The application has no address to check that it works",
@@ -2803,11 +2664,7 @@
           "type": "verification"
         }
       ],
-      "benefit": "Browsers always connect to your site with encryption.",
-      "references": {
-        "cwe": "CWE-319",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/319.html"
-      }
+      "benefit": "Browsers always connect to your site with encryption."
     },
     "missing_mfa_csharp": {
       "title": "Login relies on the password alone, without a second check",
@@ -2834,8 +2691,6 @@
       ],
       "benefit": "A stolen password is no longer enough to take over an account.",
       "references": {
-        "cwe": "CWE-308",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/308.html",
         "owasp": "A07:2021"
       }
     },
@@ -2864,8 +2719,6 @@
       ],
       "benefit": "A stolen password alone no longer opens an account.",
       "references": {
-        "cwe": "CWE-308",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/308.html",
         "owasp": "A07:2021"
       }
     },
@@ -2894,8 +2747,6 @@
       ],
       "benefit": "A stolen password is no longer enough to enter an account.",
       "references": {
-        "cwe": "CWE-308",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/308.html",
         "owasp": "A07:2021"
       }
     },
@@ -2924,8 +2775,6 @@
       ],
       "benefit": "A stolen password is no longer enough to enter an account.",
       "references": {
-        "cwe": "CWE-308",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/308.html",
         "owasp": "A07:2021"
       }
     },
@@ -2954,8 +2803,6 @@
       ],
       "benefit": "A stolen password is no longer enough to take over an account.",
       "references": {
-        "cwe": "CWE-308",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/308.html",
         "owasp": "A07:2021"
       }
     },
@@ -2984,8 +2831,6 @@
       ],
       "benefit": "You see abuse when it happens and can understand an incident afterwards.",
       "references": {
-        "cwe": "CWE-778",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/778.html",
         "owasp": "A09:2021",
         "iso27001": [
           "A.8.16",
@@ -3016,8 +2861,7 @@
           "type": "verification"
         }
       ],
-      "benefit": "Prevents leakage of sensitive URL data to external sites.",
-      "references": {}
+      "benefit": "Prevents leakage of sensitive URL data to external sites."
     },
     "missing_security_docs": {
       "title": "A security function has no description",
@@ -3073,11 +2917,7 @@
           "type": "verification"
         }
       ],
-      "benefit": "The browser refuses a file changed on the other server instead of running it on your pages.",
-      "references": {
-        "cwe": "CWE-353",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/353.html"
-      }
+      "benefit": "The browser refuses a file changed on the other server instead of running it on your pages."
     },
     "missing_x_content_type_options": {
       "title": "Missing X-Content-Type-Options",
@@ -3102,8 +2942,7 @@
           "type": "verification"
         }
       ],
-      "benefit": "Prevents MIME-type confusion attacks and reduces XSS attack surface.",
-      "references": {}
+      "benefit": "Prevents MIME-type confusion attacks and reduces XSS attack surface."
     },
     "n_plus_1_query": {
       "title": "A database query is run once for each item of a loop",
@@ -3223,8 +3062,6 @@
       ],
       "benefit": "Users cannot change what the database query does.",
       "references": {
-        "cwe": "CWE-89",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/89.html",
         "owasp": "A03:2021",
         "iso27001": [
           "A.8.28",
@@ -3257,8 +3094,6 @@
       ],
       "benefit": "Prevention of open redirect attacks (OWASP A01, CWE-601, SCS0027).",
       "references": {
-        "cwe": "CWE-601",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/601.html",
         "owasp": "A01:2021",
         "iso27001": [
           "A.8.28",
@@ -3291,8 +3126,6 @@
       ],
       "benefit": "Prevention of open redirect attacks (OWASP A01, CWE-601).",
       "references": {
-        "cwe": "CWE-601",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/601.html",
         "owasp": "A01:2021",
         "iso27001": [
           "A.8.28",
@@ -3325,8 +3158,6 @@
       ],
       "benefit": "Prevention of open redirect attacks (OWASP A01, CWE-601).",
       "references": {
-        "cwe": "CWE-601",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/601.html",
         "owasp": "A01:2021",
         "iso27001": [
           "A.8.28",
@@ -3359,8 +3190,6 @@
       ],
       "benefit": "Prevention of path traversal attacks in .NET applications.",
       "references": {
-        "cwe": "CWE-22",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/22.html",
         "owasp": "A01:2021",
         "iso27001": [
           "A.8.28",
@@ -3393,8 +3222,6 @@
       ],
       "benefit": "Prevention of path traversal attacks in Java applications.",
       "references": {
-        "cwe": "CWE-22",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/22.html",
         "owasp": "A01:2021",
         "iso27001": [
           "A.8.28",
@@ -3427,8 +3254,6 @@
       ],
       "benefit": "Prevention of path traversal attacks in Node.js applications.",
       "references": {
-        "cwe": "CWE-22",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/22.html",
         "owasp": "A01:2021",
         "iso27001": [
           "A.8.28",
@@ -3461,8 +3286,6 @@
       ],
       "benefit": "Prevention of directory traversal and unauthorized file access.",
       "references": {
-        "cwe": "CWE-22",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/22.html",
         "owasp": "A01:2021",
         "iso27001": [
           "A.8.28",
@@ -3495,8 +3318,6 @@
       ],
       "benefit": "No real person's data is spread with your code.",
       "references": {
-        "cwe": "CWE-359",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/359.html",
         "owasp": "A01:2021",
         "iso27001": [
           "A.8.33",
@@ -3529,8 +3350,6 @@
       ],
       "benefit": "Your logs no longer expose your users' personal data.",
       "references": {
-        "cwe": "CWE-359",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/359.html",
         "owasp": "A01:2021",
         "iso27001": [
           "A.8.11",
@@ -3563,8 +3382,7 @@
           "type": "verification"
         }
       ],
-      "benefit": "Keyboard users move through the page in a logical order.",
-      "references": {}
+      "benefit": "Keyboard users move through the page in a logical order."
     },
     "postmessage_no_origin_check": {
       "title": "Messages from other sites are accepted without checking the sender",
@@ -3589,11 +3407,7 @@
           "type": "verification"
         }
       ],
-      "benefit": "Only the sites you trust can send messages to your page.",
-      "references": {
-        "cwe": "CWE-345",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/345.html"
-      }
+      "benefit": "Only the sites you trust can send messages to your page."
     },
     "predictable_session": {
       "title": "A token or secret is made with the predictable random module",
@@ -3620,8 +3434,6 @@
       ],
       "benefit": "Nobody can guess the next token from the ones already issued.",
       "references": {
-        "cwe": "CWE-330",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/330.html",
         "iso27001": [
           "A.8.5",
           "A.8.28"
@@ -3653,8 +3465,6 @@
       ],
       "benefit": "A flaw in the program no longer gives control of the whole machine.",
       "references": {
-        "cwe": "CWE-269",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/269.html",
         "owasp": "A01:2021",
         "iso27001": [
           "A.8.18",
@@ -3719,8 +3529,6 @@
       ],
       "benefit": "The file the code uses is always the one it checked.",
       "references": {
-        "cwe": "CWE-362",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/362.html",
         "owasp": "A04:2021",
         "iso27001": [
           "A.8.28"
@@ -3750,11 +3558,7 @@
           "type": "verification"
         }
       ],
-      "benefit": "No text can make the check last long enough to block your server.",
-      "references": {
-        "cwe": "CWE-1333",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/1333.html"
-      }
+      "benefit": "No text can make the check last long enough to block your server."
     },
     "request_validation_disabled": {
       "title": "ASP.NET request validation is turned off",
@@ -3781,8 +3585,6 @@
       ],
       "benefit": "Requests carrying HTML or scripts are stopped before they reach your code.",
       "references": {
-        "cwe": "CWE-20",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/20.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -3814,8 +3616,6 @@
       ],
       "benefit": "Reading the logs no longer reveals your secrets.",
       "references": {
-        "cwe": "CWE-532",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/532.html",
         "owasp": "A09:2021",
         "iso27001": [
           "A.8.28",
@@ -3849,8 +3649,6 @@
       ],
       "benefit": "Reading the logs no longer reveals your secrets.",
       "references": {
-        "cwe": "CWE-532",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/532.html",
         "owasp": "A09:2021",
         "iso27001": [
           "A.8.28",
@@ -3884,8 +3682,6 @@
       ],
       "benefit": "Reading the logs no longer reveals your secrets.",
       "references": {
-        "cwe": "CWE-532",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/532.html",
         "owasp": "A09:2021",
         "iso27001": [
           "A.8.28",
@@ -3919,8 +3715,6 @@
       ],
       "benefit": "Your logs no longer contain secrets that can be reused.",
       "references": {
-        "cwe": "CWE-532",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/532.html",
         "owasp": "A09:2021",
         "iso27001": [
           "A.8.28",
@@ -3954,8 +3748,6 @@
       ],
       "benefit": "Reading the logs no longer reveals your secrets.",
       "references": {
-        "cwe": "CWE-532",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/532.html",
         "owasp": "A09:2021",
         "iso27001": [
           "A.8.28",
@@ -3987,11 +3779,7 @@
           "type": "verification"
         }
       ],
-      "benefit": "Public facts about a user no longer open their account.",
-      "references": {
-        "cwe": "CWE-640",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/640.html"
-      }
+      "benefit": "Public facts about a user no longer open their account."
     },
     "smtp_injection_php": {
       "title": "A value from the request is passed to mail()",
@@ -4016,11 +3804,7 @@
           "type": "verification"
         }
       ],
-      "benefit": "Visitors can no longer use your forms to send emails to others.",
-      "references": {
-        "cwe": "CWE-93",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/93.html"
-      }
+      "benefit": "Visitors can no longer use your forms to send emails to others."
     },
     "smtp_injection_python": {
       "title": "A value from the user goes into the headers of an email",
@@ -4045,11 +3829,7 @@
           "type": "verification"
         }
       ],
-      "benefit": "Your server only sends the emails your code writes.",
-      "references": {
-        "cwe": "CWE-93",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/93.html"
-      }
+      "benefit": "Your server only sends the emails your code writes."
     },
     "spel_injection": {
       "title": "A Spring expression (SpEL) is evaluated and could run any Java code",
@@ -4076,8 +3856,6 @@
       ],
       "benefit": "An expression can no longer run code on your server.",
       "references": {
-        "cwe": "CWE-917",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/917.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -4109,8 +3887,6 @@
       ],
       "benefit": "Only your own sites can call your API from a browser.",
       "references": {
-        "cwe": "CWE-942",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/942.html",
         "owasp": "A05:2021",
         "iso27001": [
           "A.8.28",
@@ -4144,8 +3920,6 @@
       ],
       "benefit": "Other websites can no longer act in the name of your users.",
       "references": {
-        "cwe": "CWE-352",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/352.html",
         "owasp": "A01:2021",
         "iso27001": [
           "A.8.28",
@@ -4178,8 +3952,6 @@
       ],
       "benefit": "A value from a user can no longer change your queries.",
       "references": {
-        "cwe": "CWE-89",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/89.html",
         "owasp": "A03:2021",
         "iso27001": [
           "A.8.28",
@@ -4212,8 +3984,6 @@
       ],
       "benefit": "A value from a user can no longer change your queries.",
       "references": {
-        "cwe": "CWE-89",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/89.html",
         "owasp": "A03:2021",
         "iso27001": [
           "A.8.28",
@@ -4246,8 +4016,6 @@
       ],
       "benefit": "A value from a user can no longer change your queries.",
       "references": {
-        "cwe": "CWE-89",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/89.html",
         "owasp": "A03:2021",
         "iso27001": [
           "A.8.28",
@@ -4280,8 +4048,6 @@
       ],
       "benefit": "No user data can change your SQL queries.",
       "references": {
-        "cwe": "CWE-89",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/89.html",
         "owasp": "A03:2021",
         "iso27001": [
           "A.8.28",
@@ -4314,8 +4080,6 @@
       ],
       "benefit": "A value from a user can no longer change your queries.",
       "references": {
-        "cwe": "CWE-89",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/89.html",
         "owasp": "A03:2021",
         "iso27001": [
           "A.8.28",
@@ -4348,8 +4112,6 @@
       ],
       "benefit": "A value from a user can no longer change your queries.",
       "references": {
-        "cwe": "CWE-89",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/89.html",
         "owasp": "A03:2021",
         "iso27001": [
           "A.8.28",
@@ -4382,8 +4144,6 @@
       ],
       "benefit": "Prevention of SQL injection in Doctrine ORM queries (OWASP A03, CWE-89).",
       "references": {
-        "cwe": "CWE-89",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/89.html",
         "owasp": "A03:2021",
         "iso27001": [
           "A.8.28",
@@ -4416,8 +4176,6 @@
       ],
       "benefit": "Values can no longer change your SQL queries.",
       "references": {
-        "cwe": "CWE-89",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/89.html",
         "owasp": "A03:2021",
         "iso27001": [
           "A.8.28",
@@ -4450,8 +4208,6 @@
       ],
       "benefit": "A value from a user can no longer change your queries.",
       "references": {
-        "cwe": "CWE-89",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/89.html",
         "owasp": "A03:2021",
         "iso27001": [
           "A.8.28",
@@ -4484,8 +4240,6 @@
       ],
       "benefit": "A value from a user can no longer change your queries.",
       "references": {
-        "cwe": "CWE-89",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/89.html",
         "owasp": "A03:2021",
         "iso27001": [
           "A.8.28",
@@ -4518,8 +4272,6 @@
       ],
       "benefit": "A value from a user can no longer change your queries.",
       "references": {
-        "cwe": "CWE-89",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/89.html",
         "owasp": "A03:2021",
         "iso27001": [
           "A.8.28",
@@ -4552,8 +4304,6 @@
       ],
       "benefit": "Values sent by users can never change the SQL query.",
       "references": {
-        "cwe": "CWE-89",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/89.html",
         "owasp": "A03:2021",
         "iso27001": [
           "A.8.28",
@@ -4586,8 +4336,6 @@
       ],
       "benefit": "Values sent by users can never change the SQL query.",
       "references": {
-        "cwe": "CWE-89",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/89.html",
         "owasp": "A03:2021",
         "iso27001": [
           "A.8.28",
@@ -4620,8 +4368,6 @@
       ],
       "benefit": "A value from a user can no longer change your queries.",
       "references": {
-        "cwe": "CWE-89",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/89.html",
         "owasp": "A03:2021",
         "iso27001": [
           "A.8.28",
@@ -4654,8 +4400,6 @@
       ],
       "benefit": "Values sent by visitors can no longer change your SQL queries.",
       "references": {
-        "cwe": "CWE-89",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/89.html",
         "owasp": "A03:2021",
         "iso27001": [
           "A.8.28",
@@ -4688,8 +4432,6 @@
       ],
       "benefit": "A value from a user can no longer change your queries.",
       "references": {
-        "cwe": "CWE-89",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/89.html",
         "owasp": "A03:2021",
         "iso27001": [
           "A.8.28",
@@ -4722,8 +4464,6 @@
       ],
       "benefit": "A value from a user can no longer change your queries.",
       "references": {
-        "cwe": "CWE-89",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/89.html",
         "owasp": "A03:2021",
         "iso27001": [
           "A.8.28",
@@ -4756,8 +4496,6 @@
       ],
       "benefit": "Your program only talks to the real server, and the exchanged data stays private.",
       "references": {
-        "cwe": "CWE-295",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/295.html",
         "owasp": "A07:2021",
         "iso27001": [
           "A.8.24",
@@ -4791,8 +4529,6 @@
       ],
       "benefit": "Nobody on the network can pose as the servers your application connects to.",
       "references": {
-        "cwe": "CWE-295",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/295.html",
         "owasp": "A07:2021",
         "iso27001": [
           "A.8.24",
@@ -4826,8 +4562,6 @@
       ],
       "benefit": "Prevention of SSRF attacks in .NET applications.",
       "references": {
-        "cwe": "CWE-918",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/918.html",
         "owasp": "A10:2021",
         "iso27001": [
           "A.8.28",
@@ -4861,8 +4595,6 @@
       ],
       "benefit": "Prevention of SSRF attacks in Java applications.",
       "references": {
-        "cwe": "CWE-918",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/918.html",
         "owasp": "A10:2021",
         "iso27001": [
           "A.8.28",
@@ -4896,8 +4628,6 @@
       ],
       "benefit": "Prevention of SSRF attacks in Node.js applications.",
       "references": {
-        "cwe": "CWE-918",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/918.html",
         "owasp": "A10:2021",
         "iso27001": [
           "A.8.28",
@@ -4931,8 +4661,6 @@
       ],
       "benefit": "Prevention of SSRF attacks in PHP applications.",
       "references": {
-        "cwe": "CWE-918",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/918.html",
         "owasp": "A10:2021",
         "iso27001": [
           "A.8.28",
@@ -4966,8 +4694,6 @@
       ],
       "benefit": "Your server only calls the addresses you chose.",
       "references": {
-        "cwe": "CWE-918",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/918.html",
         "owasp": "A10:2021",
         "iso27001": [
           "A.8.28",
@@ -5001,8 +4727,6 @@
       ],
       "benefit": "Users can fill in your pages but cannot change the code they run.",
       "references": {
-        "cwe": "CWE-1336",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/1336.html",
         "owasp": "A03:2021"
       }
     },
@@ -5031,8 +4755,6 @@
       ],
       "benefit": "Prevents remote code execution via template engine exploitation.",
       "references": {
-        "cwe": "CWE-1336",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/1336.html",
         "owasp": "A03:2021"
       }
     },
@@ -5059,8 +4781,7 @@
           "type": "verification"
         }
       ],
-      "benefit": "Pages are lighter and each drawing is changed in one place.",
-      "references": {}
+      "benefit": "Pages are lighter and each drawing is changed in one place."
     },
     "svg_scriptable_content": {
       "title": "An SVG image contains code that runs",
@@ -5085,8 +4806,7 @@
           "type": "verification"
         }
       ],
-      "benefit": "Your images can no longer run code.",
-      "references": {}
+      "benefit": "Your images can no longer run code."
     },
     "system_out_java": {
       "title": "Messages are written with System.out or System.err",
@@ -5204,8 +4924,6 @@
       ],
       "benefit": "No unfinished work is forgotten in the code.",
       "references": {
-        "cwe": "CWE-546",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/546.html",
         "iso27001": [
           "A.8.25"
         ]
@@ -5236,8 +4954,6 @@
       ],
       "benefit": "A comparison is true only when the values really are equal.",
       "references": {
-        "cwe": "CWE-843",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/843.html",
         "iso27001": [
           "A.8.28"
         ]
@@ -5268,8 +4984,6 @@
       ],
       "benefit": "The memory used by each request stays small, whatever the size of the table.",
       "references": {
-        "cwe": "CWE-400",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/400.html",
         "iso27001": [
           "A.8.6",
           "A.8.10"
@@ -5301,8 +5015,6 @@
       ],
       "benefit": "Passwords and content travel encrypted.",
       "references": {
-        "cwe": "CWE-319",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/319.html",
         "iso27001": [
           "A.5.14",
           "A.8.24"
@@ -5431,8 +5143,6 @@
       ],
       "benefit": "Protection against arbitrary code execution (CWE-502).",
       "references": {
-        "cwe": "CWE-502",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/502.html",
         "owasp": "A08:2021",
         "iso27001": [
           "A.8.28",
@@ -5466,8 +5176,6 @@
       ],
       "benefit": "Received data can no longer make your server run code.",
       "references": {
-        "cwe": "CWE-502",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/502.html",
         "owasp": "A08:2021",
         "iso27001": [
           "A.8.28",
@@ -5501,8 +5209,6 @@
       ],
       "benefit": "Received data can no longer run code on your server.",
       "references": {
-        "cwe": "CWE-502",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/502.html",
         "owasp": "A08:2021",
         "iso27001": [
           "A.8.28",
@@ -5536,8 +5242,6 @@
       ],
       "benefit": "No data you receive can create objects in your application.",
       "references": {
-        "cwe": "CWE-502",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/502.html",
         "owasp": "A08:2021",
         "iso27001": [
           "A.8.28",
@@ -5571,8 +5275,6 @@
       ],
       "benefit": "Protection against OS command injection (CWE-78).",
       "references": {
-        "cwe": "CWE-20",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/20.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -5604,8 +5306,6 @@
       ],
       "benefit": "Users see a clear message, and the details stay on your server.",
       "references": {
-        "cwe": "CWE-209",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/209.html",
         "owasp": "A05:2021",
         "iso27001": [
           "A.8.28",
@@ -5638,8 +5338,6 @@
       ],
       "benefit": "Users see a clear message, and the details stay on your server.",
       "references": {
-        "cwe": "CWE-209",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/209.html",
         "owasp": "A05:2021",
         "iso27001": [
           "A.8.28",
@@ -5672,8 +5370,6 @@
       ],
       "benefit": "Users never see how your application is built inside.",
       "references": {
-        "cwe": "CWE-209",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/209.html",
         "owasp": "A05:2021",
         "iso27001": [
           "A.8.28",
@@ -5706,8 +5402,6 @@
       ],
       "benefit": "Visitors no longer see the inside of your application.",
       "references": {
-        "cwe": "CWE-209",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/209.html",
         "owasp": "A05:2021",
         "iso27001": [
           "A.8.28",
@@ -5771,8 +5465,6 @@
       ],
       "benefit": "Your fingerprints and stored passwords can no longer be forged.",
       "references": {
-        "cwe": "CWE-327",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/327.html",
         "owasp": "A02:2021",
         "iso27001": [
           "A.8.24",
@@ -5805,8 +5497,6 @@
       ],
       "benefit": "Your fingerprints and encrypted data resist current attacks.",
       "references": {
-        "cwe": "CWE-327",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/327.html",
         "owasp": "A02:2021",
         "iso27001": [
           "A.8.24",
@@ -5839,8 +5529,6 @@
       ],
       "benefit": "Fingerprints can no longer be faked and passwords are much harder to recover.",
       "references": {
-        "cwe": "CWE-327",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/327.html",
         "owasp": "A02:2021",
         "iso27001": [
           "A.8.24",
@@ -5873,8 +5561,6 @@
       ],
       "benefit": "Passwords and signatures protected this way can no longer be found or faked.",
       "references": {
-        "cwe": "CWE-327",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/327.html",
         "owasp": "A02:2021",
         "iso27001": [
           "A.8.24",
@@ -5907,8 +5593,6 @@
       ],
       "benefit": "Your users' passwords resist guessing.",
       "references": {
-        "cwe": "CWE-521",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/521.html",
         "owasp": "A07:2021"
       }
     },
@@ -5937,8 +5621,6 @@
       ],
       "benefit": "Your tokens and codes cannot be guessed.",
       "references": {
-        "cwe": "CWE-330",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/330.html",
         "owasp": "A02:2021",
         "iso27001": [
           "A.8.24",
@@ -5971,8 +5653,6 @@
       ],
       "benefit": "Codes and tokens cannot be guessed.",
       "references": {
-        "cwe": "CWE-330",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/330.html",
         "owasp": "A02:2021",
         "iso27001": [
           "A.8.24",
@@ -6005,8 +5685,6 @@
       ],
       "benefit": "Secret codes and tokens can no longer be guessed.",
       "references": {
-        "cwe": "CWE-330",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/330.html",
         "owasp": "A02:2021",
         "iso27001": [
           "A.8.24",
@@ -6037,11 +5715,7 @@
           "type": "verification"
         }
       ],
-      "benefit": "Messages travel encrypted and cannot be read or changed on the way.",
-      "references": {
-        "cwe": "CWE-319",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/319.html"
-      }
+      "benefit": "Messages travel encrypted and cannot be read or changed on the way."
     },
     "workflow_not_in_codeowners": {
       "title": "The files that publish your application can be changed without control",
@@ -6463,11 +6137,7 @@
           "type": "verification"
         }
       ],
-      "benefit": "A value can no longer change what your XML search returns.",
-      "references": {
-        "cwe": "CWE-643",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/643.html"
-      }
+      "benefit": "A value can no longer change what your XML search returns."
     },
     "xpath_injection_java": {
       "title": "An XPath query is built by joining text with +",
@@ -6492,11 +6162,7 @@
           "type": "verification"
         }
       ],
-      "benefit": "A value from a user can no longer change your XPath searches.",
-      "references": {
-        "cwe": "CWE-643",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/643.html"
-      }
+      "benefit": "A value from a user can no longer change your XPath searches."
     },
     "xpath_injection_php": {
       "title": "An XPath search in an XML document is built by pasting text together",
@@ -6521,11 +6187,7 @@
           "type": "verification"
         }
       ],
-      "benefit": "A value from a user can no longer change your XML searches.",
-      "references": {
-        "cwe": "CWE-643",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/643.html"
-      }
+      "benefit": "A value from a user can no longer change your XML searches."
     },
     "xpath_injection_python": {
       "title": "An XPath query is built by pasting values into its text",
@@ -6550,11 +6212,7 @@
           "type": "verification"
         }
       ],
-      "benefit": "Values are only searched for and can no longer change the query.",
-      "references": {
-        "cwe": "CWE-643",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/643.html"
-      }
+      "benefit": "Values are only searched for and can no longer change the query."
     },
     "xss_angular_bypass": {
       "title": "Angular's protection against injected code is turned off for a value",
@@ -6581,8 +6239,6 @@
       ],
       "benefit": "Angular removes any script hidden in the value before showing it.",
       "references": {
-        "cwe": "CWE-79",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/79.html",
         "owasp": "A03:2021",
         "iso27001": [
           "A.8.28",
@@ -6615,8 +6271,6 @@
       ],
       "benefit": "User data shows as text and can no longer run as a script.",
       "references": {
-        "cwe": "CWE-79",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/79.html",
         "owasp": "A03:2021",
         "iso27001": [
           "A.8.28",
@@ -6649,8 +6303,6 @@
       ],
       "benefit": "Prevention of XSS attacks (OWASP A03, CWE-79).",
       "references": {
-        "cwe": "CWE-79",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/79.html",
         "owasp": "A03:2021",
         "iso27001": [
           "A.8.28",
@@ -6683,8 +6335,6 @@
       ],
       "benefit": "XSS protection, secure rendering.",
       "references": {
-        "cwe": "CWE-79",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/79.html",
         "owasp": "A03:2021",
         "iso27001": [
           "A.8.28",
@@ -6717,8 +6367,6 @@
       ],
       "benefit": "Prevention of XSS attacks (OWASP A03, CWE-79, SCS0029).",
       "references": {
-        "cwe": "CWE-79",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/79.html",
         "owasp": "A03:2021",
         "iso27001": [
           "A.8.28",
@@ -6751,8 +6399,6 @@
       ],
       "benefit": "No script hidden in the content can run in your users' browsers.",
       "references": {
-        "cwe": "CWE-79",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/79.html",
         "owasp": "A03:2021",
         "iso27001": [
           "A.8.28",
@@ -6785,8 +6431,6 @@
       ],
       "benefit": "A text typed by a user can no longer run a script in your visitors' browsers.",
       "references": {
-        "cwe": "CWE-79",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/79.html",
         "owasp": "A03:2021",
         "iso27001": [
           "A.8.28",
@@ -6819,8 +6463,6 @@
       ],
       "benefit": "A text typed by a user can no longer run a script in your visitors' browsers.",
       "references": {
-        "cwe": "CWE-79",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/79.html",
         "owasp": "A03:2021",
         "iso27001": [
           "A.8.28",
@@ -6853,8 +6495,6 @@
       ],
       "benefit": "XML documents sent to your server can no longer make it read its own files.",
       "references": {
-        "cwe": "CWE-611",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/611.html",
         "owasp": "A05:2021",
         "iso27001": [
           "A.8.28",
@@ -6887,8 +6527,6 @@
       ],
       "benefit": "An XML document can no longer read your server's files.",
       "references": {
-        "cwe": "CWE-611",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/611.html",
         "owasp": "A05:2021",
         "iso27001": [
           "A.8.28",
@@ -6921,8 +6559,6 @@
       ],
       "benefit": "A received XML document can no longer read your files.",
       "references": {
-        "cwe": "CWE-611",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/611.html",
         "owasp": "A05:2021",
         "iso27001": [
           "A.8.28",
@@ -7320,8 +6956,6 @@
       ],
       "benefit": "A small XML document can no longer exhaust the server's memory.",
       "references": {
-        "cwe": "CWE-776",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/776.html",
         "owasp": "A05:2021"
       }
     },
@@ -7350,8 +6984,6 @@
       ],
       "benefit": "Your site runs faster and stops showing its technical details.",
       "references": {
-        "cwe": "CWE-11",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/11.html",
         "iso27001": [
           "A.8.9",
           "A.8.31"
@@ -7383,8 +7015,6 @@
       ],
       "benefit": "Visitors only see the pages you choose to publish.",
       "references": {
-        "cwe": "CWE-548",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/548.html",
         "iso27001": [
           "A.8.9",
           "A.8.3"
@@ -7416,8 +7046,6 @@
       ],
       "benefit": "Large uploads can no longer overload the server.",
       "references": {
-        "cwe": "CWE-16",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/16.html",
         "iso27001": [
           "A.8.9"
         ]
@@ -7448,8 +7076,6 @@
       ],
       "benefit": "Only the libraries you chose can run in your application.",
       "references": {
-        "cwe": "CWE-114",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/114.html",
         "iso27001": [
           "A.8.28",
           "A.8.7"
@@ -7481,8 +7107,6 @@
       ],
       "benefit": "Reading the file no longer reveals your secrets.",
       "references": {
-        "cwe": "CWE-312",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/312.html",
         "iso27001": [
           "A.8.12",
           "A.8.24",
@@ -7515,8 +7139,6 @@
       ],
       "benefit": "Only users the server has checked get access.",
       "references": {
-        "cwe": "CWE-807",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/807.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -7548,8 +7170,6 @@
       ],
       "benefit": "Only the part of the site that needs the cookie receives it.",
       "references": {
-        "cwe": "CWE-614",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/614.html",
         "iso27001": [
           "A.8.28",
           "A.8.5"
@@ -7581,8 +7201,6 @@
       ],
       "benefit": "The cookie only travels where it is needed.",
       "references": {
-        "cwe": "CWE-614",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/614.html",
         "iso27001": [
           "A.8.28",
           "A.8.5"
@@ -7614,8 +7232,6 @@
       ],
       "benefit": "Users see a clear message, and the details stay on your server.",
       "references": {
-        "cwe": "CWE-209",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/209.html",
         "iso27001": [
           "A.8.28",
           "A.8.12"
@@ -7647,8 +7263,6 @@
       ],
       "benefit": "A flaw in the application can only reach the data it really needs.",
       "references": {
-        "cwe": "CWE-250",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/250.html",
         "iso27001": [
           "A.8.2",
           "A.8.9",
@@ -7681,8 +7295,6 @@
       ],
       "benefit": "The trust of the whole machine no longer depends on your application.",
       "references": {
-        "cwe": "CWE-327",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/327.html",
         "iso27001": [
           "A.8.24",
           "A.8.28"
@@ -7714,8 +7326,6 @@
       ],
       "benefit": "Encrypted data no longer shows its patterns.",
       "references": {
-        "cwe": "CWE-327",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/327.html",
         "iso27001": [
           "A.8.24",
           "A.8.28"
@@ -7747,8 +7357,6 @@
       ],
       "benefit": "Private data stays on your server.",
       "references": {
-        "cwe": "CWE-359",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/359.html",
         "iso27001": [
           "A.5.34",
           "A.8.12"
@@ -7780,8 +7388,6 @@
       ],
       "benefit": "Secrets no longer leave your server in the responses.",
       "references": {
-        "cwe": "CWE-201",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/201.html",
         "iso27001": [
           "A.8.12",
           "A.5.34"
@@ -7813,8 +7419,6 @@
       ],
       "benefit": "Reading your code no longer gives access to your database.",
       "references": {
-        "cwe": "CWE-259",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/259.html",
         "iso27001": [
           "A.5.17",
           "A.8.28"
@@ -7846,8 +7450,6 @@
       ],
       "benefit": "Reading your code no longer lets anyone decrypt your data.",
       "references": {
-        "cwe": "CWE-321",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/321.html",
         "iso27001": [
           "A.8.24",
           "A.8.28"
@@ -7879,8 +7481,6 @@
       ],
       "benefit": "Each user only reaches their own data.",
       "references": {
-        "cwe": "CWE-639",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/639.html",
         "iso27001": [
           "A.5.15",
           "A.8.3"
@@ -7912,8 +7512,6 @@
       ],
       "benefit": "Values show correctly and cannot add code to your pages.",
       "references": {
-        "cwe": "CWE-838",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/838.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -7945,8 +7543,6 @@
       ],
       "benefit": "Data exchanged with the database stays private and comes from the real server.",
       "references": {
-        "cwe": "CWE-327",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/327.html",
         "iso27001": [
           "A.8.24",
           "A.8.28"
@@ -7978,8 +7574,6 @@
       ],
       "benefit": "Your encrypted data and signatures resist the computing power of today.",
       "references": {
-        "cwe": "CWE-326",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/326.html",
         "iso27001": [
           "A.8.24"
         ]
@@ -8010,8 +7604,6 @@
       ],
       "benefit": "A size that is too large stops with a clear error instead of a broken array.",
       "references": {
-        "cwe": "CWE-190",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/190.html",
         "iso27001": [
           "A.8.28"
         ]
@@ -8042,8 +7634,6 @@
       ],
       "benefit": "The program never reads or writes outside its memory areas.",
       "references": {
-        "cwe": "CWE-119",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/119.html",
         "iso27001": [
           "A.8.28"
         ]
@@ -8074,8 +7664,6 @@
       ],
       "benefit": "Your logs show only real events.",
       "references": {
-        "cwe": "CWE-117",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/117.html",
         "iso27001": [
           "A.8.28",
           "A.8.15"
@@ -8107,8 +7695,6 @@
       ],
       "benefit": "Visitors can only change the fields you allow.",
       "references": {
-        "cwe": "CWE-915",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/915.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -8140,8 +7726,6 @@
       ],
       "benefit": "Only logged-in users with the right role can use your actions.",
       "references": {
-        "cwe": "CWE-285",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/285.html",
         "iso27001": [
           "A.5.15",
           "A.8.3"
@@ -8173,8 +7757,6 @@
       ],
       "benefit": "Visitors see a simple error page and learn nothing about your code.",
       "references": {
-        "cwe": "CWE-12",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/12.html",
         "iso27001": [
           "A.8.9",
           "A.8.28"
@@ -8206,8 +7788,6 @@
       ],
       "benefit": "Other sites can no longer hide your pages inside their own.",
       "references": {
-        "cwe": "CWE-451",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/451.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -8239,8 +7819,6 @@
       ],
       "benefit": "Only XML with the expected shape reaches your code.",
       "references": {
-        "cwe": "CWE-112",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/112.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -8272,8 +7850,6 @@
       ],
       "benefit": "A forgotten session ends quickly on its own.",
       "references": {
-        "cwe": "CWE-614",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/614.html",
         "iso27001": [
           "A.8.28",
           "A.8.5"
@@ -8305,8 +7881,6 @@
       ],
       "benefit": "User data shows as text and can no longer run as a script.",
       "references": {
-        "cwe": "CWE-79",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/79.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -8338,8 +7912,6 @@
       ],
       "benefit": "The user can only search for text, not write the pattern.",
       "references": {
-        "cwe": "CWE-730",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/730.html",
         "iso27001": [
           "A.8.28",
           "A.8.6"
@@ -8371,8 +7943,6 @@
       ],
       "benefit": "Only the types and resources you chose can be loaded.",
       "references": {
-        "cwe": "CWE-99",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/99.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -8404,8 +7974,6 @@
       ],
       "benefit": "Encrypted data can no longer be recovered by watching decryption errors.",
       "references": {
-        "cwe": "CWE-327",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/327.html",
         "iso27001": [
           "A.8.24",
           "A.8.28"
@@ -8437,8 +8005,6 @@
       ],
       "benefit": "A value restored from saved data passes the same checks as any other.",
       "references": {
-        "cwe": "CWE-20",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/20.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -8470,8 +8036,6 @@
       ],
       "benefit": "A session number known before login is useless afterwards.",
       "references": {
-        "cwe": "CWE-384",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/384.html",
         "iso27001": [
           "A.8.5"
         ]
@@ -8502,8 +8066,6 @@
       ],
       "benefit": "A value from a user can no longer change your queries.",
       "references": {
-        "cwe": "CWE-89",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/89.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -8535,8 +8097,6 @@
       ],
       "benefit": "A value from a user can no longer change your database commands.",
       "references": {
-        "cwe": "CWE-89",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/89.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -8568,8 +8128,6 @@
       ],
       "benefit": "No one can make your application run their own code.",
       "references": {
-        "cwe": "CWE-94",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/94.html",
         "owasp": "A03:2021",
         "iso27001": [
           "A.8.28",
@@ -8603,8 +8161,6 @@
       ],
       "benefit": "Reduces attack surface and strengthens application security.",
       "references": {
-        "cwe": "CWE-113",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/113.html",
         "owasp": "A03:2021",
         "iso27001": [
           "A.8.28",
@@ -8637,8 +8193,6 @@
       ],
       "benefit": "Reduces attack surface and strengthens application security.",
       "references": {
-        "cwe": "CWE-502",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/502.html",
         "owasp": "A08:2021",
         "iso27001": [
           "A.8.28",
@@ -8672,8 +8226,6 @@
       ],
       "benefit": "The visitor can only fill in a value, not change the query.",
       "references": {
-        "cwe": "CWE-89",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/89.html",
         "owasp": "A03:2021",
         "iso27001": [
           "A.8.28",
@@ -8706,8 +8258,6 @@
       ],
       "benefit": "The response only carries the headers your code writes.",
       "references": {
-        "cwe": "CWE-113",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/113.html",
         "owasp": "A03:2021",
         "iso27001": [
           "A.8.28",
@@ -8740,8 +8290,6 @@
       ],
       "benefit": "The user can only fill in a value, not change the search itself.",
       "references": {
-        "cwe": "CWE-90",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/90.html",
         "owasp": "A03:2021",
         "iso27001": [
           "A.8.28",
@@ -8774,8 +8322,6 @@
       ],
       "benefit": "Each line of the log matches a real event.",
       "references": {
-        "cwe": "CWE-117",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/117.html",
         "owasp": "A09:2021",
         "iso27001": [
           "A.8.28",
@@ -8808,8 +8354,6 @@
       ],
       "benefit": "Reduces attack surface and strengthens application security.",
       "references": {
-        "cwe": "CWE-943",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/943.html",
         "owasp": "A03:2021",
         "iso27001": [
           "A.8.28",
@@ -8842,8 +8386,6 @@
       ],
       "benefit": "Links to your site can no longer be used to send visitors elsewhere.",
       "references": {
-        "cwe": "CWE-601",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/601.html",
         "owasp": "A01:2021",
         "iso27001": [
           "A.8.28",
@@ -8876,8 +8418,6 @@
       ],
       "benefit": "A visitor can only open the files you planned for.",
       "references": {
-        "cwe": "CWE-22",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/22.html",
         "owasp": "A01:2021",
         "iso27001": [
           "A.8.28",
@@ -8910,8 +8450,6 @@
       ],
       "benefit": "No one can run their own commands on your server.",
       "references": {
-        "cwe": "CWE-78",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/78.html",
         "owasp": "A03:2021",
         "iso27001": [
           "A.8.28",
@@ -8944,8 +8482,6 @@
       ],
       "benefit": "Reduces attack surface and strengthens application security.",
       "references": {
-        "cwe": "CWE-93",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/93.html",
         "owasp": "A03:2021",
         "iso27001": [
           "A.8.28",
@@ -8978,8 +8514,6 @@
       ],
       "benefit": "Your data can no longer be read or changed through a crafted query.",
       "references": {
-        "cwe": "CWE-89",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/89.html",
         "owasp": "A03:2021",
         "iso27001": [
           "A.8.28",
@@ -9012,8 +8546,6 @@
       ],
       "benefit": "Reduces attack surface and strengthens application security.",
       "references": {
-        "cwe": "CWE-918",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/918.html",
         "owasp": "A10:2021",
         "iso27001": [
           "A.8.28",
@@ -9047,8 +8579,6 @@
       ],
       "benefit": "Reduces attack surface and strengthens application security.",
       "references": {
-        "cwe": "CWE-1336",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/1336.html",
         "owasp": "A03:2021",
         "iso27001": [
           "A.8.28",
@@ -9081,8 +8611,6 @@
       ],
       "benefit": "Reduces attack surface and strengthens application security.",
       "references": {
-        "cwe": "CWE-643",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/643.html",
         "owasp": "A03:2021",
         "iso27001": [
           "A.8.28",
@@ -9115,8 +8643,6 @@
       ],
       "benefit": "Your pages no longer run code supplied by a visitor.",
       "references": {
-        "cwe": "CWE-79",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/79.html",
         "owasp": "A03:2021",
         "iso27001": [
           "A.8.28",
@@ -9149,8 +8675,6 @@
       ],
       "benefit": "Reduces attack surface and strengthens application security.",
       "references": {
-        "cwe": "CWE-611",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/611.html",
         "owasp": "A05:2021",
         "iso27001": [
           "A.8.28",
@@ -9183,8 +8707,6 @@
       ],
       "benefit": "One request can no longer use up all the memory of your server.",
       "references": {
-        "cwe": "CWE-770",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/770.html",
         "iso27001": [
           "A.8.6"
         ]
@@ -9215,8 +8737,6 @@
       ],
       "benefit": "Outside text can no longer change how your messages are built.",
       "references": {
-        "cwe": "CWE-134",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/134.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -9248,8 +8768,6 @@
       ],
       "benefit": "Files and memory are released even when an error occurs.",
       "references": {
-        "cwe": "CWE-401",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/401.html",
         "iso27001": [
           "A.8.6",
           "A.8.28"
@@ -9281,8 +8799,6 @@
       ],
       "benefit": "Received data can no longer make your server run code.",
       "references": {
-        "cwe": "CWE-502",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/502.html",
         "iso27001": [
           "A.8.28",
           "A.8.26",
@@ -9315,8 +8831,6 @@
       ],
       "benefit": "The program never touches a released object.",
       "references": {
-        "cwe": "CWE-416",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/416.html",
         "iso27001": [
           "A.8.28"
         ]
@@ -9347,8 +8861,6 @@
       ],
       "benefit": "Visitors can no longer change the structure of your XML data.",
       "references": {
-        "cwe": "CWE-91",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/91.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -9380,8 +8892,6 @@
       ],
       "benefit": "An XML document can no longer read your server's files.",
       "references": {
-        "cwe": "CWE-611",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/611.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -9413,8 +8923,6 @@
       ],
       "benefit": "An archive can no longer write files outside the folder you chose.",
       "references": {
-        "cwe": "CWE-22",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/22.html",
         "iso27001": [
           "A.8.28",
           "A.8.3"
@@ -9446,8 +8954,6 @@
       ],
       "benefit": "Your pages do not run code hidden in an address.",
       "references": {
-        "cwe": "CWE-79",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/79.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -9479,8 +8985,6 @@
       ],
       "benefit": "Your JavaScript uses the browser's variables, not an element of the page.",
       "references": {
-        "cwe": "CWE-79",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/79.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -9512,8 +9016,6 @@
       ],
       "benefit": "The browser can block any script that does not come from your files.",
       "references": {
-        "cwe": "CWE-79",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/79.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -9545,8 +9047,6 @@
       ],
       "benefit": "Your links can no longer be used to run code.",
       "references": {
-        "cwe": "CWE-79",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/79.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -9578,8 +9078,6 @@
       ],
       "benefit": "A calculation that goes past the limit stops with an error instead of giving a wrong value.",
       "references": {
-        "cwe": "CWE-190",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/190.html",
         "iso27001": [
           "A.8.28"
         ]
@@ -9610,8 +9108,6 @@
       ],
       "benefit": "A number sent by a user can no longer break your calculations.",
       "references": {
-        "cwe": "CWE-190",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/190.html",
         "iso27001": [
           "A.8.28"
         ]
@@ -9642,8 +9138,6 @@
       ],
       "benefit": "A wrong setting stops the program clearly instead of corrupting its calculations.",
       "references": {
-        "cwe": "CWE-190",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/190.html",
         "iso27001": [
           "A.8.28"
         ]
@@ -9674,8 +9168,6 @@
       ],
       "benefit": "A single request can no longer fill the server's memory.",
       "references": {
-        "cwe": "CWE-129",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/129.html",
         "iso27001": [
           "A.8.28"
         ]
@@ -9706,8 +9198,6 @@
       ],
       "benefit": "A request can only reach the array positions you allow.",
       "references": {
-        "cwe": "CWE-129",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/129.html",
         "iso27001": [
           "A.8.28"
         ]
@@ -9738,8 +9228,6 @@
       ],
       "benefit": "An error during the check always ends in a refusal, never in open access.",
       "references": {
-        "cwe": "CWE-287",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/287.html",
         "iso27001": [
           "A.8.5",
           "A.8.28"
@@ -9771,8 +9259,6 @@
       ],
       "benefit": "A disguised address can no longer get around your access check.",
       "references": {
-        "cwe": "CWE-863",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/863.html",
         "iso27001": [
           "A.5.15",
           "A.8.3"
@@ -9804,8 +9290,6 @@
       ],
       "benefit": "The secret disappears from memory as soon as it is no longer needed.",
       "references": {
-        "cwe": "CWE-499",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/499.html",
         "iso27001": [
           "A.8.12",
           "A.8.28"
@@ -9837,8 +9321,6 @@
       ],
       "benefit": "The secret never leaves your server.",
       "references": {
-        "cwe": "CWE-312",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/312.html",
         "iso27001": [
           "A.8.12",
           "A.8.24",
@@ -9871,8 +9353,6 @@
       ],
       "benefit": "The new password never appears in the code or its history.",
       "references": {
-        "cwe": "CWE-312",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/312.html",
         "iso27001": [
           "A.8.12",
           "A.8.24",
@@ -9905,8 +9385,6 @@
       ],
       "benefit": "Visitor data can no longer start programs on your server.",
       "references": {
-        "cwe": "CWE-78",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/78.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -9938,8 +9416,6 @@
       ],
       "benefit": "Every loop over an array or list ends normally.",
       "references": {
-        "cwe": "CWE-190",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/190.html",
         "iso27001": [
           "A.8.28"
         ]
@@ -9970,8 +9446,6 @@
       ],
       "benefit": "Only users who really logged in get access.",
       "references": {
-        "cwe": "CWE-807",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/807.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -10003,8 +9477,6 @@
       ],
       "benefit": "The user's input can no longer change which program runs or with which options.",
       "references": {
-        "cwe": "CWE-676",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/676.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -10036,8 +9508,6 @@
       ],
       "benefit": "Visitors no longer learn how your database and application are built.",
       "references": {
-        "cwe": "CWE-209",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/209.html",
         "iso27001": [
           "A.8.28",
           "A.8.12"
@@ -10069,8 +9539,6 @@
       ],
       "benefit": "An attacker who takes over the application only reaches the tables it uses.",
       "references": {
-        "cwe": "CWE-250",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/250.html",
         "iso27001": [
           "A.8.2",
           "A.8.9",
@@ -10103,8 +9571,6 @@
       ],
       "benefit": "Traffic between the application and the database can no longer be read on the network.",
       "references": {
-        "cwe": "CWE-327",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/327.html",
         "iso27001": [
           "A.8.24",
           "A.8.28"
@@ -10136,8 +9602,6 @@
       ],
       "benefit": "Your code always runs the program you chose.",
       "references": {
-        "cwe": "CWE-78",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/78.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -10169,8 +9633,6 @@
       ],
       "benefit": "Your application only runs the programs you chose.",
       "references": {
-        "cwe": "CWE-78",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/78.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -10202,8 +9664,6 @@
       ],
       "benefit": "Each value stays a single argument and cannot add new ones.",
       "references": {
-        "cwe": "CWE-78",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/78.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -10235,8 +9695,6 @@
       ],
       "benefit": "No code sent by a user runs on your server.",
       "references": {
-        "cwe": "CWE-94",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/94.html",
         "iso27001": [
           "A.8.28",
           "A.8.26",
@@ -10269,8 +9727,6 @@
       ],
       "benefit": "The new password never appears in the code or its history.",
       "references": {
-        "cwe": "CWE-798",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/798.html",
         "iso27001": [
           "A.8.28",
           "A.8.24"
@@ -10302,8 +9758,6 @@
       ],
       "benefit": "A visitor can no longer change the structure of your responses.",
       "references": {
-        "cwe": "CWE-113",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/113.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -10335,8 +9789,6 @@
       ],
       "benefit": "Your security checks see the same headers as the proxy in front of them.",
       "references": {
-        "cwe": "CWE-444",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/444.html",
         "iso27001": [
           "A.8.20",
           "A.8.28"
@@ -10368,8 +9820,6 @@
       ],
       "benefit": "A single request can no longer keep your server busy indefinitely.",
       "references": {
-        "cwe": "CWE-835",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/835.html",
         "iso27001": [
           "A.8.6"
         ]
@@ -10400,8 +9850,6 @@
       ],
       "benefit": "Login details can no longer be read on the network.",
       "references": {
-        "cwe": "CWE-522",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/522.html",
         "iso27001": [
           "A.5.17",
           "A.8.5"
@@ -10433,8 +9881,6 @@
       ],
       "benefit": "Validation messages can no longer run code.",
       "references": {
-        "cwe": "CWE-94",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/94.html",
         "iso27001": [
           "A.8.28",
           "A.8.26",
@@ -10467,8 +9913,6 @@
       ],
       "benefit": "The cookie only travels encrypted, over HTTPS.",
       "references": {
-        "cwe": "CWE-614",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/614.html",
         "iso27001": [
           "A.8.28",
           "A.8.5"
@@ -10500,8 +9944,6 @@
       ],
       "benefit": "The mail password can no longer be read on the network.",
       "references": {
-        "cwe": "CWE-297",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/297.html",
         "iso27001": [
           "A.8.24",
           "A.8.20"
@@ -10533,8 +9975,6 @@
       ],
       "benefit": "Directory passwords can no longer be read on the network.",
       "references": {
-        "cwe": "CWE-522",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/522.html",
         "iso27001": [
           "A.5.17",
           "A.8.5"
@@ -10566,8 +10006,6 @@
       ],
       "benefit": "The libraries you download are the ones the repository published.",
       "references": {
-        "cwe": "CWE-829",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/829.html",
         "iso27001": [
           "A.5.21",
           "A.8.30"
@@ -10599,8 +10037,6 @@
       ],
       "benefit": "Your keys resist the computing power available today.",
       "references": {
-        "cwe": "CWE-326",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/326.html",
         "iso27001": [
           "A.8.24"
         ]
@@ -10631,8 +10067,6 @@
       ],
       "benefit": "No formula sent by a user can run code on your server.",
       "references": {
-        "cwe": "CWE-94",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/94.html",
         "iso27001": [
           "A.8.28",
           "A.8.26",
@@ -10665,8 +10099,6 @@
       ],
       "benefit": "Visitor data can no longer change your directory searches.",
       "references": {
-        "cwe": "CWE-90",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/90.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -10698,8 +10130,6 @@
       ],
       "benefit": "Threads can no longer block each other forever.",
       "references": {
-        "cwe": "CWE-833",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/833.html",
         "iso27001": [
           "A.8.28"
         ]
@@ -10730,8 +10160,6 @@
       ],
       "benefit": "A log line can no longer make your server run someone else's code.",
       "references": {
-        "cwe": "CWE-94",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/94.html",
         "iso27001": [
           "A.8.28",
           "A.8.26",
@@ -10764,8 +10192,6 @@
       ],
       "benefit": "Users can only change the fields you allow.",
       "references": {
-        "cwe": "CWE-915",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/915.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -10797,8 +10223,6 @@
       ],
       "benefit": "Only tokens signed with your key are accepted.",
       "references": {
-        "cwe": "CWE-347",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/347.html",
         "iso27001": [
           "A.8.24",
           "A.8.5"
@@ -10830,8 +10254,6 @@
       ],
       "benefit": "Only users with the right permission can run the action.",
       "references": {
-        "cwe": "CWE-862",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/862.html",
         "iso27001": [
           "A.5.15",
           "A.8.3"
@@ -10863,8 +10285,6 @@
       ],
       "benefit": "A request can no longer run code on your server.",
       "references": {
-        "cwe": "CWE-94",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/94.html",
         "iso27001": [
           "A.8.28",
           "A.8.26",
@@ -10897,8 +10317,6 @@
       ],
       "benefit": "The server gives memory back even when a message is malformed.",
       "references": {
-        "cwe": "CWE-401",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/401.html",
         "iso27001": [
           "A.8.6",
           "A.8.28"
@@ -10930,8 +10348,6 @@
       ],
       "benefit": "A request can no longer add headers or content to your responses.",
       "references": {
-        "cwe": "CWE-113",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/113.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -10963,8 +10379,6 @@
       ],
       "benefit": "A user's value can no longer change what your queries look for.",
       "references": {
-        "cwe": "CWE-943",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/943.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -10996,8 +10410,6 @@
       ],
       "benefit": "A number sent by a user can no longer change sign or size without warning.",
       "references": {
-        "cwe": "CWE-681",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/681.html",
         "iso27001": [
           "A.8.28"
         ]
@@ -11028,8 +10440,6 @@
       ],
       "benefit": "A request can no longer run code on your server.",
       "references": {
-        "cwe": "CWE-917",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/917.html",
         "iso27001": [
           "A.8.28",
           "A.8.26",
@@ -11062,8 +10472,6 @@
       ],
       "benefit": "Only files really inside the folder pass the check.",
       "references": {
-        "cwe": "CWE-23",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/23.html",
         "iso27001": [
           "A.8.28",
           "A.8.3"
@@ -11095,8 +10503,6 @@
       ],
       "benefit": "A leak of the database no longer reveals the passwords.",
       "references": {
-        "cwe": "CWE-257",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/257.html",
         "iso27001": [
           "A.5.17",
           "A.8.24"
@@ -11128,8 +10534,6 @@
       ],
       "benefit": "Visitors can reach only the files of the allowed folder.",
       "references": {
-        "cwe": "CWE-22",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/22.html",
         "iso27001": [
           "A.8.28",
           "A.8.3"
@@ -11161,8 +10565,6 @@
       ],
       "benefit": "No text, however crafted, can block your service through this expression.",
       "references": {
-        "cwe": "CWE-730",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/730.html",
         "iso27001": [
           "A.8.28",
           "A.8.6"
@@ -11194,8 +10596,6 @@
       ],
       "benefit": "Your tokens and keys can no longer be guessed from the seed.",
       "references": {
-        "cwe": "CWE-335",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/335.html",
         "iso27001": [
           "A.8.24"
         ]
@@ -11226,8 +10626,6 @@
       ],
       "benefit": "A search sent by a user can no longer block your server.",
       "references": {
-        "cwe": "CWE-730",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/730.html",
         "iso27001": [
           "A.8.28",
           "A.8.6"
@@ -11259,8 +10657,6 @@
       ],
       "benefit": "Encrypted data can no longer be recovered through error messages.",
       "references": {
-        "cwe": "CWE-780",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/780.html",
         "iso27001": [
           "A.8.24"
         ]
@@ -11291,8 +10687,6 @@
       ],
       "benefit": "A session number known before login is useless to an attacker.",
       "references": {
-        "cwe": "CWE-384",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/384.html",
         "iso27001": [
           "A.8.5"
         ]
@@ -11323,8 +10717,6 @@
       ],
       "benefit": "The server only processes data from authenticated clients.",
       "references": {
-        "cwe": "CWE-421",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/421.html",
         "iso27001": [
           "A.8.5",
           "A.8.28"
@@ -11356,8 +10748,6 @@
       ],
       "benefit": "Your configuration and memory are no longer readable from the network.",
       "references": {
-        "cwe": "CWE-215",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/215.html",
         "iso27001": [
           "A.8.9",
           "A.8.28",
@@ -11390,8 +10780,6 @@
       ],
       "benefit": "Visitor data can no longer change your SQL queries.",
       "references": {
-        "cwe": "CWE-89",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/89.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -11423,8 +10811,6 @@
       ],
       "benefit": "Two identical messages no longer give the same encrypted result.",
       "references": {
-        "cwe": "CWE-329",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/329.html",
         "iso27001": [
           "A.8.24"
         ]
@@ -11455,8 +10841,6 @@
       ],
       "benefit": "A value from a user can no longer change your queries.",
       "references": {
-        "cwe": "CWE-89",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/89.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -11488,8 +10872,6 @@
       ],
       "benefit": "Reduces attack surface and strengthens application security.",
       "references": {
-        "cwe": "CWE-269",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/269.html",
         "owasp": "A01:2021",
         "iso27001": [
           "A.8.2",
@@ -11524,8 +10906,6 @@
       ],
       "benefit": "The session only holds values your server has checked.",
       "references": {
-        "cwe": "CWE-501",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/501.html",
         "owasp": "A04:2021",
         "iso27001": [
           "A.8.28",
@@ -11558,8 +10938,6 @@
       ],
       "benefit": "Users can no longer choose which permission is checked.",
       "references": {
-        "cwe": "CWE-807",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/807.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -11591,8 +10969,6 @@
       ],
       "benefit": "Other users of the machine can no longer read or replace your temporary files.",
       "references": {
-        "cwe": "CWE-200",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/200.html",
         "iso27001": [
           "A.8.28",
           "A.8.12"
@@ -11624,8 +11000,6 @@
       ],
       "benefit": "A request can no longer run code through your templates.",
       "references": {
-        "cwe": "CWE-94",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/94.html",
         "iso27001": [
           "A.8.28",
           "A.8.26",
@@ -11658,8 +11032,6 @@
       ],
       "benefit": "Nobody can swap the file between the check and its use.",
       "references": {
-        "cwe": "CWE-367",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/367.html",
         "iso27001": [
           "A.8.28"
         ]
@@ -11690,8 +11062,6 @@
       ],
       "benefit": "The session only holds values your server can trust.",
       "references": {
-        "cwe": "CWE-501",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/501.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -11723,8 +11093,6 @@
       ],
       "benefit": "Only harmless files of the expected type reach your server.",
       "references": {
-        "cwe": "CWE-434",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/434.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -11756,8 +11124,6 @@
       ],
       "benefit": "Users can only reach the pages you chose.",
       "references": {
-        "cwe": "CWE-552",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/552.html",
         "iso27001": [
           "A.8.3",
           "A.8.28"
@@ -11789,8 +11155,6 @@
       ],
       "benefit": "Data sent over the connection can no longer be read or changed on the way.",
       "references": {
-        "cwe": "CWE-319",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/319.html",
         "iso27001": [
           "A.8.24",
           "A.5.14",
@@ -11824,8 +11188,6 @@
       ],
       "benefit": "Your encrypted data stays unreadable to an attacker.",
       "references": {
-        "cwe": "CWE-327",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/327.html",
         "iso27001": [
           "A.8.24",
           "A.8.28"
@@ -11857,8 +11219,6 @@
       ],
       "benefit": "Codes and tokens cannot be guessed.",
       "references": {
-        "cwe": "CWE-330",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/330.html",
         "iso27001": [
           "A.8.24",
           "A.8.28"
@@ -11890,8 +11250,6 @@
       ],
       "benefit": "Other accounts on the machine can no longer change what your program reads.",
       "references": {
-        "cwe": "CWE-732",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/732.html",
         "iso27001": [
           "A.8.9",
           "A.8.12"
@@ -11923,8 +11281,6 @@
       ],
       "benefit": "A value sent by the user can no longer change what the query searches for.",
       "references": {
-        "cwe": "CWE-643",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/643.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -11956,8 +11312,6 @@
       ],
       "benefit": "A stylesheet can no longer run code or read files on your server.",
       "references": {
-        "cwe": "CWE-74",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/74.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -11989,8 +11343,6 @@
       ],
       "benefit": "An archive can only write files inside the folder you chose.",
       "references": {
-        "cwe": "CWE-22",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/22.html",
         "iso27001": [
           "A.8.28",
           "A.8.3"
@@ -12022,8 +11374,6 @@
       ],
       "benefit": "Nobody can find out who has an account on your site.",
       "references": {
-        "cwe": "CWE-204",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/204.html",
         "iso27001": [
           "A.8.5",
           "A.8.28"
@@ -12055,8 +11405,6 @@
       ],
       "benefit": "AngularJS only loads resources from your own servers.",
       "references": {
-        "cwe": "CWE-20",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/20.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -12088,8 +11436,6 @@
       ],
       "benefit": "Reduces attack surface and strengthens application security.",
       "references": {
-        "cwe": "CWE-598",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/598.html",
         "iso27001": [
           "A.8.12",
           "A.5.14"
@@ -12121,8 +11467,6 @@
       ],
       "benefit": "A failed login check always ends with access denied.",
       "references": {
-        "cwe": "CWE-285",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/285.html",
         "iso27001": [
           "A.5.15",
           "A.8.3"
@@ -12154,8 +11498,6 @@
       ],
       "benefit": "Ensures HTML sanitization is reliable and resistant to bypass via malformed or nested tags.",
       "references": {
-        "cwe": "CWE-116",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/116.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -12187,8 +11529,6 @@
       ],
       "benefit": "No hidden code runs in your program.",
       "references": {
-        "cwe": "CWE-506",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/506.html",
         "iso27001": [
           "A.8.7",
           "A.8.28"
@@ -12220,8 +11560,6 @@
       ],
       "benefit": "Every piece of code in your project can be read and checked.",
       "references": {
-        "cwe": "CWE-506",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/506.html",
         "iso27001": [
           "A.8.7",
           "A.8.28"
@@ -12253,8 +11591,6 @@
       ],
       "benefit": "Your encrypted data stays unreadable without the key.",
       "references": {
-        "cwe": "CWE-327",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/327.html",
         "iso27001": [
           "A.8.24",
           "A.8.28"
@@ -12286,8 +11622,6 @@
       ],
       "benefit": "Prevents out-of-bounds reads and the associated memory disclosure or crash when processing attacker-controlled offsets.",
       "references": {
-        "cwe": "CWE-125",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/125.html",
         "iso27001": [
           "A.8.28"
         ]
@@ -12318,8 +11652,6 @@
       ],
       "benefit": "Visitors only get the compressed code, not your original source.",
       "references": {
-        "cwe": "CWE-312",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/312.html",
         "iso27001": [
           "A.8.12",
           "A.8.24",
@@ -12352,8 +11684,6 @@
       ],
       "benefit": "The protection applies whatever capital letters the address uses.",
       "references": {
-        "cwe": "CWE-178",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/178.html",
         "iso27001": [
           "A.8.28",
           "A.8.3"
@@ -12385,8 +11715,6 @@
       ],
       "benefit": "The cookie only travels over encrypted connections.",
       "references": {
-        "cwe": "CWE-614",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/614.html",
         "iso27001": [
           "A.8.28",
           "A.8.5"
@@ -12418,8 +11746,6 @@
       ],
       "benefit": "Reading the logs no longer reveals your secrets.",
       "references": {
-        "cwe": "CWE-312",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/312.html",
         "iso27001": [
           "A.8.12",
           "A.8.24",
@@ -12453,8 +11779,6 @@
       ],
       "benefit": "Reading the stored data no longer reveals your secrets.",
       "references": {
-        "cwe": "CWE-312",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/312.html",
         "iso27001": [
           "A.8.12",
           "A.8.24",
@@ -12487,8 +11811,6 @@
       ],
       "benefit": "The browser only sends requests to the servers you chose.",
       "references": {
-        "cwe": "CWE-918",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/918.html",
         "iso27001": [
           "A.8.28",
           "A.8.26",
@@ -12521,8 +11843,6 @@
       ],
       "benefit": "A visitor cannot give themselves rights by changing the request.",
       "references": {
-        "cwe": "CWE-807",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/807.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -12554,8 +11874,6 @@
       ],
       "benefit": "Only the sites you name can call your server with your users' cookies.",
       "references": {
-        "cwe": "CWE-942",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/942.html",
         "iso27001": [
           "A.8.28",
           "A.8.26",
@@ -12588,8 +11906,6 @@
       ],
       "benefit": "Each organization only sees and changes its own data.",
       "references": {
-        "cwe": "CWE-863",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/863.html",
         "iso27001": [
           "A.5.15",
           "A.8.3"
@@ -12621,8 +11937,6 @@
       ],
       "benefit": "Reduces attack surface and strengthens application security.",
       "references": {
-        "cwe": "CWE-639",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/639.html",
         "iso27001": [
           "A.5.15",
           "A.8.3"
@@ -12654,8 +11968,6 @@
       ],
       "benefit": "No HTML page hidden in an address can run scripts in your site.",
       "references": {
-        "cwe": "CWE-79",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/79.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -12687,8 +11999,6 @@
       ],
       "benefit": "Reading your code no longer gives access to your database.",
       "references": {
-        "cwe": "CWE-798",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/798.html",
         "iso27001": [
           "A.8.28",
           "A.8.24"
@@ -12720,8 +12030,6 @@
       ],
       "benefit": "Exchanges with the database stay private and reach the real server.",
       "references": {
-        "cwe": "CWE-327",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/327.html",
         "iso27001": [
           "A.8.24",
           "A.8.28"
@@ -12753,8 +12061,6 @@
       ],
       "benefit": "Your project only installs your own internal packages.",
       "references": {
-        "cwe": "CWE-427",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/427.html",
         "iso27001": [
           "A.5.21",
           "A.8.30"
@@ -12786,8 +12092,6 @@
       ],
       "benefit": "The check relies on a value the visitor cannot choose.",
       "references": {
-        "cwe": "CWE-807",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/807.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -12819,8 +12123,6 @@
       ],
       "benefit": "The program only talks to the real server.",
       "references": {
-        "cwe": "CWE-295",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/295.html",
         "iso27001": [
           "A.8.24",
           "A.8.20",
@@ -12853,8 +12155,6 @@
       ],
       "benefit": "No text can be run as code by your timers.",
       "references": {
-        "cwe": "CWE-94",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/94.html",
         "iso27001": [
           "A.8.28",
           "A.8.26",
@@ -12887,8 +12187,6 @@
       ],
       "benefit": "Text from visitors stays harmless text in the page.",
       "references": {
-        "cwe": "CWE-116",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/116.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -12920,8 +12218,6 @@
       ],
       "benefit": "No one on the network can slip scripts into your application.",
       "references": {
-        "cwe": "CWE-494",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/494.html",
         "iso27001": [
           "A.8.28",
           "A.8.7"
@@ -12953,8 +12249,6 @@
       ],
       "benefit": "A script in a page cannot reach the files or commands of the computer.",
       "references": {
-        "cwe": "CWE-20",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/20.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -12986,8 +12280,6 @@
       ],
       "benefit": "Each page in the application keeps the normal browser protections.",
       "references": {
-        "cwe": "CWE-20",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/20.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -13019,8 +12311,6 @@
       ],
       "benefit": "Nobody can connect to your services without the password.",
       "references": {
-        "cwe": "CWE-258",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/258.html",
         "iso27001": [
           "A.5.17",
           "A.8.5"
@@ -13052,8 +12342,6 @@
       ],
       "benefit": "No text can become code that runs in your program.",
       "references": {
-        "cwe": "CWE-94",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/94.html",
         "iso27001": [
           "A.8.28",
           "A.8.26",
@@ -13086,8 +12374,6 @@
       ],
       "benefit": "Other websites can no longer act in the name of your visitors.",
       "references": {
-        "cwe": "CWE-352",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/352.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -13119,8 +12405,6 @@
       ],
       "benefit": "No file of your server can leave for an address you did not choose.",
       "references": {
-        "cwe": "CWE-200",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/200.html",
         "iso27001": [
           "A.8.28",
           "A.8.12"
@@ -13152,8 +12436,6 @@
       ],
       "benefit": "No other program can slip a file in between the check and the use.",
       "references": {
-        "cwe": "CWE-367",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/367.html",
         "iso27001": [
           "A.8.28"
         ]
@@ -13184,8 +12466,6 @@
       ],
       "benefit": "A file changed on the other site is refused instead of running in your pages.",
       "references": {
-        "cwe": "CWE-830",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/830.html",
         "iso27001": [
           "A.5.21",
           "A.8.28"
@@ -13217,8 +12497,6 @@
       ],
       "benefit": "The page only runs the exact files you chose.",
       "references": {
-        "cwe": "CWE-830",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/830.html",
         "iso27001": [
           "A.5.21",
           "A.8.28"
@@ -13250,8 +12528,6 @@
       ],
       "benefit": "One request can no longer overload the server or test passwords in bulk.",
       "references": {
-        "cwe": "CWE-770",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/770.html",
         "iso27001": [
           "A.8.6"
         ]
@@ -13282,8 +12558,6 @@
       ],
       "benefit": "All the code of your program can be read and reviewed.",
       "references": {
-        "cwe": "CWE-506",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/506.html",
         "iso27001": [
           "A.8.7",
           "A.8.28"
@@ -13315,8 +12589,6 @@
       ],
       "benefit": "The links in your emails always point to your own site.",
       "references": {
-        "cwe": "CWE-640",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/640.html",
         "iso27001": [
           "A.5.17",
           "A.8.5"
@@ -13348,8 +12620,6 @@
       ],
       "benefit": "Only files identical to the expected ones end up on your disk.",
       "references": {
-        "cwe": "CWE-912",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/912.html",
         "iso27001": [
           "A.8.28"
         ]
@@ -13380,8 +12650,6 @@
       ],
       "benefit": "No package can hide code that starts again with your editor.",
       "references": {
-        "cwe": "CWE-506",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/506.html",
         "owasp": "A06:2021",
         "iso27001": [
           "A.8.7",
@@ -13414,8 +12682,6 @@
       ],
       "benefit": "No text from outside can run as code in your program.",
       "references": {
-        "cwe": "CWE-94",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/94.html",
         "iso27001": [
           "A.8.28",
           "A.8.26",
@@ -13448,8 +12714,6 @@
       ],
       "benefit": "Only the site names you intended pass the check.",
       "references": {
-        "cwe": "CWE-20",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/20.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -13481,8 +12745,6 @@
       ],
       "benefit": "No value can add a script to your page through an attribute.",
       "references": {
-        "cwe": "CWE-79",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/79.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -13514,8 +12776,6 @@
       ],
       "benefit": "No variant of a tag can get past the protection.",
       "references": {
-        "cwe": "CWE-116",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/116.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -13547,8 +12807,6 @@
       ],
       "benefit": "No piece left behind can slip through your cleaning.",
       "references": {
-        "cwe": "CWE-116",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/116.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -13580,8 +12838,6 @@
       ],
       "benefit": "Only web links get through, however they are written.",
       "references": {
-        "cwe": "CWE-20",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/20.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -13613,8 +12869,6 @@
       ],
       "benefit": "Only the servers on your list pass the check.",
       "references": {
-        "cwe": "CWE-20",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/20.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -13646,8 +12900,6 @@
       ],
       "benefit": "The check of a file name or domain ending gives the right answer in every case.",
       "references": {
-        "cwe": "CWE-20",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/20.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -13679,8 +12931,6 @@
       ],
       "benefit": "Text sent by a user stays a simple argument and can never become a command.",
       "references": {
-        "cwe": "CWE-78",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/78.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -13712,8 +12962,6 @@
       ],
       "benefit": "Visitor text can no longer run as code, and your CSP can block unknown scripts.",
       "references": {
-        "cwe": "CWE-79",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/79.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -13745,8 +12993,6 @@
       ],
       "benefit": "Nobody on the network can read or replace what the address points to.",
       "references": {
-        "cwe": "CWE-300",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/300.html",
         "iso27001": [
           "A.8.21",
           "A.5.21"
@@ -13778,8 +13024,6 @@
       ],
       "benefit": "Nobody on the network can swap the file you download.",
       "references": {
-        "cwe": "CWE-829",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/829.html",
         "iso27001": [
           "A.5.21",
           "A.8.30"
@@ -13811,8 +13055,6 @@
       ],
       "benefit": "Nobody can guess your tokens and codes.",
       "references": {
-        "cwe": "CWE-330",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/330.html",
         "iso27001": [
           "A.8.24",
           "A.8.28"
@@ -13844,8 +13086,6 @@
       ],
       "benefit": "No other program can prepare or swap your temporary file.",
       "references": {
-        "cwe": "CWE-377",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/377.html",
         "iso27001": [
           "A.8.28",
           "A.8.3"
@@ -13877,8 +13117,6 @@
       ],
       "benefit": "A stolen password database takes years, not hours, to crack.",
       "references": {
-        "cwe": "CWE-916",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/916.html",
         "iso27001": [
           "A.5.17",
           "A.8.24"
@@ -13910,8 +13148,6 @@
       ],
       "benefit": "No address in your page can run code.",
       "references": {
-        "cwe": "CWE-79",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/79.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -13943,8 +13179,6 @@
       ],
       "benefit": "Only tokens signed by your server are accepted.",
       "references": {
-        "cwe": "CWE-347",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/347.html",
         "iso27001": [
           "A.8.24",
           "A.8.5"
@@ -13976,8 +13210,6 @@
       ],
       "benefit": "No one can forge a login token for your application.",
       "references": {
-        "cwe": "CWE-326",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/326.html",
         "iso27001": [
           "A.8.24"
         ]
@@ -14008,8 +13240,6 @@
       ],
       "benefit": "No request can make the loop run past the limit you set.",
       "references": {
-        "cwe": "CWE-834",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/834.html",
         "iso27001": [
           "A.8.6"
         ]
@@ -14040,8 +13270,6 @@
       ],
       "benefit": "Visitors can only fill in the fields you chose.",
       "references": {
-        "cwe": "CWE-915",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/915.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -14073,8 +13301,6 @@
       ],
       "benefit": "Only logged-in users can start these actions.",
       "references": {
-        "cwe": "CWE-306",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/306.html",
         "iso27001": [
           "A.5.15",
           "A.5.18",
@@ -14107,8 +13333,6 @@
       ],
       "benefit": "A stolen authorization code is useless without the secret of your app.",
       "references": {
-        "cwe": "CWE-345",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/345.html",
         "iso27001": [
           "A.8.5",
           "A.8.28"
@@ -14140,8 +13364,6 @@
       ],
       "benefit": "Nobody can try passwords or codes in bulk on your server.",
       "references": {
-        "cwe": "CWE-770",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/770.html",
         "iso27001": [
           "A.8.6"
         ]
@@ -14172,8 +13394,6 @@
       ],
       "benefit": "Only the exact addresses you allow pass the check.",
       "references": {
-        "cwe": "CWE-20",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/20.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -14205,8 +13425,6 @@
       ],
       "benefit": "No other site can show your pages to trick your visitors.",
       "references": {
-        "cwe": "CWE-451",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/451.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -14238,8 +13456,6 @@
       ],
       "benefit": "The visitor can only send values, not change the query.",
       "references": {
-        "cwe": "CWE-943",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/943.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -14271,8 +13487,6 @@
       ],
       "benefit": "Closes a documented npm supply-chain attack vector and ensures npm registry advisories cover all installed code.",
       "references": {
-        "cwe": "CWE-829",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/829.html",
         "owasp": "A06:2021",
         "iso27001": [
           "A.5.21",
@@ -14305,8 +13519,6 @@
       ],
       "benefit": "Installing your dependencies no longer runs unknown code.",
       "references": {
-        "cwe": "CWE-506",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/506.html",
         "iso27001": [
           "A.8.7",
           "A.8.28"
@@ -14338,8 +13550,6 @@
       ],
       "benefit": "Ensures regex only matches intended characters, preventing filter bypass.",
       "references": {
-        "cwe": "CWE-20",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/20.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -14371,8 +13581,6 @@
       ],
       "benefit": "Reading the code is no longer enough to get your passwords.",
       "references": {
-        "cwe": "CWE-256",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/256.html",
         "iso27001": [
           "A.5.17",
           "A.8.28"
@@ -14404,8 +13612,6 @@
       ],
       "benefit": "Visitors can download only the files meant for them.",
       "references": {
-        "cwe": "CWE-200",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/200.html",
         "iso27001": [
           "A.8.28",
           "A.8.12"
@@ -14437,8 +13643,6 @@
       ],
       "benefit": "A visitor cannot make the model do more than they are allowed to.",
       "references": {
-        "cwe": "CWE-1426",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/1426.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -14470,8 +13674,6 @@
       ],
       "benefit": "No visitor can change how all the objects of your program behave.",
       "references": {
-        "cwe": "CWE-1321",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/1321.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -14503,8 +13705,6 @@
       ],
       "benefit": "User data can only be a value, not change the script.",
       "references": {
-        "cwe": "CWE-943",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/943.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -14536,8 +13736,6 @@
       ],
       "benefit": "No text typed by a user can block your server.",
       "references": {
-        "cwe": "CWE-1333",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/1333.html",
         "iso27001": [
           "A.8.28",
           "A.8.6"
@@ -14569,8 +13767,6 @@
       ],
       "benefit": "The user can only search for text, not write the pattern.",
       "references": {
-        "cwe": "CWE-730",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/730.html",
         "iso27001": [
           "A.8.28",
           "A.8.6"
@@ -14602,8 +13798,6 @@
       ],
       "benefit": "No text typed by a user can block your server.",
       "references": {
-        "cwe": "CWE-400",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/400.html",
         "iso27001": [
           "A.8.6"
         ]
@@ -14634,8 +13828,6 @@
       ],
       "benefit": "A visitor can only set the fields you allowed.",
       "references": {
-        "cwe": "CWE-400",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/400.html",
         "iso27001": [
           "A.8.6"
         ]
@@ -14666,8 +13858,6 @@
       ],
       "benefit": "A visitor can no longer exhaust the server's memory or processor with one number.",
       "references": {
-        "cwe": "CWE-400",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/400.html",
         "iso27001": [
           "A.8.6"
         ]
@@ -14698,8 +13888,6 @@
       ],
       "benefit": "Ensures cross-site cookies are only transmitted over encrypted HTTPS connections.",
       "references": {
-        "cwe": "CWE-1275",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/1275.html",
         "iso27001": [
           "A.8.28",
           "A.8.5"
@@ -14731,8 +13919,6 @@
       ],
       "benefit": "Text stored in the database can no longer run commands on the server.",
       "references": {
-        "cwe": "CWE-78",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/78.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -14764,8 +13950,6 @@
       ],
       "benefit": "Passwords and tokens no longer appear in addresses, histories or logs.",
       "references": {
-        "cwe": "CWE-598",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/598.html",
         "iso27001": [
           "A.8.12",
           "A.5.14"
@@ -14797,8 +13981,6 @@
       ],
       "benefit": "A malformed request gets an error message instead of stopping the server.",
       "references": {
-        "cwe": "CWE-248",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/248.html",
         "iso27001": [
           "A.8.28"
         ]
@@ -14829,8 +14011,6 @@
       ],
       "benefit": "No outside script can take lasting control of your pages.",
       "references": {
-        "cwe": "CWE-349",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/349.html",
         "iso27001": [
           "A.8.28"
         ]
@@ -14861,8 +14041,6 @@
       ],
       "benefit": "An identifier known before login is worthless after it.",
       "references": {
-        "cwe": "CWE-384",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/384.html",
         "iso27001": [
           "A.8.5"
         ]
@@ -14893,8 +14071,6 @@
       ],
       "benefit": "A changed environment variable can no longer add commands to yours.",
       "references": {
-        "cwe": "CWE-78",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/78.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -14926,8 +14102,6 @@
       ],
       "benefit": "Values sent by visitors can no longer change your SQL queries.",
       "references": {
-        "cwe": "CWE-89",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/89.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -14959,8 +14133,6 @@
       ],
       "benefit": "A script saved in your data can no longer run in your visitors' browsers.",
       "references": {
-        "cwe": "CWE-79",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/79.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -14992,8 +14164,6 @@
       ],
       "benefit": "Text written by users is shown as text and cannot run in the browser.",
       "references": {
-        "cwe": "CWE-79",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/79.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -15025,8 +14195,6 @@
       ],
       "benefit": "No one can run their own commands on your server.",
       "references": {
-        "cwe": "CWE-78",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/78.html",
         "owasp": "A03:2021",
         "iso27001": [
           "A.8.28",
@@ -15059,8 +14227,6 @@
       ],
       "benefit": "A visitor can only open the files you planned for.",
       "references": {
-        "cwe": "CWE-22",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/22.html",
         "owasp": "A01:2021",
         "iso27001": [
           "A.8.28",
@@ -15093,8 +14259,6 @@
       ],
       "benefit": "Your data can no longer be read or changed through a crafted query.",
       "references": {
-        "cwe": "CWE-89",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/89.html",
         "owasp": "A03:2021",
         "iso27001": [
           "A.8.28",
@@ -15127,8 +14291,6 @@
       ],
       "benefit": "Your pages no longer run code supplied by a visitor.",
       "references": {
-        "cwe": "CWE-79",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/79.html",
         "owasp": "A03:2021",
         "iso27001": [
           "A.8.28",
@@ -15161,8 +14323,6 @@
       ],
       "benefit": "The text of the request is shown as is and cannot change the template.",
       "references": {
-        "cwe": "CWE-134",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/134.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -15194,8 +14354,6 @@
       ],
       "benefit": "Only the data needed to fix errors leaves for the outside service.",
       "references": {
-        "cwe": "CWE-201",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/201.html",
         "iso27001": [
           "A.8.12",
           "A.5.34"
@@ -15227,8 +14385,6 @@
       ],
       "benefit": "Visitors fill in your templates but can no longer write them.",
       "references": {
-        "cwe": "CWE-73",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/73.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -15260,8 +14416,6 @@
       ],
       "benefit": "A stolen token only opens what its task requires.",
       "references": {
-        "cwe": "CWE-269",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/269.html",
         "iso27001": [
           "A.8.2",
           "A.5.18"
@@ -15293,8 +14447,6 @@
       ],
       "benefit": "A list or an object sent by a visitor can no longer pass your checks.",
       "references": {
-        "cwe": "CWE-843",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/843.html",
         "iso27001": [
           "A.8.28"
         ]
@@ -15325,8 +14477,6 @@
       ],
       "benefit": "The loop always ends, whatever data it receives.",
       "references": {
-        "cwe": "CWE-835",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/835.html",
         "iso27001": [
           "A.8.6"
         ]
@@ -15357,8 +14507,6 @@
       ],
       "benefit": "Only the files you expect reach your server.",
       "references": {
-        "cwe": "CWE-434",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/434.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -15390,8 +14538,6 @@
       ],
       "benefit": "No text sent by a user can run as code in your program.",
       "references": {
-        "cwe": "CWE-94",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/94.html",
         "iso27001": [
           "A.8.28",
           "A.8.26",
@@ -15424,8 +14570,6 @@
       ],
       "benefit": "Visitors can only trigger the actions you chose.",
       "references": {
-        "cwe": "CWE-94",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/94.html",
         "iso27001": [
           "A.8.28",
           "A.8.26",
@@ -15458,8 +14602,6 @@
       ],
       "benefit": "Tags are handled the way the browser sees them, so no script slips through the rewrite.",
       "references": {
-        "cwe": "CWE-79",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/79.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -15491,8 +14633,6 @@
       ],
       "benefit": "Received data can only create objects of the classes you have chosen.",
       "references": {
-        "cwe": "CWE-470",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/470.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -15524,8 +14664,6 @@
       ],
       "benefit": "The program loads only the modules written in the code.",
       "references": {
-        "cwe": "CWE-94",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/94.html",
         "iso27001": [
           "A.8.28",
           "A.8.26",
@@ -15558,8 +14696,6 @@
       ],
       "benefit": "Visitors can no longer reach eval or any other global function.",
       "references": {
-        "cwe": "CWE-754",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/754.html",
         "iso27001": [
           "A.8.28"
         ]
@@ -15590,8 +14726,6 @@
       ],
       "benefit": "Your check sees the same server as the one actually contacted.",
       "references": {
-        "cwe": "CWE-436",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/436.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -15623,8 +14757,6 @@
       ],
       "benefit": "The pattern matches exactly what you meant.",
       "references": {
-        "cwe": "CWE-20",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/20.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -15656,8 +14788,6 @@
       ],
       "benefit": "The check sees exactly the value that the code then uses.",
       "references": {
-        "cwe": "CWE-180",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/180.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -15689,8 +14819,6 @@
       ],
       "benefit": "Text written by users is shown as text and cannot run in the browser.",
       "references": {
-        "cwe": "CWE-79",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/79.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -15722,8 +14850,6 @@
       ],
       "benefit": "Only well-formed messages of a reasonable size reach your code.",
       "references": {
-        "cwe": "CWE-20",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/20.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -15755,8 +14881,6 @@
       ],
       "benefit": "The opened page can no longer touch your page.",
       "references": {
-        "cwe": "CWE-1022",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/1022.html",
         "iso27001": [
           "A.8.28"
         ]
@@ -15787,8 +14911,6 @@
       ],
       "benefit": "Visitors' values are compared as data and can no longer change your XPath queries.",
       "references": {
-        "cwe": "CWE-643",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/643.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -15820,8 +14942,6 @@
       ],
       "benefit": "Visitors no longer see how your server is built inside.",
       "references": {
-        "cwe": "CWE-79",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/79.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -15853,8 +14973,6 @@
       ],
       "benefit": "The value is shown as text and cannot run in the browser.",
       "references": {
-        "cwe": "CWE-79",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/79.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -15886,8 +15004,6 @@
       ],
       "benefit": "A crafted link can no longer run a script in your page.",
       "references": {
-        "cwe": "CWE-79",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/79.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -15919,8 +15035,6 @@
       ],
       "benefit": "Text received from outside is shown as text and never runs as code.",
       "references": {
-        "cwe": "CWE-79",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/79.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -15952,8 +15066,6 @@
       ],
       "benefit": "Your error messages no longer reveal how your application and database are built.",
       "references": {
-        "cwe": "CWE-209",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/209.html",
         "iso27001": [
           "A.8.28",
           "A.8.12"
@@ -15985,8 +15097,6 @@
       ],
       "benefit": "Reading the code no longer gives access to your database.",
       "references": {
-        "cwe": "CWE-798",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/798.html",
         "iso27001": [
           "A.8.28",
           "A.8.24"
@@ -16018,8 +15128,6 @@
       ],
       "benefit": "Each user only reaches their own data.",
       "references": {
-        "cwe": "CWE-639",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/639.html",
         "iso27001": [
           "A.5.15",
           "A.8.3"
@@ -16051,8 +15159,6 @@
       ],
       "benefit": "Only users with the right role can run sensitive actions.",
       "references": {
-        "cwe": "CWE-862",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/862.html",
         "iso27001": [
           "A.5.15",
           "A.8.3"
@@ -16084,8 +15190,6 @@
       ],
       "benefit": "Only your real domain and its subdomains pass the check.",
       "references": {
-        "cwe": "CWE-346",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/346.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -16117,8 +15221,6 @@
       ],
       "benefit": "Nobody can take over an account with an email address they do not own.",
       "references": {
-        "cwe": "CWE-287",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/287.html",
         "iso27001": [
           "A.8.5",
           "A.8.28"
@@ -16150,8 +15252,6 @@
       ],
       "benefit": "Only the person who received the reset email can change the password.",
       "references": {
-        "cwe": "CWE-285",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/285.html",
         "iso27001": [
           "A.5.15",
           "A.8.3"
@@ -16183,8 +15283,6 @@
       ],
       "benefit": "The loop stays fast even when the list grows large.",
       "references": {
-        "cwe": "CWE-407",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/407.html",
         "iso27001": [
           "A.8.6"
         ]
@@ -16215,8 +15313,6 @@
       ],
       "benefit": "Redirects stay on your site and carry no sensitive data.",
       "references": {
-        "cwe": "CWE-201",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/201.html",
         "iso27001": [
           "A.8.12",
           "A.5.34"
@@ -16248,8 +15344,6 @@
       ],
       "benefit": "Your responses contain only the data you chose to share.",
       "references": {
-        "cwe": "CWE-200",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/200.html",
         "owasp": "A01:2021",
         "iso27001": [
           "A.8.28",
@@ -16282,8 +15376,6 @@
       ],
       "benefit": "A value from a user can no longer change your queries.",
       "references": {
-        "cwe": "CWE-89",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/89.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -16315,8 +15407,6 @@
       ],
       "benefit": "No one can run their own commands on your server.",
       "references": {
-        "cwe": "CWE-78",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/78.html",
         "owasp": "A03:2021",
         "iso27001": [
           "A.8.28",
@@ -16349,8 +15439,6 @@
       ],
       "benefit": "Links to your site can no longer be used to send visitors elsewhere.",
       "references": {
-        "cwe": "CWE-601",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/601.html",
         "owasp": "A01:2021",
         "iso27001": [
           "A.8.28",
@@ -16383,8 +15471,6 @@
       ],
       "benefit": "A visitor can only open the files you planned for.",
       "references": {
-        "cwe": "CWE-22",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/22.html",
         "owasp": "A01:2021",
         "iso27001": [
           "A.8.28",
@@ -16417,8 +15503,6 @@
       ],
       "benefit": "Your data can no longer be read or changed through a crafted query.",
       "references": {
-        "cwe": "CWE-89",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/89.html",
         "owasp": "A03:2021",
         "iso27001": [
           "A.8.28",
@@ -16451,8 +15535,6 @@
       ],
       "benefit": "Your pages no longer run code supplied by a visitor.",
       "references": {
-        "cwe": "CWE-79",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/79.html",
         "owasp": "A03:2021",
         "iso27001": [
           "A.8.28",
@@ -16485,8 +15567,6 @@
       ],
       "benefit": "A small compressed file can no longer fill the server's memory.",
       "references": {
-        "cwe": "CWE-400",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/400.html",
         "iso27001": [
           "A.8.6"
         ]
@@ -16517,8 +15597,6 @@
       ],
       "benefit": "Only the files you expect reach your server, and none of them can be run.",
       "references": {
-        "cwe": "CWE-434",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/434.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -16550,8 +15628,6 @@
       ],
       "benefit": "A stolen password database becomes very slow and costly to crack.",
       "references": {
-        "cwe": "CWE-916",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/916.html",
         "iso27001": [
           "A.5.17",
           "A.8.24"
@@ -16583,8 +15659,6 @@
       ],
       "benefit": "Ensures administrative actions are restricted to users who actually hold the required role, not merely any logged-in user.",
       "references": {
-        "cwe": "CWE-862",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/862.html",
         "iso27001": [
           "A.5.15",
           "A.8.3"
@@ -16616,8 +15690,6 @@
       ],
       "benefit": "Reading your code no longer reveals your secrets.",
       "references": {
-        "cwe": "CWE-312",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/312.html",
         "iso27001": [
           "A.8.12",
           "A.8.24",
@@ -16650,8 +15722,6 @@
       ],
       "benefit": "Each user only gets the cached answers computed for them.",
       "references": {
-        "cwe": "CWE-524",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/524.html",
         "iso27001": [
           "A.8.3",
           "A.8.12"
@@ -16683,8 +15753,6 @@
       ],
       "benefit": "No visitor can change the pages the cache serves to others.",
       "references": {
-        "cwe": "CWE-444",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/444.html",
         "iso27001": [
           "A.8.20",
           "A.8.28"
@@ -16716,8 +15784,6 @@
       ],
       "benefit": "Changing the case of a letter no longer gets past the list.",
       "references": {
-        "cwe": "CWE-178",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/178.html",
         "iso27001": [
           "A.8.28",
           "A.8.3"
@@ -16749,8 +15815,6 @@
       ],
       "benefit": "The cookie only ever holds the kind of value you expect.",
       "references": {
-        "cwe": "CWE-20",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/20.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -16782,8 +15846,6 @@
       ],
       "benefit": "Only your own sites can read the API's answers in a visitor's browser.",
       "references": {
-        "cwe": "CWE-346",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/346.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -16815,8 +15877,6 @@
       ],
       "benefit": "Another website can no longer act in the name of your logged-in visitors.",
       "references": {
-        "cwe": "CWE-352",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/352.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -16848,8 +15908,6 @@
       ],
       "benefit": "Reading your code no longer gives access to your database.",
       "references": {
-        "cwe": "CWE-522",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/522.html",
         "iso27001": [
           "A.5.17",
           "A.8.5"
@@ -16881,8 +15939,6 @@
       ],
       "benefit": "Your error messages no longer reveal how your application and database are built.",
       "references": {
-        "cwe": "CWE-209",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/209.html",
         "iso27001": [
           "A.8.28",
           "A.8.12"
@@ -16914,8 +15970,6 @@
       ],
       "benefit": "An attacker who takes over the application only reaches what its own account allows.",
       "references": {
-        "cwe": "CWE-250",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/250.html",
         "iso27001": [
           "A.8.2",
           "A.8.9",
@@ -16948,8 +16002,6 @@
       ],
       "benefit": "Data exchanged with the database stays private and comes from the real server.",
       "references": {
-        "cwe": "CWE-327",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/327.html",
         "iso27001": [
           "A.8.24",
           "A.8.28"
@@ -16981,8 +16033,6 @@
       ],
       "benefit": "User data shows as text and can no longer run as a script.",
       "references": {
-        "cwe": "CWE-79",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/79.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -17014,8 +16064,6 @@
       ],
       "benefit": "Encrypted data no longer shows its patterns, and any change to it is detected.",
       "references": {
-        "cwe": "CWE-327",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/327.html",
         "iso27001": [
           "A.8.24",
           "A.8.28"
@@ -17047,8 +16095,6 @@
       ],
       "benefit": "The visitor can only fill in values to look for, not write the search.",
       "references": {
-        "cwe": "CWE-943",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/943.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -17080,8 +16126,6 @@
       ],
       "benefit": "Two encryptions of the same message no longer look alike.",
       "references": {
-        "cwe": "CWE-329",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/329.html",
         "iso27001": [
           "A.8.24"
         ]
@@ -17112,8 +16156,6 @@
       ],
       "benefit": "No other program can prepare or swap your temporary file.",
       "references": {
-        "cwe": "CWE-377",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/377.html",
         "iso27001": [
           "A.8.28",
           "A.8.3"
@@ -17145,8 +16187,6 @@
       ],
       "benefit": "Only the names you allow, and their real subdomains, get through.",
       "references": {
-        "cwe": "CWE-693",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/693.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -17178,8 +16218,6 @@
       ],
       "benefit": "Reduces attack surface and strengthens application security (CWE-444, OWASP A04).",
       "references": {
-        "cwe": "CWE-444",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/444.html",
         "iso27001": [
           "A.8.20",
           "A.8.28"
@@ -17211,8 +16249,6 @@
       ],
       "benefit": "Only the sites you listed pass the check.",
       "references": {
-        "cwe": "CWE-20",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/20.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -17244,8 +16280,6 @@
       ],
       "benefit": "Encrypted data can only be read with the key.",
       "references": {
-        "cwe": "CWE-327",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/327.html",
         "iso27001": [
           "A.8.24",
           "A.8.28"
@@ -17277,8 +16311,6 @@
       ],
       "benefit": "The cookie only travels over encrypted connections.",
       "references": {
-        "cwe": "CWE-614",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/614.html",
         "iso27001": [
           "A.8.28",
           "A.8.5"
@@ -17310,8 +16342,6 @@
       ],
       "benefit": "Reading the database can no longer run code on your server.",
       "references": {
-        "cwe": "CWE-502",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/502.html",
         "iso27001": [
           "A.8.28",
           "A.8.26",
@@ -17344,8 +16374,6 @@
       ],
       "benefit": "Exchanged data stays private and cannot be changed on the way.",
       "references": {
-        "cwe": "CWE-327",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/327.html",
         "iso27001": [
           "A.8.24",
           "A.8.28"
@@ -17377,8 +16405,6 @@
       ],
       "benefit": "A value from a user is shown as text and can no longer add a script.",
       "references": {
-        "cwe": "CWE-79",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/79.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -17410,8 +16436,6 @@
       ],
       "benefit": "Whatever the model answers, it cannot run commands or change your queries.",
       "references": {
-        "cwe": "CWE-74",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/74.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -17443,8 +16467,6 @@
       ],
       "benefit": "Visitors can only change the fields you chose.",
       "references": {
-        "cwe": "CWE-915",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/915.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -17476,8 +16498,6 @@
       ],
       "benefit": "A stolen or forgotten session soon stops working.",
       "references": {
-        "cwe": "CWE-613",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/613.html",
         "iso27001": [
           "A.8.5"
         ]
@@ -17508,8 +16528,6 @@
       ],
       "benefit": "Reduces attack surface and strengthens application security (CWE-400, OWASP A06).",
       "references": {
-        "cwe": "CWE-400",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/400.html",
         "iso27001": [
           "A.8.6"
         ]
@@ -17540,8 +16558,6 @@
       ],
       "benefit": "User data is only a value to look for and can no longer change the query.",
       "references": {
-        "cwe": "CWE-943",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/943.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -17573,8 +16589,6 @@
       ],
       "benefit": "No user data can turn into a command on your server.",
       "references": {
-        "cwe": "CWE-78",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/78.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -17606,8 +16620,6 @@
       ],
       "benefit": "Only active accounts can log in.",
       "references": {
-        "cwe": "CWE-285",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/285.html",
         "iso27001": [
           "A.5.15",
           "A.8.3"
@@ -17639,8 +16651,6 @@
       ],
       "benefit": "Your program only talks to the real server.",
       "references": {
-        "cwe": "CWE-295",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/295.html",
         "iso27001": [
           "A.8.24",
           "A.8.20",
@@ -17673,8 +16683,6 @@
       ],
       "benefit": "Reduces attack surface and strengthens application security.",
       "references": {
-        "cwe": "CWE-755",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/755.html",
         "iso27001": [
           "A.8.28"
         ]
@@ -17705,8 +16713,6 @@
       ],
       "benefit": "Your server only reaches the pages you intended.",
       "references": {
-        "cwe": "CWE-918",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/918.html",
         "iso27001": [
           "A.8.28",
           "A.8.26",
@@ -17739,8 +16745,6 @@
       ],
       "benefit": "A stolen database no longer reveals the passwords of your users.",
       "references": {
-        "cwe": "CWE-257",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/257.html",
         "iso27001": [
           "A.5.17",
           "A.8.24"
@@ -17772,8 +16776,6 @@
       ],
       "benefit": "Users can only reach the files of the folder you allow.",
       "references": {
-        "cwe": "CWE-22",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/22.html",
         "iso27001": [
           "A.8.28",
           "A.8.3"
@@ -17805,8 +16807,6 @@
       ],
       "benefit": "Other accounts on the machine can no longer read or change this file.",
       "references": {
-        "cwe": "CWE-732",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/732.html",
         "iso27001": [
           "A.8.9",
           "A.8.12"
@@ -17838,8 +16838,6 @@
       ],
       "benefit": "Personal data no longer ends up in logs and browser histories.",
       "references": {
-        "cwe": "CWE-598",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/598.html",
         "iso27001": [
           "A.8.12",
           "A.5.14"
@@ -17871,8 +16869,6 @@
       ],
       "benefit": "Only the people you allow can perform this action.",
       "references": {
-        "cwe": "CWE-863",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/863.html",
         "owasp": "A01:2021",
         "iso27001": [
           "A.5.15",
@@ -17905,8 +16901,6 @@
       ],
       "benefit": "Requests sent at the same time can no longer spend the same money twice.",
       "references": {
-        "cwe": "CWE-362",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/362.html",
         "iso27001": [
           "A.8.28"
         ]
@@ -17937,8 +16931,6 @@
       ],
       "benefit": "User data can only be a value, not change the script.",
       "references": {
-        "cwe": "CWE-943",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/943.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -17970,8 +16962,6 @@
       ],
       "benefit": "No text can make the check last long enough to block the program.",
       "references": {
-        "cwe": "CWE-400",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/400.html",
         "iso27001": [
           "A.8.6"
         ]
@@ -18002,8 +16992,6 @@
       ],
       "benefit": "A forgotten setting blocks the webhook instead of opening it to everyone.",
       "references": {
-        "cwe": "CWE-347",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/347.html",
         "iso27001": [
           "A.8.24",
           "A.8.5"
@@ -18035,8 +17023,6 @@
       ],
       "benefit": "A value from a user can no longer change your queries.",
       "references": {
-        "cwe": "CWE-89",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/89.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -18068,8 +17054,6 @@
       ],
       "benefit": "The visitor can only choose among your columns, not write SQL.",
       "references": {
-        "cwe": "CWE-89",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/89.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -18101,8 +17085,6 @@
       ],
       "benefit": "Your program only talks to the real server, and the exchanged data stays private.",
       "references": {
-        "cwe": "CWE-295",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/295.html",
         "iso27001": [
           "A.8.24",
           "A.8.20",
@@ -18135,8 +17117,6 @@
       ],
       "benefit": "Your server only contacts the sites you chose.",
       "references": {
-        "cwe": "CWE-918",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/918.html",
         "owasp": "A10:2021",
         "iso27001": [
           "A.8.28",
@@ -18170,8 +17150,6 @@
       ],
       "benefit": "The conversion tool only loads pages you allowed.",
       "references": {
-        "cwe": "CWE-918",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/918.html",
         "iso27001": [
           "A.8.28",
           "A.8.26",
@@ -18204,8 +17182,6 @@
       ],
       "benefit": "Files from an archive can only land in the folder you chose.",
       "references": {
-        "cwe": "CWE-22",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/22.html",
         "iso27001": [
           "A.8.28",
           "A.8.3"
@@ -18237,8 +17213,6 @@
       ],
       "benefit": "A small file can no longer use up the memory of the program.",
       "references": {
-        "cwe": "CWE-789",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/789.html",
         "iso27001": [
           "A.8.6"
         ]
@@ -18269,8 +17243,6 @@
       ],
       "benefit": "A damaged or crafted file can no longer freeze your program.",
       "references": {
-        "cwe": "CWE-835",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/835.html",
         "iso27001": [
           "A.8.6"
         ]
@@ -18301,8 +17273,6 @@
       ],
       "benefit": "No value can add a command of its own.",
       "references": {
-        "cwe": "CWE-78",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/78.html",
         "iso27001": [
           "A.8.28",
           "A.8.26"
@@ -18334,8 +17304,6 @@
       ],
       "benefit": "A stolen password database takes years, not hours, to crack.",
       "references": {
-        "cwe": "CWE-916",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/916.html",
         "iso27001": [
           "A.5.17",
           "A.8.24"
@@ -18367,8 +17335,6 @@
       ],
       "benefit": "Reduces attack surface and strengthens application security (CWE-330, OWASP A02).",
       "references": {
-        "cwe": "CWE-330",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/330.html",
         "iso27001": [
           "A.8.24",
           "A.8.28"
@@ -18400,8 +17366,6 @@
       ],
       "benefit": "A crafted archive can no longer fill your server.",
       "references": {
-        "cwe": "CWE-400",
-        "cwe_url": "https://cwe.mitre.org/data/definitions/400.html",
         "iso27001": [
           "A.8.6"
         ]

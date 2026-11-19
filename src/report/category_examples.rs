@@ -88,12 +88,18 @@ pub fn render_category_examples_html(
             String::new()
         };
         let fix_after = rule.get("fix_after").and_then(|v| v.as_str()).unwrap_or("");
+        // A whole-file finding shows what was measured, not the file's
+        // first line, which is not the detected problem (ticket #214).
+        let detected = match &finding.file_scope {
+            Some(scope) => crate::report::text::file_scope_sentence(scope, report_locale),
+            None => finding.code.clone(),
+        };
 
         blocks.push_str(&format!(
             r#"
             <div class="category-example">
                 <h4>{icon} {} — {}</h4>
-                <p class="category-example-meta">{} — {}:{}</p>
+                <p class="category-example-meta">{} — {}</p>
                 <div class="fix-before"><strong>❌ {detected_label}</strong>
                 <pre><code>{}</code></pre></div>
                 {bridge_html}
@@ -104,9 +110,11 @@ pub fn render_category_examples_html(
             escape(&cat_title),
             escape(&rule_name),
             occurrences_tpl.replace("{count}", &count.to_string()),
-            escape(&finding.file),
-            finding.line,
-            escape(&finding.code),
+            escape(&crate::report::text::finding_location(
+                finding,
+                report_locale
+            )),
+            escape(&detected),
             escape(fix_after),
         ));
     }
@@ -163,6 +171,7 @@ mod tests {
             benefit: String::new(),
             committer: None,
             rule_source: "json_builtin".to_string(),
+            file_scope: None,
         }
     }
 
@@ -247,5 +256,30 @@ mod tests {
         let out = render_category_examples_html(&findings, &catalog, &en);
         assert!(!out.contains("<script>evil()</script>"));
         assert!(out.contains("&lt;script&gt;evil()&lt;/script&gt;"));
+    }
+
+    /// Ticket #214: the example of a whole-file rule names the file and
+    /// shows what was measured, not `file:1` and the file's first line.
+    #[test]
+    fn test_whole_file_example_shows_the_measure() {
+        let en = load_report_locale("en");
+        let mut catalog = BTreeMap::new();
+        catalog.insert(
+            RuleId::new("python", "file_too_long"),
+            json!({"fix_before": "# 800 lines", "fix_after": "# split"}),
+        );
+        let mut f = finding("ARCH", "file_too_long", "app/big.py", 1, "import os");
+        f.file_scope = Some(crate::scan::engine::FileScope {
+            line_count: 812,
+            min_lines: Some(500),
+        });
+        let out = render_category_examples_html(&[f], &catalog, &en);
+        assert!(out.contains("app/big.py (whole file)"), "{out}");
+        assert!(!out.contains("app/big.py:1"), "{out}");
+        assert!(
+            out.contains("This file has 812 lines; the rule applies from 500 lines."),
+            "{out}"
+        );
+        assert!(!out.contains("import os"), "{out}");
     }
 }

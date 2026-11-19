@@ -86,6 +86,14 @@ pub struct ReportFinding {
     /// (the client's own rules, custom rules folder), "advisory_db"
     /// (vulnerable dependency).
     pub rule_source: String,
+    /// `Some` when the finding is about the whole file, not one of its
+    /// lines: `line` and `code` are then only conventions (line 1, first
+    /// non-blank line), kept for the suppression and comparison identity,
+    /// and every output shows the file instead (ticket #214). Absent from
+    /// a history file written before this field (`serde(default)`) and not
+    /// written for a line finding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_scope: Option<crate::scan::engine::FileScope>,
 }
 
 impl ReportFinding {
@@ -251,7 +259,12 @@ pub struct SarifLocation {
 pub struct SarifPhysicalLocation {
     #[serde(rename = "artifactLocation")]
     pub artifact_location: SarifArtifactLocation,
-    pub region: SarifRegion,
+    /// `None` for a finding about the whole file: SARIF 2.1.0
+    /// reads a physical location without a region as the whole artifact,
+    /// where `startLine: 1` would point a SARIF viewer at line 1
+    /// (ticket #214).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub region: Option<SarifRegion>,
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -297,9 +310,24 @@ fn physical_location(file: &str, line: usize) -> SarifPhysicalLocation {
         artifact_location: SarifArtifactLocation {
             uri: normalize_uri(file),
         },
-        region: SarifRegion {
+        region: Some(SarifRegion {
             start_line: line.max(1),
-        },
+        }),
+    }
+}
+
+/// The location of a finding: its line, or the whole file for a
+/// whole-file finding (ticket #214).
+fn finding_location(f: &ReportFinding) -> SarifPhysicalLocation {
+    if f.file_scope.is_some() {
+        SarifPhysicalLocation {
+            artifact_location: SarifArtifactLocation {
+                uri: normalize_uri(&f.file),
+            },
+            region: None,
+        }
+    } else {
+        physical_location(&f.file, f.line)
     }
 }
 
@@ -400,7 +428,7 @@ pub fn build_sarif_report(
                 level: severity_to_sarif_level(&f.severity),
                 message: SarifText { text: message_text },
                 locations: vec![SarifLocation {
-                    physical_location: physical_location(&f.file, f.line),
+                    physical_location: finding_location(f),
                 }],
                 fixes: f.solution.as_ref().map(|s| {
                     vec![SarifFix {
@@ -459,6 +487,7 @@ mod tests {
             benefit: String::new(),
             committer: None,
             rule_source: "json_builtin".to_string(),
+            file_scope: None,
         }
     }
 
@@ -631,8 +660,31 @@ mod tests {
             report.runs[0].results[0].locations[0]
                 .physical_location
                 .region
+                .as_ref()
+                .expect("a line finding has a region")
                 .start_line,
             1
+        );
+    }
+
+    /// Ticket #214: a whole-file finding is located on the file, with no
+    /// region, so a SARIF viewer does not point at line 1.
+    #[test]
+    fn test_whole_file_finding_has_no_region() {
+        let mut f = finding("file_too_long", "app/big.py", 1);
+        f.file_scope = Some(crate::scan::engine::FileScope {
+            line_count: 1363,
+            min_lines: Some(500),
+        });
+        let report = build_sarif_report(&[f], "t", "1.0", "https://x");
+        let location = &report.runs[0].results[0].locations[0].physical_location;
+        assert_eq!(location.artifact_location.uri, "app/big.py");
+        assert!(location.region.is_none());
+        let json = serde_json::to_value(&report).unwrap();
+        assert!(
+            json["runs"][0]["results"][0]["locations"][0]["physicalLocation"]
+                .get("region")
+                .is_none()
         );
     }
 

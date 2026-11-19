@@ -302,6 +302,7 @@ pub fn execute_regex_rule(rule: &CompiledRegexRule, all_lines: &[(usize, String)
             code: line_text.clone(),
             column: *column,
             confidence: rule.confidence,
+            file_scope: None,
         });
     }
     findings

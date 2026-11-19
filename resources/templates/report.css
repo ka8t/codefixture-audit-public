@@ -733,6 +733,7 @@ a.playbook-ref:hover { background: var(--primary-light); color: #fff; }
 .file-check-explain code { font-size: 12px; background: var(--gray-100); padding: 1px 5px; border-radius: 3px; }
 @media print { .file-check-explain { display: block; } .file-check-explain summary { display: none; } }
 .finding-code-label { font-size: 0.75rem; font-weight: 600; color: var(--gray-600); margin-bottom: 0.2rem; }
+.finding-file-scope-text { margin: 0; font-size: 0.85rem; color: var(--gray-800); }
 .fix-proposal { margin: 0.4rem 0; padding: 0.5rem 0.75rem; background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 6px; }
 .fix-proposal-title { font-size: 0.8rem; font-weight: 600; color: #166534; margin-bottom: 0.2rem; }
 .fix-proposal pre { margin: 0; white-space: pre-wrap; word-break: break-word; }
