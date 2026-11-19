@@ -106,9 +106,9 @@
             </div>
             {{COMPLIANCE_SCORE_BAR_END}}
             <div class="health-charts-grid">
-                <div class="chart-card"><div class="chart-container" style="height:250px"><canvas id="healthSeverityChart"></canvas></div></div>
+                {{health_table_html}}
                 {{COMPLIANCE_SCORE_GAUGE_START}}
-                <div class="chart-card"><div class="chart-container" style="height:250px"><canvas id="complianceCoverageBarChart"></canvas></div></div>
+                {{compliance_table_html}}
                 {{COMPLIANCE_SCORE_GAUGE_END}}
             </div>
             {{health_explanation_html}}

@@ -280,6 +280,64 @@ pub fn build_exec_recommendations(
         .collect()
 }
 
+/// Table « What lowers the score » shown under the security score, in
+/// place of the Python bar chart of penalty points (deliberate deviation,
+/// tester feedback of 2026-11-19).
+///
+/// The chart mixed two units: its bars were penalty points while their
+/// labels read « 40 × 5 », and readers could not tell what it showed nor
+/// why its total differed from the other charts. The table gives, per
+/// severity, the findings that count and the penalty they add, then the
+/// totals and the score's own computation with the project's numbers, so
+/// the percentage can be checked by hand. INFO findings weigh nothing and
+/// are left out.
+pub fn render_health_table(
+    data: &crate::report::data::ReportData<'_>,
+    total_lines_code: usize,
+    report_locale: &Value,
+) -> String {
+    let rows: String = ["CRITICAL", "HIGH", "MEDIUM", "LOW"]
+        .iter()
+        .map(|sev| {
+            let detail = &data.health_severity_detail[sev];
+            let each = t(report_locale, "health_table_each")
+                .replace("{weight}", &detail.penalty_each.to_string());
+            format!(
+                r#"<tr><td><span class="severity-dot {cls}"></span>{label}</td><td class="num">{count}</td><td class="num">{penalty} <span class="health-table-each">({each})</span></td></tr>"#,
+                cls = sev.to_lowercase(),
+                label = t(report_locale, &format!("severity.{}", sev.to_lowercase())),
+                count = detail.count,
+                penalty = detail.penalty_total,
+            )
+        })
+        .collect();
+    let counted: usize = data.health_severity_detail.values().map(|d| d.count).sum();
+    let loc_factor = (total_lines_code as f64 / 1000.0).max(1.0);
+    // Decimal comma everywhere but in English, as the report's own texts.
+    let mut factor = format!("{loc_factor:.1}");
+    if t(report_locale, "locale_code") != "en" {
+        factor = factor.replace('.', ",");
+    }
+    let computation = t(report_locale, "health_table_computation")
+        .replace("{lines}", &total_lines_code.to_string())
+        .replace("{penalty}", &data.total_penalty.to_string())
+        .replace("{factor}", &factor)
+        .replace("{score}", &data.health_score.to_string());
+    let scope = t(report_locale, "health_table_scope")
+        .replace("{count}", &counted.to_string())
+        .replace("{total}", &data.total_findings.to_string());
+    format!(
+        r#"<div class="chart-card health-table-card"><h4 class="health-table-title">{title}</h4><table class="health-calc-table"><thead><tr><th>{h_sev}</th><th class="num">{h_count}</th><th class="num">{h_penalty}</th></tr></thead><tbody>{rows}</tbody><tfoot><tr class="health-calc-total"><td>{h_total}</td><td class="num">{counted}</td><td class="num">{penalty}</td></tr></tfoot></table><p class="health-table-note">{computation}</p><p class="health-table-note">{scope}</p></div>"#,
+        title = t(report_locale, "health_table_title")
+            .replace("{score}", &data.health_score.to_string()),
+        h_sev = t(report_locale, "health_table_severity"),
+        h_count = t(report_locale, "health_table_findings"),
+        h_penalty = t(report_locale, "health_table_penalty"),
+        h_total = t(report_locale, "health_table_total"),
+        penalty = data.total_penalty,
+    )
+}
+
 /// Threat context block (ZeroDayClock) for the executive summary —
 /// port of `_build_threat_context`.
 ///
@@ -589,6 +647,36 @@ mod tests {
         let note = html.find("exec-rec-note").expect("health note");
         assert!(html.find("exec-rec-priority p1").unwrap() < note, "{html}");
         assert_eq!(html.matches("exec-rec-priority").count(), 1, "{html}");
+    }
+
+    /// The score table gives per severity the findings counted and their
+    /// penalty, the totals, and the score's computation with the
+    /// project's numbers; INFO is left out and a finding outside the score
+    /// is only counted in the total of all findings.
+    #[test]
+    fn test_render_health_table_shows_counts_penalties_and_computation() {
+        let fr = load_report_locale("fr");
+        let mut ux = finding("r3", "Label", "HIGH", 90);
+        ux.category = "UX".to_string();
+        let findings = vec![
+            finding("r1", "SQL", "HIGH", 90),
+            finding("r1", "SQL", "HIGH", 90),
+            finding("r2", "Log", "MEDIUM", 90),
+            ux,
+        ];
+        let data = crate::report::data::compute_report_data(&findings, 2500);
+        let html = render_health_table(&data, 2500, &fr);
+        assert!(html.contains("Ce qui fait baisser le score"), "{html}");
+        // HIGH: 2 counted, 10 points; total 3 findings, 12 points.
+        assert!(html.contains(r#"<td class="num">2</td><td class="num">10 "#), "{html}");
+        assert!(html.contains(r#"<td class="num">3</td><td class="num">12</td>"#), "{html}");
+        // 100 ÷ (1 + 12 ÷ (20 × 2,5)) = 80.
+        assert!(
+            html.contains("Pour 2500 lignes de code : 100 ÷ (1 + 12 ÷ (20 × 2,5)) = 80 %."),
+            "{html}"
+        );
+        assert!(html.contains("3 des 4 problèmes comptent"), "{html}");
+        assert!(!html.contains("INFO"), "{html}");
     }
 
     #[test]

@@ -44,19 +44,29 @@ const HARDCODED_SECRET_CWES: [&str; 3] = ["CWE-798", "CWE-259", "CWE-321"];
 /// poisoned artifact or cache, excessive permissions).
 const SECURITY_SCORE_CATEGORIES: [&str; 2] = ["SECURITY", "CICD"];
 
+/// Rule key of a dependency with a published vulnerability: the only
+/// dependency finding that counts for the security score (ticket #231).
+/// `unpinned_dependency`, a version left open, is a future risk rather
+/// than a known flaw, and stays out.
+const VULNERABLE_DEPENDENCY_RULE: &str = "vulnerable_dependency";
+
 /// Whether a finding counts for the security score (health score).
 ///
 /// Deliberate deviation from Python (ADR-0054), which counts the SECURITY
 /// category only:
 /// - the CI/CD category counts too (ticket #228);
 /// - a secret written in the code counts whatever its category,
-///   recognized by its CWE (`HARDCODED_SECRET_CWES`).
+///   recognized by its CWE (`HARDCODED_SECRET_CWES`);
+/// - a dependency with a published vulnerability counts (ticket #231): on
+///   my-ia (2026-11-19) the 3 CRITICAL findings were vulnerable
+///   dependencies, and the score table showed no critical finding.
 ///
 /// On a tester's project (2026-11-19) the 17 CRITICAL findings of
 /// `hardcoded_secret_cicd`, filed under CI/CD, were the most severe of
 /// the report, yet the score and its chart showed no critical finding.
 pub fn counts_for_security_score(f: &ReportFinding) -> bool {
     SECURITY_SCORE_CATEGORIES.contains(&f.category.as_str())
+        || f.rule_key == VULNERABLE_DEPENDENCY_RULE
         || f
             .cwe
             .iter()
@@ -405,9 +415,10 @@ mod tests {
         assert_eq!(hs.penalty_total, 10);
     }
 
-    /// The security score counts the SECURITY and CI/CD categories, and a
-    /// secret written in the code whatever its category; the other
-    /// categories stay out (ADR-0054).
+    /// The security score counts the SECURITY and CI/CD categories, a
+    /// secret written in the code whatever its category, and a vulnerable
+    /// dependency; the other categories and an unpinned dependency stay out
+    /// (ADR-0054).
     #[test]
     fn test_security_score_counts_security_cicd_and_hardcoded_secrets() {
         let mut secret = finding("MAINTENANCE", "CRITICAL", "app.py", 1);
@@ -418,12 +429,22 @@ mod tests {
             finding("SECURITY", "MEDIUM", "a.py", 3),
             finding("UX", "HIGH", "page.html", 4),
             finding("ARCH", "LOW", "b.py", 5),
+            {
+                let mut vulnerable = finding("DEPENDENCIES", "CRITICAL", "requirements.txt", 6);
+                vulnerable.rule_key = "vulnerable_dependency".to_string();
+                vulnerable
+            },
+            {
+                let mut unpinned = finding("DEPENDENCIES", "HIGH", "requirements.txt", 7);
+                unpinned.rule_key = "unpinned_dependency".to_string();
+                unpinned
+            },
         ];
         let data = compute_report_data(&findings, 1000);
-        assert_eq!(data.health_penalty_detail["CRITICAL"], 1);
+        assert_eq!(data.health_penalty_detail["CRITICAL"], 2);
         assert_eq!(data.health_penalty_detail["HIGH"], 1);
         assert_eq!(data.health_penalty_detail["MEDIUM"], 1);
         assert_eq!(data.health_penalty_detail["LOW"], 0);
-        assert_eq!(data.total_penalty, 10 + 5 + 2);
+        assert_eq!(data.total_penalty, 10 + 10 + 5 + 2);
     }
 }

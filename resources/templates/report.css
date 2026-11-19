@@ -173,6 +173,16 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .health-calc-table td { padding: 0.4rem 0.6rem; border-bottom: 1px solid var(--gray-200); }
 .health-calc-table .severity-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 0.4rem; vertical-align: middle; }
 .health-calc-total td { border-top: 2px solid var(--gray-400); border-bottom: none; padding-top: 0.6rem; font-size: 0.9rem; }
+.health-table-card { padding: 1rem 1.2rem; color: var(--gray-800); }
+.health-table-title { font-size: 0.95rem; color: var(--gray-800); margin: 0 0 0.6rem; }
+.health-calc-table .num { text-align: right; font-variant-numeric: tabular-nums; }
+.health-calc-table th.num { text-align: right; }
+.health-table-each { color: var(--gray-500); font-size: 0.75rem; }
+.health-table-note { font-size: 0.8rem; color: var(--gray-600); margin: 0.6rem 0 0; line-height: 1.4; }
+.health-calc-table .severity-dot.critical { background: #7f1d1d; }
+.health-calc-table .severity-dot.high { background: #dc2626; }
+.health-calc-table .severity-dot.medium { background: #f59e0b; }
+.health-calc-table .severity-dot.low { background: #3b82f6; }
 @media print { .health-section { break-inside: avoid; } .health-charts-grid { break-inside: avoid; } }
 
 /* Sections */

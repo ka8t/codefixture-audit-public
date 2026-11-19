@@ -14,6 +14,80 @@ use crate::report::compliance::{
 };
 use crate::report::text::{escape, linkify_acronyms};
 
+/// Table « What the compliance score measures » shown beside the score
+/// table, in place of the Python bar chart of coverage per standard
+/// (deliberate deviation, 2026-11-19).
+///
+/// The chart had no title, and nothing said that its percentages, and the
+/// compliance score above them, measure how many requirements of each
+/// standard the scan checks, not whether the project meets them. The table
+/// gives per standard the requirements checked out of the total, those
+/// with findings, the coverage, then the score as the mean of the three
+/// coverages, so it can be checked by hand.
+pub fn render_compliance_table(
+    iso: &Iso27001Compliance,
+    asvs: &AsvsCompliance,
+    nist: &NistCsfCompliance,
+    score: f64,
+    report_locale: &Value,
+) -> String {
+    let of = t(report_locale, "compliance_table_of");
+    let rows = [
+        (
+            "ISO 27001",
+            iso.covered_controls,
+            iso.total_controls,
+            iso.with_findings,
+            iso.coverage_pct,
+        ),
+        (
+            "OWASP ASVS",
+            asvs.covered_requirements,
+            asvs.total_requirements,
+            asvs.with_findings,
+            asvs.coverage_pct,
+        ),
+        (
+            "NIST CSF",
+            nist.covered_subcategories,
+            nist.total_subcategories,
+            nist.with_findings,
+            nist.coverage_pct,
+        ),
+    ];
+    let body: String = rows
+        .iter()
+        .map(|(label, covered, total, with_findings, pct)| {
+            format!(
+                r#"<tr><td>{label}</td><td class="num">{covered} {of} {total}</td><td class="num">{with_findings}</td><td class="num">{pct} %</td></tr>"#
+            )
+        })
+        .collect();
+    // Decimal comma everywhere but in English, as the report's own texts.
+    let decimal = |v: f64| {
+        let s = format!("{v}");
+        if t(report_locale, "locale_code") == "en" {
+            s
+        } else {
+            s.replace('.', ",")
+        }
+    };
+    let computation = t(report_locale, "compliance_table_computation")
+        .replace("{iso}", &iso.coverage_pct.to_string())
+        .replace("{asvs}", &asvs.coverage_pct.to_string())
+        .replace("{nist}", &nist.coverage_pct.to_string())
+        .replace("{score}", &decimal(score));
+    format!(
+        r#"<div class="chart-card health-table-card"><h4 class="health-table-title">{title}</h4><table class="health-calc-table"><thead><tr><th>{h_std}</th><th class="num">{h_checked}</th><th class="num">{h_findings}</th><th class="num">{h_coverage}</th></tr></thead><tbody>{body}</tbody></table><p class="health-table-note">{computation}</p><p class="health-table-note">{meaning}</p></div>"#,
+        title = t(report_locale, "compliance_table_title").replace("{score}", &decimal(score)),
+        h_std = t(report_locale, "compliance_table_standard"),
+        h_checked = t(report_locale, "compliance_table_checked"),
+        h_findings = t(report_locale, "compliance_table_with_findings"),
+        h_coverage = t(report_locale, "compliance_table_coverage"),
+        meaning = t(report_locale, "compliance_table_meaning"),
+    )
+}
+
 /// Thresholds for the good/warning/bad gradient of score bars — mirrors
 /// `self.health_thresholds` (`sca/runner.py`, defaults 90/70).
 #[derive(Debug, Clone, Copy)]
@@ -760,6 +834,35 @@ mod tests {
                 .iter()
                 .any(|c| html.contains(&format!("health-fill {c}\"")))
         );
+    }
+
+    /// The compliance table gives per standard the requirements checked out
+    /// of the total and the coverage, then the score as the mean of the
+    /// three coverages, and says what coverage means.
+    #[test]
+    fn test_render_compliance_table_shows_coverage_and_mean() {
+        let fr = load_report_locale("fr");
+        let scope = load_rule_referential_scope();
+        let iso = compute_iso27001_compliance(&[], &scope);
+        let asvs = compute_asvs_compliance(&[], &scope);
+        let nist = compute_nist_csf_compliance(&[], &scope);
+        let html = render_compliance_table(&iso, &asvs, &nist, 43.3, &fr);
+        assert!(html.contains("Ce que mesure le score de conformité (43,3 %)"), "{html}");
+        assert!(
+            html.contains(&format!(
+                "<td>ISO 27001</td><td class=\"num\">{} sur {}</td>",
+                iso.covered_controls, iso.total_controls
+            )),
+            "{html}"
+        );
+        assert!(
+            html.contains(&format!(
+                "({} + {} + {}) ÷ 3 = 43,3 %",
+                iso.coverage_pct, asvs.coverage_pct, nist.coverage_pct
+            )),
+            "{html}"
+        );
+        assert!(html.contains("pas si le projet respecte le référentiel"), "{html}");
     }
 
     #[test]

@@ -881,35 +881,10 @@ function initCharts() {
     // dans le header (health-bar). Le score global reste utilisé ailleurs via
     // data.complianceScore.score (barre de progression, pas ce graphique).
 
-    // Bar horizontal — Couverture par standard (ISO 27001 / ASVS / NIST CSF)
-    if (document.getElementById('complianceCoverageBarChart') && data.complianceScore && data.complianceScore.enabled) {
-        const standards = data.complianceScore.standards || [];
-        const stdLabels = standards.map(s => s.label);
-        const stdPcts = standards.map(s => s.pct);
-        const stdColors = ['#3498db', '#27ae60', '#8e44ad'];
-        new Chart(document.getElementById('complianceCoverageBarChart'), {
-            type: 'bar',
-            data: {
-                labels: stdLabels,
-                datasets: [{
-                    label: i18n.complianceCoverageBar || 'Coverage',
-                    data: stdPcts,
-                    backgroundColor: stdColors.slice(0, stdLabels.length),
-                    borderWidth: 0,
-                    borderRadius: 6
-                }]
-            },
-            options: {
-                indexAxis: 'y',
-                responsive: true, maintainAspectRatio: false,
-                plugins: { legend: { display: false } },
-                scales: {
-                    x: { beginAtZero: true, max: 100, grid: { display: false }, ticks: { callback: v => v + '%' } },
-                    y: { grid: { display: false }, ticks: { font: { weight: 'bold' } } }
-                }
-            }
-        });
-    }
+    // The bar chart of coverage per standard became the server-rendered
+    // table « What the compliance score measures »
+    // (compliance_html::render_compliance_table, 2026-11-19): it had no
+    // title and did not say what its percentages measure.
 
     // =========================================================================
     // HEALTH SCORE CHARTS
@@ -918,90 +893,10 @@ function initCharts() {
     // (2026-08-23) — pur doublon du % déjà affiché par la barre de
     // progression juste au-dessus dans le header (health-bar).
 
-    // Bar — Pénalités par sévérité SECURITY
-    if (document.getElementById('healthSeverityChart') && data.healthSeverity) {
-        const hs = data.healthSeverity;
-        const sevKeys = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'INFO'];
-        const sevLabels = sevKeys.map(k => hs[k] ? hs[k].label : k);
-        const sevPenalties = sevKeys.map(k => hs[k] ? hs[k].penaltyTotal : 0);
-        const sevCounts = sevKeys.map(k => hs[k] ? hs[k].count : 0);
-        const sevColors = ['#7f1d1d', '#dc2626', '#f59e0b', '#3b82f6', '#6b7280'];
-
-        const barLabelPlugin = {
-            id: 'barLabels',
-            afterDatasetsDraw(chart) {
-                const ctx = chart.ctx;
-                const meta = chart.getDatasetMeta(0);
-                meta.data.forEach(function(bar, i) {
-                    const count = sevCounts[i];
-                    if (!count) return;
-                    // "count × weight": the bar length is in penalty
-                    // points, a bare count next to it read as a second,
-                    // different total (tester feedback, 2026-11-19).
-                    const label = count + ' × ' + (hs[sevKeys[i]] ? hs[sevKeys[i]].penaltyEach : 0);
-                    ctx.save();
-                    ctx.font = 'bold 12px sans-serif';
-                    ctx.textBaseline = 'middle';
-                    const barW = Math.abs(bar.x - bar.base);
-                    const textW = ctx.measureText(String(label)).width;
-                    if (barW > textW + 12) {
-                        ctx.fillStyle = '#fff';
-                        ctx.textAlign = 'right';
-                        ctx.fillText(label, bar.x - 8, bar.y);
-                    } else {
-                        ctx.fillStyle = '#374151';
-                        ctx.textAlign = 'left';
-                        ctx.fillText(label, bar.x + 6, bar.y);
-                    }
-                    ctx.restore();
-                });
-            }
-        };
-
-        new Chart(document.getElementById('healthSeverityChart'), {
-            type: 'bar',
-            data: {
-                labels: sevLabels,
-                datasets: [{
-                    label: i18n.healthPenalty || 'Penalty',
-                    data: sevPenalties,
-                    backgroundColor: sevColors,
-                    borderWidth: 0,
-                    borderRadius: 4
-                }]
-            },
-            options: {
-                responsive: true, maintainAspectRatio: false,
-                indexAxis: 'y',
-                scales: {
-                    x: { beginAtZero: true, grid: { color: 'rgba(0,0,0,0.05)' }, title: { display: true, text: i18n.healthPenalty || 'Penalty points' } },
-                    y: { grid: { display: false } }
-                },
-                plugins: {
-                    legend: { display: false },
-                    // Title stating what the chart counts: the findings of
-                    // the security score only, out of all the findings, so
-                    // its total is not mistaken for the other charts' one.
-                    title: {
-                        display: true,
-                        text: (i18n.healthSeverityChart || 'Security score penalties: {count} findings counted out of {total}')
-                            .replace('{count}', sevCounts.reduce((a, b) => a + b, 0))
-                            .replace('{total}', totalFindings)
-                    },
-                    tooltip: {
-                        callbacks: {
-                            label: function(ctx) {
-                                const idx = ctx.dataIndex;
-                                return sevCounts[idx] + ' findings × ' + (hs[sevKeys[idx]] ? hs[sevKeys[idx]].penaltyEach : 0) + ' = ' + ctx.raw + ' pts';
-                            }
-                        }
-                    }
-                }
-            },
-            plugins: [barLabelPlugin]
-        });
-    }
-
+    // The bar chart of security-score penalties became the server-rendered
+    // table « What lowers the score » (summary_html::render_health_table,
+    // 2026-11-19): its bars in points next to « count × weight » labels
+    // were not understood.
     // ========== TAINT FLOWS CHART ==========
     if (data.taint && data.taint.enabled && document.getElementById('taintFlowsChart')) {
         const taintRules = Object.keys(data.taint.byRule);
@@ -1039,7 +934,7 @@ function initCharts() {
         var ls = data.languageSeverity;
         var langs = Object.keys(ls);
         if (langs.length > 0) {
-            // Mêmes couleurs que healthSeverityChart (contraste HIGH/MEDIUM
+            // Mêmes couleurs que les autres graphiques de gravité (contraste HIGH/MEDIUM
             // renforcé — #ea580c/#d97706 étaient too proches, RETEX Franck R12)
             var sevDefs = [
                 { key: 'CRITICAL', color: '#7f1d1d' },

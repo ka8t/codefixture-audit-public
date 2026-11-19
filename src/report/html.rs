@@ -317,21 +317,6 @@ fn build_chart_data(
         json!({"key": "nist", "label": "NIST CSF", "pct": nist.coverage_pct}),
     ];
 
-    let health_severity: serde_json::Map<String, Value> = data
-        .health_severity_detail
-        .iter()
-        .map(|(sev, d)| {
-            (
-                sev.to_string(),
-                json!({
-                    "label": t(report_locale, &format!("severity.{}", sev.to_lowercase())),
-                    "count": d.count,
-                    "penaltyEach": d.penalty_each,
-                    "penaltyTotal": d.penalty_total,
-                }),
-            )
-        })
-        .collect();
 
     json!({
         "severity": {"CRITICAL": data.total_critical, "HIGH": data.total_high, "MEDIUM": data.total_medium, "LOW": data.total_low, "INFO": data.total_info},
@@ -348,8 +333,6 @@ fn build_chart_data(
         "asvs": asvs_chart_data(asvs),
         "nist": nist_chart_data(nist),
         "complianceScore": {"enabled": true, "score": compliance_score, "standards": standards},
-        "healthPenalty": data.total_penalty,
-        "healthSeverity": health_severity,
         "history": history_chart_data(history),
         "i18n": chart_i18n_labels(report_locale),
         "taint": taint_chart_data(findings, rule_catalog),
@@ -437,18 +420,6 @@ fn chart_i18n_labels(v: &Value) -> Value {
             json!(t(v, &format!("chart_labels.{locale_key}"))),
         );
     }
-    map.insert(
-        "complianceCoverageBar".to_string(),
-        json!(t(v, "chart_labels.compliance_coverage_bar")),
-    );
-    map.insert(
-        "healthPenalty".to_string(),
-        json!(t(v, "chart_labels.health_penalty")),
-    );
-    map.insert(
-        "healthSeverityChart".to_string(),
-        json!(t(v, "chart_labels.health_severity_chart")),
-    );
     map.insert("taintFlows".to_string(), json!(t(v, "taint_trace_summary")));
     map.insert(
         "taintEntryPoint".to_string(),
@@ -836,7 +807,25 @@ pub fn generate_html(
     html = html.replace("{{health_class}}", health_class);
     html = html.replace("{{score_legend}}", &score_legend);
     html = html.replace("{{health_explanation_html}}", &health_explanation_html);
+    html = html.replace(
+        "{{health_table_html}}",
+        &crate::report::summary_html::render_health_table(
+            &data,
+            ctx.total_lines_code,
+            &report_locale,
+        ),
+    );
     html = html.replace("{{compliance_score}}", &format!("{compliance_score}"));
+    html = html.replace(
+        "{{compliance_table_html}}",
+        &crate::report::compliance_html::render_compliance_table(
+            &compliance,
+            &asvs,
+            &nist,
+            compliance_score,
+            &report_locale,
+        ),
+    );
     html = html.replace("{{compliance_class}}", compliance_class);
     for marker in [
         "COMPLIANCE_SCORE_BAR_START",
