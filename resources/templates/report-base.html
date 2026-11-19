@@ -183,6 +183,10 @@
                 <h3>{{i18n_summary}}</h3>
                 <div class="exec-severity-row">
                     <div class="exec-severity-cell">
+                        <span class="exec-severity-value critical">{{total_critical}}</span>
+                        <span class="exec-severity-label">{{i18n_severity_critical}}</span>
+                    </div>
+                    <div class="exec-severity-cell">
                         <span class="exec-severity-value high">{{total_high}}</span>
                         <span class="exec-severity-label">{{i18n_severity_high}}</span>
                     </div>
@@ -207,6 +211,7 @@
         </div>
         <h2 id="section-summary" data-nav-section="{{i18n_summary}}" class="section-title">📋 {{i18n_summary}} <a href="#sommaire" class="back-to-toc">↑ {{i18n_toc}}</a></h2>
         <div class="stats">
+            <div class="stat-card"><div class="stat-value critical">{{total_critical}}</div><div class="stat-label">{{i18n_severity_critical}}</div></div>
             <div class="stat-card"><div class="stat-value high">{{total_high}}</div><div class="stat-label">{{i18n_severity_high}}</div></div>
             <div class="stat-card"><div class="stat-value medium">{{total_medium}}</div><div class="stat-label">{{i18n_severity_medium}}</div></div>
             <div class="stat-card"><div class="stat-value low">{{total_low}}</div><div class="stat-label">{{i18n_severity_low}}</div></div>

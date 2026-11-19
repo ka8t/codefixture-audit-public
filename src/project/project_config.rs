@@ -501,15 +501,45 @@ pub fn unsupported_config_sections(root: &Path) -> Vec<String> {
     found
 }
 
+/// The name of the project rooted at `path`: the name of the folder it
+/// designates. Shown as the report title, written as the SBOM component
+/// and as `project.name` of `audit.config.json`.
+///
+/// `path` is made absolute and resolved first (`canonicalize`), so `.`,
+/// `./` or `sub/..`, which have no last component of their own, name the
+/// folder they stand for (ticket #219: `scan .` was titled "project").
+/// A path that cannot be resolved (it does not exist) is made absolute
+/// without touching the file system, `..` then removed lexically. The
+/// file system root has no folder name: it is named by its full path, never
+/// by a made-up name. A name that is not valid UTF-8 is shown with its
+/// invalid bytes replaced (`to_string_lossy`).
+pub fn project_name_of(path: &Path) -> String {
+    let resolved = std::fs::canonicalize(path).unwrap_or_else(|_| {
+        let absolute = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+        let mut normalized = PathBuf::new();
+        for component in absolute.components() {
+            match component {
+                std::path::Component::CurDir => {}
+                std::path::Component::ParentDir => {
+                    normalized.pop();
+                }
+                other => normalized.push(other),
+            }
+        }
+        normalized
+    });
+    match resolved.file_name() {
+        Some(name) => name.to_string_lossy().into_owned(),
+        None => resolved.display().to_string(),
+    }
+}
+
 /// The text `write_audit_config_json` writes for `root` and `info`: the
 /// project name (folder name), the languages and the paths, pretty JSON
 /// ending with a newline. Shown as is before writing by the interactive
 /// creation (`config_wizard.rs`).
 pub fn audit_config_json_text(root: &Path, info: &DetectedProjectInfo) -> String {
-    let project_name = root
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("project");
+    let project_name = project_name_of(root);
     let json = serde_json::json!({
         "project": { "name": project_name },
         "languages": info.languages,
@@ -564,6 +594,41 @@ mod tests {
         let path = root.join(rel);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, content).unwrap();
+    }
+
+    /// `.`, `./`, `sub/..` and a path that does not exist name the folder
+    /// they stand for, never "project"; the root is named by its path
+    /// (ticket #219).
+    #[test]
+    fn test_project_name_of_resolves_dot_and_parent() {
+        let dir = std::env::temp_dir().join(format!("sast-pc-name-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("juice-shop/sub")).unwrap();
+        let project = dir.join("juice-shop");
+
+        assert_eq!(project_name_of(&project), "juice-shop");
+        assert_eq!(project_name_of(&project.join(".")), "juice-shop");
+        assert_eq!(project_name_of(&project.join("./")), "juice-shop");
+        assert_eq!(project_name_of(&project.join("sub/..")), "juice-shop");
+        // Not on disk: resolved lexically, `..` removed.
+        assert_eq!(project_name_of(&project.join("missing/..")), "juice-shop");
+        assert_eq!(project_name_of(&dir.join("absent")), "absent");
+
+        let cwd = std::env::current_dir().unwrap();
+        let cwd_name = cwd.file_name().unwrap().to_string_lossy().into_owned();
+        assert_eq!(project_name_of(Path::new(".")), cwd_name);
+
+        #[cfg(unix)]
+        assert_eq!(project_name_of(Path::new("/")), "/");
+
+        let info = DetectedProjectInfo {
+            languages: Vec::new(),
+            include_paths: Vec::new(),
+            exclude_patterns: Vec::new(),
+        };
+        let text = audit_config_json_text(&project.join("."), &info);
+        assert!(text.contains(r#""name": "juice-shop""#), "{text}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A link to a parent folder no longer recurses forever, and a link to

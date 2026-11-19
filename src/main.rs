@@ -1725,11 +1725,7 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
         return ExitCode::from(2);
     }
 
-    let project_name = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("project")
-        .to_string();
+    let project_name = codefixture_audit::project::project_config::project_name_of(&path);
 
     let database = if db_host.is_some() || db_name.is_some() || db_user.is_some() {
         Some(codefixture_audit::project::database::live::DbConfig {

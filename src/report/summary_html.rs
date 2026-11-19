@@ -129,17 +129,47 @@ fn format_priority_rule_list(ranked: &[RankedRule], report_locale: &Value) -> St
 
 /// Prioritized recommendations (P1/P2/P3) for the executive summary —
 /// port of `_build_exec_recommendations`.
+///
+/// Deliberate deviation from Python, which predates the CRITICAL
+/// severity: critical findings get their own P1 line, written first and
+/// naming their top rules, and the HIGH line names HIGH rules only. The
+/// Python line counted the HIGH findings but ranked CRITICAL and HIGH
+/// rules together, and a report with critical findings never said so
+/// (Juice Shop, 2026-11-19: 9 critical findings, ticket #220).
 pub fn build_exec_recommendations(
     findings: &[ReportFinding],
+    total_critical: usize,
     total_high: usize,
     total_medium: usize,
     health_score: i64,
     report_locale: &Value,
 ) -> String {
     let mut recs: Vec<(&'static str, String)> = Vec::new();
+    let of_severity = |severity: &str| -> Vec<ReportFinding> {
+        findings
+            .iter()
+            .filter(|f| f.severity == severity)
+            .cloned()
+            .collect()
+    };
+
+    if total_critical > 0 {
+        let top_rules = compute_top_priority_rules(&of_severity("CRITICAL"), 3);
+        let text = if top_rules.is_empty() {
+            t(report_locale, "exec_rec_critical").replace("{count}", &total_critical.to_string())
+        } else {
+            t(report_locale, "exec_rec_critical_ranked")
+                .replace("{count}", &total_critical.to_string())
+                .replace(
+                    "{rules}",
+                    &format_priority_rule_list(&top_rules, report_locale),
+                )
+        };
+        recs.push(("p1", text));
+    }
 
     if total_high > 0 {
-        let top_rules = compute_top_priority_rules(findings, 3);
+        let top_rules = compute_top_priority_rules(&of_severity("HIGH"), 3);
         if !top_rules.is_empty() {
             let tpl = t(report_locale, "exec_rec_high_ranked");
             let text = tpl.replace("{count}", &total_high.to_string()).replace(
@@ -190,12 +220,19 @@ pub fn build_exec_recommendations(
 
 /// Threat context block (ZeroDayClock) for the executive summary —
 /// port of `_build_threat_context`.
+///
+/// Deliberate deviation from Python: critical findings count with the
+/// high ones, and both are named with their count ("9 Critical
+/// (CRITICAL), 484 High (HIGH)"). Python only read HIGH and MEDIUM, so a
+/// report whose worst findings were critical showed a lower level or no
+/// block at all (ticket #220).
 pub fn build_threat_context(
+    total_critical: usize,
     total_high: usize,
     total_medium: usize,
     report_locale: &Value,
 ) -> String {
-    if total_high == 0 && total_medium == 0 {
+    if total_critical == 0 && total_high == 0 && total_medium == 0 {
         return String::new();
     }
 
@@ -205,11 +242,19 @@ pub fn build_threat_context(
     let disclaimer = t(report_locale, "threat_disclaimer");
     let source = t(report_locale, "threat_source");
 
-    let (risk_level, risk_color, risk_text) = if total_high > 0 {
+    let (risk_level, risk_color, risk_text) = if total_critical + total_high > 0 {
+        let severities = [
+            ("severity.critical", total_critical),
+            ("severity.high", total_high),
+        ]
+        .iter()
+        .filter(|(_, count)| *count > 0)
+        .map(|(label, count)| format!("{count} {}", t(report_locale, label)))
+        .collect::<Vec<_>>()
+        .join(", ");
         let tpl = t(report_locale, "threat_risk_high_text");
         let text = tpl
-            .replace("{count}", &total_high.to_string())
-            .replace("{severity_label}", &t(report_locale, "severity.high"))
+            .replace("{severities}", &severities)
             .replace("{tte_label}", &tte_label)
             .replace("{exposure_label}", &exposure_label);
         (t(report_locale, "threat_level_critical"), "#ef4444", text)
@@ -368,35 +413,78 @@ mod tests {
     fn test_build_exec_recommendations_high_findings_produces_p1() {
         let en = load_report_locale("en");
         let findings = vec![finding("r1", "SQL Injection", "HIGH", 90)];
-        let html = build_exec_recommendations(&findings, 1, 0, 100, &en);
+        let html = build_exec_recommendations(&findings, 0, 1, 0, 100, &en);
         assert!(html.contains("exec-rec-priority p1"));
         assert!(html.contains("SQL Injection"));
+    }
+
+    /// Critical findings get the first P1 line, naming the critical rules;
+    /// the HIGH line names HIGH rules only (ticket #220).
+    #[test]
+    fn test_build_exec_recommendations_critical_line_comes_first() {
+        let en = load_report_locale("en");
+        let findings = vec![
+            finding("r1", "SQL Injection", "HIGH", 90),
+            finding("r2", "Secret in CI", "CRITICAL", 90),
+        ];
+        let html = build_exec_recommendations(&findings, 1, 1, 0, 100, &en);
+        let critical = html
+            .find("Fix the 1 critical findings first, starting with: Secret in CI")
+            .expect("critical line");
+        let high = html.find("high-risk vulnerabilities").expect("high line");
+        assert!(critical < high, "{html}");
+        let high_line = &html[high..];
+        let high_line = &high_line[..high_line.find("</div>").unwrap()];
+        assert!(high_line.contains("SQL Injection"), "{high_line}");
+        assert!(!high_line.contains("Secret in CI"), "{high_line}");
+    }
+
+    /// A report whose only serious findings are critical still gets the
+    /// critical threat context, naming them (ticket #220).
+    #[test]
+    fn test_build_threat_context_counts_critical_findings() {
+        let en = load_report_locale("en");
+        let html = build_threat_context(9, 0, 0, &en);
+        assert!(html.contains(&t(&en, "threat_level_critical")), "{html}");
+        assert!(
+            html.contains(&format!("9 {}", t(&en, "severity.critical"))),
+            "{html}"
+        );
+        let both = build_threat_context(9, 484, 0, &en);
+        assert!(
+            both.contains(&format!(
+                "9 {}, 484 {}",
+                t(&en, "severity.critical"),
+                t(&en, "severity.high")
+            )),
+            "{both}"
+        );
     }
 
     #[test]
     fn test_build_exec_recommendations_no_issues_gives_good_message() {
         let en = load_report_locale("en");
-        let html = build_exec_recommendations(&[], 0, 0, 100, &en);
+        let html = build_exec_recommendations(&[], 0, 0, 0, 100, &en);
         assert!(html.contains(&t(&en, "exec_rec_good")));
     }
 
     #[test]
     fn test_build_exec_recommendations_critical_health_score() {
         let en = load_report_locale("en");
-        let html = build_exec_recommendations(&[], 0, 0, 30, &en);
+        let html = build_exec_recommendations(&[], 0, 0, 0, 30, &en);
         assert!(html.contains(&t(&en, "exec_rec_health_critical")));
     }
 
     #[test]
     fn test_build_threat_context_empty_when_no_high_medium() {
         let en = load_report_locale("en");
-        assert_eq!(build_threat_context(0, 0, &en), "");
+        assert_eq!(build_threat_context(0, 0, 0, &en), "");
     }
 
     #[test]
     fn test_build_threat_context_critical_when_high_present() {
         let en = load_report_locale("en");
-        let html = build_threat_context(3, 0, &en);
+        let html = build_threat_context(0, 3, 0, &en);
         assert!(html.contains("threat-context"));
         assert!(html.contains(&t(&en, "threat_level_critical")));
     }

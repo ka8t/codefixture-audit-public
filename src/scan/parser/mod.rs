@@ -191,7 +191,7 @@ impl<'a> DslParser<'a> {
                 "mode" => node.mode = self.parse_value()?,
                 "match" => node.match_blocks.push(self.parse_match_block()?),
                 "source" => node.sources.push(self.parse_source()),
-                "sink" => node.sinks.push(self.parse_sink()),
+                "sink" => node.sinks.push(self.parse_sink()?),
                 "sanitizer" => node.sanitizers.push(self.parse_sanitizer()?),
                 "passthrough" => node.passthroughs.push(self.parse_passthrough()?),
                 _ if I18N_KEYWORDS.contains(&kw.as_str()) => {
@@ -401,18 +401,41 @@ impl<'a> DslParser<'a> {
         }
     }
 
-    fn parse_sink(&mut self) -> SinkSpec {
+    /// Parses a `sink` line: the regular expression, then its only option,
+    /// `arg_index=<n>`. An unknown option or an index that is not a
+    /// non-negative integer is an error naming the line: before ticket
+    /// #221 both were dropped silently, an index read as 0, which made a
+    /// typo in the option indistinguishable from its absence.
+    fn parse_sink(&mut self) -> PResult<SinkSpec> {
         let ln = self.line().number;
         let (text, kvs) = self.parse_raw_with_kvs();
-        let arg_index = kvs
-            .get("arg_index")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0);
-        SinkSpec {
+        let mut arg_index = None;
+        let mut keys: Vec<&String> = kvs.keys().collect();
+        keys.sort();
+        for key in keys {
+            let value = &kvs[key];
+            if key != "arg_index" {
+                return Err(DslSyntaxError::new(
+                    format!(
+                        "Option inconnue sur un sink : '{key}={value}' (seule 'arg_index' existe)"
+                    ),
+                    ln,
+                    self.filename,
+                ));
+            }
+            arg_index = Some(value.parse::<usize>().map_err(|_| {
+                DslSyntaxError::new(
+                    format!("'arg_index' doit être un entier positif ou nul, trouvé : '{value}'"),
+                    ln,
+                    self.filename,
+                )
+            })?);
+        }
+        Ok(SinkSpec {
             pattern: text,
             arg_index,
             line_number: ln,
-        }
+        })
     }
 
     fn parse_sanitizer(&mut self) -> PResult<SanitizerSpec> {
@@ -764,6 +787,50 @@ mod tests {
             "Exécution de code obfusqué en base64"
         );
         assert_eq!(rules[0]["risk"]["en"], "Hidden code runs.");
+    }
+
+    const TAINT_RULE: &str = "rule t\n  language  javascript\n  category  security\n  severity  HIGH\n  source  req\\.query  kind=http\n  SINK_LINE\nend\n";
+
+    /// `arg_index=<n>` written on a sink is carried with `arg_explicit`;
+    /// a sink without it keeps argument 0 for the dataflow path only
+    /// (ticket #221).
+    #[test]
+    fn test_sink_arg_index_is_explicit_only_when_written() {
+        let written = TAINT_RULE.replace("SINK_LINE", "sink    \\.query\\s*\\(  arg_index=1");
+        let rules = compile_sca_to_json(&written, "javascript/security/t.sca").unwrap();
+        assert_eq!(rules[0]["sinks"][0]["pattern"], "\\.query\\s*\\(");
+        assert_eq!(rules[0]["sinks"][0]["arg_index"], 1);
+        assert_eq!(rules[0]["sinks"][0]["arg_explicit"], true);
+
+        let default = TAINT_RULE.replace("SINK_LINE", "sink    \\.query\\s*\\(");
+        let rules = compile_sca_to_json(&default, "javascript/security/t.sca").unwrap();
+        assert_eq!(rules[0]["sinks"][0]["arg_index"], 0);
+        assert!(rules[0]["sinks"][0].get("arg_explicit").is_none());
+    }
+
+    /// An index that is not a non-negative integer, or an unknown option,
+    /// is an error naming the line instead of a silent argument 0.
+    #[test]
+    fn test_sink_rejects_a_bad_index_or_an_unknown_option() {
+        for (line, expected) in [
+            (
+                "sink    \\.query\\s*\\(  arg_index=first",
+                "'arg_index' doit être un entier",
+            ),
+            (
+                "sink    \\.query\\s*\\(  arg_index=-1",
+                "'arg_index' doit être un entier",
+            ),
+            (
+                "sink    \\.query\\s*\\(  arg=0",
+                "Option inconnue sur un sink : 'arg=0'",
+            ),
+        ] {
+            let rule = TAINT_RULE.replace("SINK_LINE", line);
+            let error = compile_sca_to_json(&rule, "javascript/security/t.sca").unwrap_err();
+            assert!(error.to_string().contains(expected), "{line}: {error}");
+            assert_eq!(error.line, 6, "{line}");
+        }
     }
 
     /// A translated text is kept as written: quotes and code included.

@@ -275,6 +275,13 @@ pub fn rule_json_to_specs(rule_json: &Value, lang: &str) -> Option<RuleSpecs> {
         } else {
             Vec::new()
         };
+        // `arg_explicit`: the rule wrote `arg_index=<n>` itself, so the
+        // line layer reads that argument only (ticket #221).
+        let line_args = if s.get("arg_explicit").and_then(|v| v.as_bool()) == Some(true) {
+            args.clone()
+        } else {
+            Vec::new()
+        };
         let kinds: Vec<String> = s
             .get("kinds")
             .and_then(|v| v.as_array())
@@ -288,6 +295,7 @@ pub fn rule_json_to_specs(rule_json: &Value, lang: &str) -> Option<RuleSpecs> {
         for dotted in regex_to_dotted_patterns(regex) {
             let mut spec = SinkSpec::new(dotted)
                 .with_args(args.clone())
+                .with_line_args(line_args.clone())
                 .with_kinds(kinds.clone());
             spec.raw_regex = compiled.clone();
             sinks.push(spec);

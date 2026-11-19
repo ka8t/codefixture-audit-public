@@ -716,6 +716,7 @@ pub fn generate_html(
         ),
         ("{{i18n_exec_trend}}", "exec_trend"),
         ("{{i18n_exec_recommendations}}", "exec_recommendations"),
+        ("{{i18n_severity_critical}}", "severity.critical"),
         ("{{i18n_severity_high}}", "severity.high"),
         ("{{i18n_severity_medium}}", "severity.medium"),
         ("{{i18n_severity_low}}", "severity.low"),
@@ -855,6 +856,7 @@ pub fn generate_html(
         "{{exec_recommendations_html}}",
         &build_exec_recommendations(
             findings,
+            data.total_critical,
             data.total_high,
             data.total_medium,
             data.health_score,
@@ -863,10 +865,16 @@ pub fn generate_html(
     );
     html = html.replace(
         "{{threat_context_html}}",
-        &build_threat_context(data.total_high, data.total_medium, &report_locale),
+        &build_threat_context(
+            data.total_critical,
+            data.total_high,
+            data.total_medium,
+            &report_locale,
+        ),
     );
 
     // --- stats -----------------------------------------------------------
+    html = html.replace("{{total_critical}}", &data.total_critical.to_string());
     html = html.replace("{{total_high}}", &data.total_high.to_string());
     html = html.replace("{{total_medium}}", &data.total_medium.to_string());
     html = html.replace("{{total_low}}", &data.total_low.to_string());
@@ -1137,6 +1145,20 @@ mod tests {
         assert!(html.contains("SQL Injection"));
         assert!(html.contains("Hardcoded Secret"));
         assert!(!html.contains("{{"));
+        // The head of the report names the critical finding (ticket #220):
+        // its cell in the executive summary, its stat card, and the P1
+        // recommendation written for it.
+        assert!(
+            html.contains(r#"<span class="exec-severity-value critical">1</span>"#),
+            "executive summary cell"
+        );
+        assert!(
+            html.contains(r#"<div class="stat-value critical">1</div>"#),
+            "stat card"
+        );
+        assert!(
+            html.contains("Fix the 1 critical findings first, starting with: Hardcoded Secret")
+        );
     }
 
     #[test]

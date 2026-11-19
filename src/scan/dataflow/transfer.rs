@@ -29,9 +29,7 @@ use super::ir::{
     IrStmt, Lhs, Rhs, canon_callee, canon_lhs, canon_rhs, canon_subscript_key, pretty_rhs,
 };
 use super::lattice::{SharedText, SourceInfo, State, Taint, join, state_get, state_put};
-use super::line_facts::RuleLines;
-#[cfg(test)]
-use super::line_facts::strip_plain_string_literals;
+use super::line_facts::{RuleLines, call_arguments, strip_plain_string_literals};
 
 // ============================================================================
 // §10bis — Hybrid matching over the source text
@@ -360,7 +358,30 @@ fn aux_match_line(
         if scan.continuation_sanitized {
             continue;
         }
-        let scan_text_no_lit = scan.text_without_literals.as_str();
+        // A sink that names its argument (`arg_index=<n>` written in the
+        // rule) is searched in that argument only: a tainted value bound
+        // as a query parameter (`db.query("… $1", [x])`) is not an
+        // injection (ticket #221). When the call cannot be split, the
+        // whole call is searched, as for a sink that names no argument.
+        let named_arguments: Option<String> = if sink.line_args.is_empty() {
+            None
+        } else {
+            sink.raw_regex
+                .as_ref()
+                .and_then(|rx| call_arguments(&scan.span, rx))
+                .map(|arguments| {
+                    sink.line_args
+                        .iter()
+                        .filter_map(|index| arguments.get(*index))
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                })
+        };
+        let named_without_literals = named_arguments.as_deref().map(strip_plain_string_literals);
+        let scan_text_no_lit = named_without_literals
+            .as_deref()
+            .unwrap_or(scan.text_without_literals.as_str());
         let mut hit = false;
         for (var_name, var_taint) in state.iter() {
             if scan_text_no_lit.contains(var_name.as_str()) && var_taint.is_tainted() {
@@ -415,6 +436,13 @@ fn aux_match_line(
             for &source_index in &facts.sources {
                 let src = &specs.sources[source_index];
                 if !kind_str_compatible(&src.kind, &sink.kinds) {
+                    continue;
+                }
+                // Same restriction for a source written in the call: it
+                // must sit in the named argument (ticket #221).
+                if let (Some(text), Some(rx)) = (named_arguments.as_deref(), src.raw_regex.as_ref())
+                    && !rx.is_match(text).unwrap_or(false)
+                {
                     continue;
                 }
                 findings.push(Finding {
@@ -536,6 +564,12 @@ pub struct SinkSpec {
     pub pattern: String,
     /// Empty = all arguments.
     pub args: Vec<usize>,
+    /// The arguments the rule named itself (`arg_index=<n>` in the `.sca`
+    /// file), which the line layer also restricts its search to (ticket
+    /// #221). Empty when the rule wrote none: `args` then holds the
+    /// default argument 0 for the dataflow path only, and the line layer
+    /// searches the whole call, as the Python §10bis layer does.
+    pub line_args: Vec<usize>,
     /// Empty = all kinds.
     pub kinds: Vec<String>,
     pub raw_regex: Option<Regex>,
@@ -549,6 +583,7 @@ impl SinkSpec {
         SinkSpec {
             pattern,
             args: Vec::new(),
+            line_args: Vec::new(),
             kinds: Vec::new(),
             raw_regex: None,
             compiled,
@@ -557,6 +592,12 @@ impl SinkSpec {
 
     pub fn with_args(mut self, args: Vec<usize>) -> Self {
         self.args = args;
+        self
+    }
+
+    /// Restricts the line layer to these arguments too (see `line_args`).
+    pub fn with_line_args(mut self, line_args: Vec<usize>) -> Self {
+        self.line_args = line_args;
         self
     }
 

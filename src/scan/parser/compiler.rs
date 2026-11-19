@@ -130,7 +130,16 @@ pub fn compile_to_json(node: &RuleNode) -> Value {
         let sinks: Vec<Value> = node
             .sinks
             .iter()
-            .map(|s| json!({"pattern": s.pattern, "arg_index": s.arg_index}))
+            .map(|s| match s.arg_index {
+                // Written by the rule: the dataflow path and the line layer
+                // both check only this argument (ticket #221).
+                Some(index) => {
+                    json!({"pattern": s.pattern, "arg_index": index, "arg_explicit": true})
+                }
+                // Not written: argument 0 for the dataflow path, the whole
+                // call for the line layer, as before.
+                None => json!({"pattern": s.pattern, "arg_index": 0}),
+            })
             .collect();
         result.insert("sources".to_string(), json!(sources));
         result.insert("sinks".to_string(), json!(sinks));

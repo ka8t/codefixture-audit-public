@@ -83,15 +83,20 @@ static GUARD_REASSIGN_NEXTLINE_RE: LazyLock<Regex> = LazyLock::new(|| {
     .expect("regex statique valide")
 });
 
-/// String literals (single/double quote), to strip them from the
-/// text before a substring search (variable name). Pattern identical
-/// to `lexical_taint.py::_STRING_LIT_STRIP_RE` — unambiguous
-/// partition (each repetition of `(?:\\.[^"\\]*)*` starts on a
-/// literal backslash excluded from the previous group), no
+/// String literals (single/double quote, and backtick), to strip them
+/// from the text before a substring search (variable name). The quote
+/// alternatives are those of `lexical_taint.py::_STRING_LIT_STRIP_RE` —
+/// unambiguous partition (each repetition of `(?:\\.[^"\\]*)*` starts
+/// on a literal backslash excluded from the previous group), no
 /// exponential backtracking despite the appearance of nested
-/// quantifiers.
+/// quantifiers. The backtick alternative is a deliberate addition (ticket
+/// #221): a JavaScript template without interpolation is SQL or HTML text
+/// like any other literal, and its words (a column `name`) were taken for
+/// the variable of the same name; `strip_plain_string_literals` keeps a
+/// backtick literal holding a `$`, so a template that interpolates and a
+/// PHP shell command (`` `ls $dir` ``) are still searched.
 static STRING_LIT_STRIP_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#""[^"\\]*(?:\\.[^"\\]*)*"|'[^'\\]*(?:\\.[^'\\]*)*'"#)
+    Regex::new(r#""[^"\\]*(?:\\.[^"\\]*)*"|'[^'\\]*(?:\\.[^'\\]*)*'|`[^`\\]*(?:\\.[^`\\]*)*`"#)
         .expect("regex statique valide")
 });
 
@@ -104,8 +109,9 @@ const MAX_CALL_CONTINUATION_LINES: usize = 25;
 /// (`f'Hello {bar}'`) or a JS template carries a REAL variable
 /// reference inside the quotes, not a textual coincidence: stripping
 /// it would break legitimate XSS detection on
-/// `return f'...{bar}...'`. A "flat" literal (e.g. SQL text) is
-/// indeed stripped.
+/// `return f'...{bar}...'`. A backtick literal holding a `$` is kept
+/// too (JS interpolation, PHP shell command). A "flat" literal (e.g. SQL
+/// text, a template without interpolation) is indeed stripped.
 pub(crate) fn strip_plain_string_literals(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut last = 0;
@@ -113,7 +119,10 @@ pub(crate) fn strip_plain_string_literals(text: &str) -> String {
         let Ok(m) = m else { break };
         out.push_str(&text[last..m.start()]);
         let matched = m.as_str();
-        if matched.contains('{') || matched.contains('}') {
+        let interpolates = matched.contains('{')
+            || matched.contains('}')
+            || (matched.starts_with('`') && matched.contains('$'));
+        if interpolates {
             out.push_str(matched);
         } else {
             out.push(' ');
@@ -374,6 +383,10 @@ pub struct SinkScan {
     /// `MAX_CALL_CONTINUATION_LINES`), without its flat string literals:
     /// the text in which a tainted variable name is looked for.
     pub text_without_literals: String,
+    /// The same lines, literals kept: where the arguments of the call are
+    /// read for a sink that names its argument (`call_arguments`, ticket
+    /// #221).
+    pub span: String,
 }
 
 impl SinkScan {
@@ -396,6 +409,7 @@ impl SinkScan {
             return Self {
                 continuation_sanitized: false,
                 text_without_literals: strip_plain_string_literals(line_text),
+                span: line_text.clone(),
             };
         }
         let mut span: Vec<&str> = vec![line_text];
@@ -413,11 +427,82 @@ impl SinkScan {
                 .as_ref()
                 .is_some_and(|rx| matches(rx, &continuation))
         });
+        let span = span.join("\n");
         Self {
             continuation_sanitized,
-            text_without_literals: strip_plain_string_literals(&span.join("\n")),
+            text_without_literals: strip_plain_string_literals(&span),
+            span,
         }
     }
+}
+
+/// The arguments of the call that `sink` matches in `span` (the sink line
+/// and the continuation lines of its call), as written, in order.
+///
+/// The sink is looked for on the first line of `span` only, where the
+/// line layer found it: a pattern with a look-ahead over the rest of the
+/// line (`\.execute\s*\((?![^)]*,)`) would no longer match once the
+/// continuation lines follow. The call opens at the last `(` of the sink's
+/// match, or else at the first `(` after it; arguments are split on the commas at the top level of that
+/// call, skipping string literals (`'`, `"` and `` ` ``, with backslash
+/// escapes) and nested `()`, `[]` and `{}`. `None` when `sink` does not
+/// match the sink line, when no `(` follows the match, or when the call does not
+/// close within `span`: the caller then searches the whole call, as before
+/// ticket #221, so an unreadable call never loses a finding.
+///
+/// Not a parser: a quote inside a comment of a multi-line call can
+/// unbalance the split, which ends as `None` (whole call searched).
+pub fn call_arguments(span: &str, sink: &Regex) -> Option<Vec<String>> {
+    let sink_line = span.split('\n').next().unwrap_or(span);
+    let found = sink.find(sink_line).ok().flatten()?;
+    let open = match found.as_str().rfind('(') {
+        Some(offset) => found.start() + offset,
+        None => found.end() + span[found.end()..].find('(')?,
+    };
+    let mut arguments = Vec::new();
+    let mut current = String::new();
+    let mut depth = 0usize;
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    for c in span[open + 1..].chars() {
+        if let Some(q) = quote {
+            current.push(c);
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == q {
+                quote = None;
+            }
+            continue;
+        }
+        match c {
+            '\'' | '"' | '`' => {
+                quote = Some(c);
+                current.push(c);
+            }
+            '(' | '[' | '{' => {
+                depth += 1;
+                current.push(c);
+            }
+            ')' | ']' | '}' if depth > 0 => {
+                depth -= 1;
+                current.push(c);
+            }
+            ')' => {
+                if !current.trim().is_empty() || !arguments.is_empty() {
+                    arguments.push(current.trim().to_string());
+                }
+                return Some(arguments);
+            }
+            ',' if depth == 0 => {
+                arguments.push(current.trim().to_string());
+                current.clear();
+            }
+            _ => current.push(c),
+        }
+    }
+    None
 }
 
 /// The [`RuleLines`] of every file of a project for one rule, keyed by
@@ -450,6 +535,71 @@ mod tests {
 
     fn regex(pattern: &str) -> Regex {
         Regex::new(pattern).expect("test regex")
+    }
+
+    fn arguments(span: &str) -> Option<Vec<String>> {
+        call_arguments(span, &regex(r"\.query\s*\("))
+    }
+
+    /// The split respects strings holding commas and parentheses, template
+    /// literals, nested brackets and continuation lines (ticket #221).
+    #[test]
+    fn test_call_arguments_splits_at_the_top_level_of_the_call() {
+        assert_eq!(
+            arguments(r#"db.query("SELECT a, b FROM t WHERE f(x) = $1", [id, other]);"#).unwrap(),
+            vec![r#""SELECT a, b FROM t WHERE f(x) = $1""#, "[id, other]"]
+        );
+        assert_eq!(
+            arguments("m.query(\n  `SELECT * WHERE ((n LIKE '%:c%')) ORDER BY n`,\n  { replacements: { c } }\n).then(f)")
+                .unwrap(),
+            vec!["`SELECT * WHERE ((n LIKE '%:c%')) ORDER BY n`", "{ replacements: { c } }"]
+        );
+        assert_eq!(
+            arguments(r#"db.query('it\'s, (x)', fn(a, b))"#).unwrap(),
+            vec![r#"'it\'s, (x)'"#, "fn(a, b)"]
+        );
+        assert_eq!(arguments("db.query()").unwrap(), Vec::<String>::new());
+        // The look-ahead of the sink (Python `taint_sqli`) is read on the
+        // sink line only: over the whole call it would not match.
+        let with_look_ahead = regex(r"\.execute\s*\((?![^)]*,)");
+        assert_eq!(
+            call_arguments(
+                "cursor.execute(\n    \"SELECT %s\",\n    (term,),\n)",
+                &with_look_ahead
+            )
+            .unwrap(),
+            vec!["\"SELECT %s\"", "(term,)", ""]
+        );
+    }
+
+    /// No call to split: `None`, and the caller searches the whole call.
+    #[test]
+    fn test_call_arguments_none_when_the_call_cannot_be_read() {
+        assert_eq!(arguments("db.query(\"never closed\", [x]"), None);
+        assert_eq!(arguments("nothing to see"), None);
+        assert_eq!(
+            call_arguments("db.CommandText = x", &regex(r"\.CommandText\s*=")),
+            None
+        );
+    }
+
+    /// A template literal without interpolation is stripped like any other
+    /// literal; one holding a `$` is kept (JS interpolation, PHP shell
+    /// command) (ticket #221).
+    #[test]
+    fn test_strip_plain_string_literals_handles_backtick_literals() {
+        assert_eq!(
+            strip_plain_string_literals("q(`SELECT name FROM t`, name)"),
+            "q( , name)"
+        );
+        assert_eq!(
+            strip_plain_string_literals("q(`SELECT ${name}`)"),
+            "q(`SELECT ${name}`)"
+        );
+        assert_eq!(
+            strip_plain_string_literals("$out = `ls $dir`;"),
+            "$out = `ls $dir`;"
+        );
     }
 
     /// A JS rule whose source, sink and sanitizer all carry a raw regex,

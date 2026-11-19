@@ -68,10 +68,17 @@ pub struct SourceSpec {
     pub line_number: usize,
 }
 
+/// A `sink` line of a data-flow rule: the regular expression of the
+/// dangerous call, and the argument the rule names with `arg_index=<n>`.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SinkSpec {
     pub pattern: String,
-    pub arg_index: i64,
+    /// The argument (0-based) that carries the danger, when the rule
+    /// writes `arg_index=<n>`: the only one both the dataflow path and the
+    /// line layer check (ticket #221). `None` when not written: the
+    /// dataflow path checks argument 0 and the line layer the whole call,
+    /// as before the option was a decision of the rule.
+    pub arg_index: Option<usize>,
     pub line_number: usize,
 }
 
