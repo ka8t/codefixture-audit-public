@@ -881,10 +881,37 @@ function initCharts() {
     // dans le header (health-bar). Le score global reste utilisé ailleurs via
     // data.complianceScore.score (barre de progression, pas ce graphique).
 
-    // The bar chart of coverage per standard became the server-rendered
-    // table « What the compliance score measures »
-    // (compliance_html::render_compliance_table, 2026-11-19): it had no
-    // title and did not say what its percentages measure.
+    // Bar horizontal — Couverture par standard (ISO 27001 / ASVS / NIST CSF)
+    if (document.getElementById('complianceCoverageBarChart') && data.complianceScore && data.complianceScore.enabled) {
+        const standards = data.complianceScore.standards || [];
+        const stdLabels = standards.map(s => s.label);
+        const stdPcts = standards.map(s => s.pct);
+        const stdColors = ['#3498db', '#27ae60', '#8e44ad'];
+        new Chart(document.getElementById('complianceCoverageBarChart'), {
+            type: 'bar',
+            data: {
+                labels: stdLabels,
+                datasets: [{
+                    label: i18n.complianceCoverageBar || 'Coverage',
+                    data: stdPcts,
+                    backgroundColor: stdColors.slice(0, stdLabels.length),
+                    borderWidth: 0,
+                    borderRadius: 6
+                }]
+            },
+            options: {
+                indexAxis: 'y',
+                responsive: true, maintainAspectRatio: false,
+                // Title added 2026-11-20: the chart had none, and nothing said
+                // what its percentages measure (the table below details it).
+                plugins: { legend: { display: false }, title: { display: true, text: i18n.complianceCoverageBar || 'Share of requirements checked by the scan, per standard' } },
+                scales: {
+                    x: { beginAtZero: true, max: 100, grid: { display: false }, ticks: { callback: v => v + '%' } },
+                    y: { grid: { display: false }, ticks: { font: { weight: 'bold' } } }
+                }
+            }
+        });
+    }
 
     // =========================================================================
     // HEALTH SCORE CHARTS
@@ -893,10 +920,78 @@ function initCharts() {
     // (2026-08-23) — pur doublon du % déjà affiché par la barre de
     // progression juste au-dessus dans le header (health-bar).
 
-    // The bar chart of security-score penalties became the server-rendered
-    // table « What lowers the score » (summary_html::render_health_table,
-    // 2026-11-19): its bars in points next to « count × weight » labels
-    // were not understood.
+    // Bar — findings that count for the security score, per severity.
+    // Bars and labels are numbers of findings only (2026-11-20): bars in
+    // penalty points, then labels « 40 × 5 = 200 », were not understood
+    // by testers. The penalties and the score's computation are in the
+    // table « What lowers the score » right below
+    // (summary_html::render_health_table).
+    if (document.getElementById('healthSeverityChart') && data.healthSeverity) {
+        const hs = data.healthSeverity;
+        const sevKeys = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW'];
+        const sevLabels = sevKeys.map(k => hs[k] ? hs[k].label : k);
+        const sevCounts = sevKeys.map(k => hs[k] ? hs[k].count : 0);
+        const sevColors = ['#7f1d1d', '#dc2626', '#f59e0b', '#3b82f6'];
+
+        const barLabelPlugin = {
+            id: 'barLabels',
+            afterDatasetsDraw(chart) {
+                const ctx = chart.ctx;
+                const meta = chart.getDatasetMeta(0);
+                meta.data.forEach(function(bar, i) {
+                    const label = String(sevCounts[i]);
+                    ctx.save();
+                    ctx.font = 'bold 12px sans-serif';
+                    ctx.textBaseline = 'middle';
+                    const barW = Math.abs(bar.x - bar.base);
+                    const textW = ctx.measureText(label).width;
+                    if (barW > textW + 12) {
+                        ctx.fillStyle = '#fff';
+                        ctx.textAlign = 'right';
+                        ctx.fillText(label, bar.x - 8, bar.y);
+                    } else {
+                        ctx.fillStyle = '#374151';
+                        ctx.textAlign = 'left';
+                        ctx.fillText(label, bar.x + 6, bar.y);
+                    }
+                    ctx.restore();
+                });
+            }
+        };
+
+        new Chart(document.getElementById('healthSeverityChart'), {
+            type: 'bar',
+            data: {
+                labels: sevLabels,
+                datasets: [{
+                    label: i18n.healthChartAxis || 'Findings',
+                    data: sevCounts,
+                    backgroundColor: sevColors,
+                    borderWidth: 0,
+                    borderRadius: 4
+                }]
+            },
+            options: {
+                responsive: true, maintainAspectRatio: false,
+                indexAxis: 'y',
+                scales: {
+                    x: { beginAtZero: true, grid: { color: 'rgba(0,0,0,0.05)' }, ticks: { precision: 0 }, title: { display: true, text: i18n.healthChartAxis || 'Findings' } },
+                    y: { grid: { display: false } }
+                },
+                plugins: {
+                    legend: { display: false },
+                    title: {
+                        display: true,
+                        text: (i18n.healthSeverityChart || 'Findings that count for the security score: {count} of {total}')
+                            .replace('{count}', sevCounts.reduce((a, b) => a + b, 0))
+                            .replace('{total}', totalFindings)
+                    }
+                }
+            },
+            plugins: [barLabelPlugin]
+        });
+    }
+
     // ========== TAINT FLOWS CHART ==========
     if (data.taint && data.taint.enabled && document.getElementById('taintFlowsChart')) {
         const taintRules = Object.keys(data.taint.byRule);

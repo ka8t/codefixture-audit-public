@@ -25,7 +25,25 @@
                 </div>
             </div>
         </div>
+        {{synthesis_table}}
         <div class="cmp-sev-grid">
+            <div class="cmp-sev-card cmp-sev-card-critical">
+                <div class="cmp-sev-header">
+                    <span class="sev-tag sev-critical">CRITICAL</span>
+                    {{delta_critical}}
+                </div>
+                <div class="cmp-sev-body">
+                    <div class="cmp-sev-stat">
+                        <span class="cmp-sev-stat-label">{{i18n_baseline}}</span>
+                        <span class="cmp-sev-stat-value">{{baseline_critical}}</span>
+                    </div>
+                    <span class="cmp-sev-stat-arrow">→</span>
+                    <div class="cmp-sev-stat">
+                        <span class="cmp-sev-stat-label">{{i18n_current}}</span>
+                        <span class="cmp-sev-stat-value cmp-sev-now">{{total_critical}}</span>
+                    </div>
+                </div>
+            </div>
             <div class="cmp-sev-card cmp-sev-card-high">
                 <div class="cmp-sev-header">
                     <span class="sev-tag sev-high">HIGH</span>

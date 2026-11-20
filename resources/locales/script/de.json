@@ -379,6 +379,7 @@
   "scan_version_rules_unreadable": "Versionsregeln des Regelpakets unbrauchbar ({error}): die Abhängigkeiten wurden nicht mit veröffentlichten Schwachstellen verglichen.",
   "scan_languages_unknown": "Warnung: Wert(e) von \"languages\" in audit.config.json, die keine unterstützte Sprache bezeichnen, ignoriert: {languages}",
   "scan_unknown_format": "Fehler: unbekanntes Format: {format} (erwartet: text|sarif|html)",
+  "scan_baseline_unreadable": "Referenzdatei nicht lesbar ({path}): {error}. Geben Sie mit --baseline eine Datei SCA-DATA-….json einer früheren Analyse an (Ordner audit-reports/audit-datas).",
   "scan_internal_error": "Interner Fehler: {error}",
   "scan_rule_skipped": "Regel übersprungen ({path}): {error}",
   "scan_rule_replaced": "Ihre Regel {rule} ({kept}) ersetzt die Katalogregel.",

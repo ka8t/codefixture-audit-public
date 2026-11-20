@@ -362,6 +362,10 @@ pub struct ScanConfig {
     /// from `docs/audit-reports/audit-datas` to
     /// `audit-reports/audit-datas`). Never written. `None`: no fallback.
     pub legacy_datas_dir: Option<PathBuf>,
+    /// Export of the scan to compare with (`--baseline`), instead of the
+    /// latest one of the history folder. `None`: the latest. The CLI has
+    /// checked that it reads.
+    pub baseline_path: Option<PathBuf>,
     /// Naming prefix for history files (`{prefix}-DATA-*.json`).
     pub brand_prefix: String,
     /// `%Y-%m-%d-%H-%M` timestamp shared with the HTML report
@@ -482,6 +486,7 @@ impl Default for ScanConfig {
             database: None,
             datas_dir: None,
             legacy_datas_dir: None,
+            baseline_path: None,
             brand_prefix: "SCA".to_string(),
             timestamp: String::new(),
             quick_mode: false,
@@ -502,6 +507,9 @@ impl Default for ScanConfig {
 /// the last scan made before the history directory moved). `None` when
 /// history is disabled (`datas_dir == None`) or empty in both places.
 fn find_baseline(config: &ScanConfig) -> Option<PathBuf> {
+    if let Some(chosen) = &config.baseline_path {
+        return Some(chosen.clone());
+    }
     let datas_dir = config.datas_dir.as_ref()?;
     crate::report::export_json::find_latest_baseline(datas_dir, &config.brand_prefix).or_else(
         || {

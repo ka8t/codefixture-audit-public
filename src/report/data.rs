@@ -67,8 +67,7 @@ const VULNERABLE_DEPENDENCY_RULE: &str = "vulnerable_dependency";
 pub fn counts_for_security_score(f: &ReportFinding) -> bool {
     SECURITY_SCORE_CATEGORIES.contains(&f.category.as_str())
         || f.rule_key == VULNERABLE_DEPENDENCY_RULE
-        || f
-            .cwe
+        || f.cwe
             .iter()
             .any(|cwe| HARDCODED_SECRET_CWES.contains(&cwe.as_str()))
 }

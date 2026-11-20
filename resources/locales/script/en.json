@@ -379,6 +379,7 @@
   "scan_version_rules_unreadable": "Version rules of the rule pack unusable ({error}): dependencies were not checked against published vulnerabilities.",
   "scan_languages_unknown": "Warning: value(s) of \"languages\" in audit.config.json that name no supported language, ignored: {languages}",
   "scan_unknown_format": "Error: unknown format: {format} (expected: text|sarif|html)",
+  "scan_baseline_unreadable": "Unreadable baseline file ({path}): {error}. Give --baseline a SCA-DATA-….json file of an earlier scan (folder audit-reports/audit-datas).",
   "scan_internal_error": "Internal error: {error}",
   "scan_rule_skipped": "Rule skipped ({path}): {error}",
   "scan_rule_replaced": "Your rule {rule} ({kept}) replaces the catalog rule.",

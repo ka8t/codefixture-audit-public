@@ -1313,6 +1313,14 @@ enum Command {
         /// range has no version in it.
         #[arg(long)]
         sbom: bool,
+        // Ticket: compare two versions of a project (2026-11-20). The `///`
+        // text below is the `--help` line.
+        /// Earlier scan to compare with, as its JSON export
+        /// (`audit-reports/audit-datas/<PREFIX>-DATA-<timestamp>.json`),
+        /// for instance the scan of the previous version of the project.
+        /// Default: the latest scan of the history folder.
+        #[arg(long)]
+        baseline: Option<PathBuf>,
     },
     /// Lists the builtin rules by category (mirrors `--list-rules`).
     ListRules {
@@ -1421,6 +1429,7 @@ fn dispatch(command: Command) -> ExitCode {
             quick,
             only_category,
             sbom,
+            baseline,
         } => run_scan_command(ScanArgs {
             path,
             rules,
@@ -1431,6 +1440,7 @@ fn dispatch(command: Command) -> ExitCode {
             quick,
             only_category,
             sbom,
+            baseline,
         }),
         Command::ListRules { lang, rules } => run_list_rules_command(&lang, rules),
     }
@@ -1611,6 +1621,7 @@ struct ScanArgs {
     quick: bool,
     only_category: Option<String>,
     sbom: bool,
+    baseline: Option<PathBuf>,
 }
 
 fn run_scan_command(args: ScanArgs) -> ExitCode {
@@ -1624,6 +1635,7 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
         quick,
         only_category,
         sbom,
+        baseline,
     } = args;
     // The shared binary has none of these options: their defaults.
     let extra = ScanExtraArgs::default();
@@ -1721,6 +1733,20 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
         emit_error(
             &codefixture_audit::i18n::t(&script_locale, "scan_unknown_format")
                 .replace("{format}", &format),
+        );
+        return ExitCode::from(2);
+    }
+    // `--baseline`: read before the scan, so that a missing or unreadable
+    // file stops here with its path and the reason. It never falls back on
+    // the latest scan, which would compare with another version than the
+    // one asked for.
+    if let Some(file) = &baseline
+        && let Err(error) = codefixture_audit::report::export_json::load_export(file)
+    {
+        emit_error(
+            &codefixture_audit::i18n::t(&script_locale, "scan_baseline_unreadable")
+                .replace("{path}", &file.display().to_string())
+                .replace("{error}", &error),
         );
         return ExitCode::from(2);
     }
@@ -1977,6 +2003,7 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
         database,
         datas_dir: data_dir,
         legacy_datas_dir,
+        baseline_path: baseline.clone(),
         timestamp: timestamp.clone(),
         quick_mode: quick,
         only_category,
@@ -2002,7 +2029,10 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
     // `--database`), nor when the run itself is measured
     // (`--metrics-output`) or an HTML report is expected at an explicit
     // path. `inputs` is also what the record of this scan will hold.
+    // `--baseline` asks for a comparison the last report may not hold:
+    // the scan runs in full.
     let shortcut_allowed = !no_cache
+        && baseline.is_none()
         && !config.with_tests
         && config.database.is_none()
         && metrics_output.is_none()

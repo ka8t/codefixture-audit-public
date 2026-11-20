@@ -394,6 +394,7 @@ a.glossary-link[data-tooltip]:hover::before { content: ''; position: absolute; b
 .comparison-section .section-header { background: #eff6ff; border-bottom: 1px solid #bfdbfe; }
 .comparison-section .section-header:hover { background: #dbeafe; }
 .sev-tag { display: inline-block; padding: 0.2rem 0.6rem; border-radius: 4px; font-size: 0.75rem; font-weight: 700; letter-spacing: 0.04em; white-space: nowrap; }
+.sev-critical { background: #7f1d1d; color: #fee2e2; }
 .sev-high { background: #fee2e2; color: #b91c1c; }
 .sev-medium { background: #fef3c7; color: #92400e; }
 .sev-low { background: #dbeafe; color: #1e40af; }
@@ -415,9 +416,14 @@ a.glossary-link[data-tooltip]:hover::before { content: ''; position: absolute; b
 .cmp-trend-cell-label { font-size: 0.7rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; opacity: 0.7; }
 .cmp-trend-cell-value { font-size: 1.6rem; font-weight: 800; line-height: 1.1; }
 .cmp-trend-arrow { font-size: 1.3rem; opacity: 0.5; }
-.cmp-sev-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0.75rem; margin-bottom: 1.25rem; }
+.cmp-sev-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 0.75rem; margin-bottom: 1.25rem; }
 .cmp-sev-card { background: white; border: 1px solid var(--gray-200); border-radius: 8px; padding: 0.85rem 1rem; display: flex; flex-direction: column; gap: 0.65rem; }
+.cmp-sev-card-critical { border-top: 3px solid #7f1d1d; }
 .cmp-sev-card-high { border-top: 3px solid var(--danger); }
+.cmp-synthesis { background: white; border: 1px solid var(--gray-200); border-radius: 8px; padding: 0.85rem 1rem; margin-bottom: 1.25rem; color: var(--gray-800); }
+.cmp-synthesis h3 { font-size: 0.95rem; margin: 0 0 0.6rem; }
+.cmp-synthesis .health-calc-table td.fixed { color: #065f46; font-weight: 600; }
+.cmp-synthesis .health-calc-table td.added { color: #991b1b; font-weight: 600; }
 .cmp-sev-card-medium { border-top: 3px solid var(--warning); }
 .cmp-sev-card-low { border-top: 3px solid var(--info); }
 .cmp-sev-card-info { border-top: 3px solid #6b7280; }

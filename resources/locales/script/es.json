@@ -379,6 +379,7 @@
   "scan_version_rules_unreadable": "Reglas de versión del paquete inutilizables ({error}): las dependencias no se compararon con las vulnerabilidades publicadas.",
   "scan_languages_unknown": "Advertencia: valor(es) de \"languages\" en audit.config.json que no designan ningún lenguaje compatible, ignorado(s): {languages}",
   "scan_unknown_format": "Error: formato desconocido: {format} (esperado: text|sarif|html)",
+  "scan_baseline_unreadable": "Archivo de referencia ilegible ({path}): {error}. Indique con --baseline un archivo SCA-DATA-….json de un análisis anterior (carpeta audit-reports/audit-datas).",
   "scan_internal_error": "Error interno: {error}",
   "scan_rule_skipped": "Regla ignorada ({path}): {error}",
   "scan_rule_replaced": "Su regla {rule} ({kept}) sustituye a la del catálogo.",

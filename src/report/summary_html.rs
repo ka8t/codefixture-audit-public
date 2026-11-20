@@ -668,8 +668,14 @@ mod tests {
         let html = render_health_table(&data, 2500, &fr);
         assert!(html.contains("Ce qui fait baisser le score"), "{html}");
         // HIGH: 2 counted, 10 points; total 3 findings, 12 points.
-        assert!(html.contains(r#"<td class="num">2</td><td class="num">10 "#), "{html}");
-        assert!(html.contains(r#"<td class="num">3</td><td class="num">12</td>"#), "{html}");
+        assert!(
+            html.contains(r#"<td class="num">2</td><td class="num">10 "#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<td class="num">3</td><td class="num">12</td>"#),
+            "{html}"
+        );
         // 100 ÷ (1 + 12 ÷ (20 × 2,5)) = 80.
         assert!(
             html.contains("Pour 2500 lignes de code : 100 ÷ (1 + 12 ÷ (20 × 2,5)) = 80 %."),

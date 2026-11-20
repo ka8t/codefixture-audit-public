@@ -847,7 +847,10 @@ mod tests {
         let asvs = compute_asvs_compliance(&[], &scope);
         let nist = compute_nist_csf_compliance(&[], &scope);
         let html = render_compliance_table(&iso, &asvs, &nist, 43.3, &fr);
-        assert!(html.contains("Ce que mesure le score de conformité (43,3 %)"), "{html}");
+        assert!(
+            html.contains("Ce que mesure le score de conformité (43,3 %)"),
+            "{html}"
+        );
         assert!(
             html.contains(&format!(
                 "<td>ISO 27001</td><td class=\"num\">{} sur {}</td>",
@@ -862,7 +865,10 @@ mod tests {
             )),
             "{html}"
         );
-        assert!(html.contains("pas si le projet respecte le référentiel"), "{html}");
+        assert!(
+            html.contains("pas si le projet respecte le référentiel"),
+            "{html}"
+        );
     }
 
     #[test]
