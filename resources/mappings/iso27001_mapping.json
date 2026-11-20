@@ -525,7 +525,6 @@
     "socket_auth_race":               ["A.8.5", "A.8.28"],
     "spring_actuator_exposed":        ["A.8.9", "A.8.28", "A.8.31"],
     "sql_injection_format_string_python": ["A.8.28", "A.8.26"],
-    "sql_injection_java_broad":       ["A.8.28", "A.8.26"],
     "sql_injection_raw_js":           ["A.8.28", "A.8.26"],
     "sql_injection_string_format_csharp": ["A.8.28", "A.8.26"],
     "sql_order_by_injection_python":  ["A.8.28", "A.8.26"],

@@ -449,7 +449,6 @@
     "socket_auth_race": [],
     "spring_actuator_exposed": [],
     "sql_injection_format_string_python": ["1.2.4"],
-    "sql_injection_java_broad": ["1.2.4"],
     "sql_injection_raw_js": ["1.2.4"],
     "sql_injection_string_format_csharp": ["1.2.4"],
     "sql_order_by_injection_python": ["1.2.4"],

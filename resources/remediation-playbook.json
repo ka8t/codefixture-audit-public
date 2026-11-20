@@ -3,7 +3,7 @@
   "tool": "codefixture-audit",
   "tool_version": "1.4.0",
   "description": "Remediation playbook — structured steps for each detection rule. Readable by humans and machines.",
-  "total_rules": 561,
+  "total_rules": 560,
   "rules": {
     "autoplay_media": {
       "title": "A video or a sound starts playing by itself",
@@ -10795,37 +10795,6 @@
           "A.8.9",
           "A.8.28",
           "A.8.31"
-        ]
-      }
-    },
-    "sql_injection_java_broad": {
-      "title": "An SQL query runs in a file that reads web request data",
-      "severity": "HIGH",
-      "category": "security",
-      "language": "java",
-      "risk": "This file runs SQL queries (the commands sent to the database) and also reads data sent by visitors, such as form fields or headers. If that data is glued into a query, a visitor can read, change or delete your data.",
-      "steps": [
-        {
-          "order": 1,
-          "action": "Locate the vulnerable code pattern in the file",
-          "type": "diagnostic"
-        },
-        {
-          "order": 2,
-          "action": "Check each query of the file: 1) write a ? in the SQL text where each value goes, with conn.prepareStatement(\"SELECT * FROM users WHERE id = ?\"); 2) pass the values with setString or setInt, never by joining them to the text with +.",
-          "type": "code_change"
-        },
-        {
-          "order": 3,
-          "action": "Run the audit again to verify the finding is resolved",
-          "type": "verification"
-        }
-      ],
-      "benefit": "Visitor data can no longer change your SQL queries.",
-      "references": {
-        "iso27001": [
-          "A.8.28",
-          "A.8.26"
         ]
       }
     },

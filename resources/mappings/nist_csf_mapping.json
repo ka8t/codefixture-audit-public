@@ -404,7 +404,6 @@
     "sql_injection_doctrine": ["PR.DS-10", "PR.PS-06"],
     "sql_injection_format_java": ["PR.DS-10", "PR.PS-06"],
     "sql_injection_format_string_python": ["PR.DS-10", "PR.PS-06"],
-    "sql_injection_java_broad": ["PR.DS-10", "PR.PS-06"],
     "sql_injection_jpa_native": ["PR.DS-10", "PR.PS-06"],
     "sql_injection_mybatis": ["PR.DS-10", "PR.PS-06"],
     "sql_injection_prisma": ["PR.DS-10", "PR.PS-06"],
