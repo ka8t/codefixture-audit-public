@@ -1,6 +1,27 @@
 # From download to a full analysis of your code
 
+*Version française : [INSTALLATION.fr.md](INSTALLATION.fr.md)*
+
 This guide takes you, step by step, from nothing installed to a complete analysis of your own source code on your machine, then through reading and fixing what it finds. The analysis runs locally: your code never leaves your computer.
+
+```mermaid
+flowchart TD
+    subgraph ONCE["Once per machine, ~15 min"]
+        S1["1. Check what you need"] --> S2["2. Install git and Rust"]
+        S2 --> S3["3. Download the repository"]
+        S3 --> S4["4. Build the engine"]
+        S4 --> S5["5. Check the build"]
+        S5 --> S6["6. Full catalog? (optional)"]
+    end
+    subgraph PROJECT["For each project"]
+        S7["7. First run:<br/>describe the project"] --> S8["8. Run the analysis"]
+        S8 --> S9["9. Read the report"]
+        S9 --> S10["10. Fix, then analyse again"]
+        S10 --> S8
+    end
+    S6 --> S7
+    S11["11. Update the engine<br/>(from time to time)"] --> S8
+```
 
 | Step | What you do | Time |
 |---|---|---|
@@ -97,6 +118,17 @@ cargo build --release
 
 The first build downloads the Rust libraries the engine uses and compiles everything: 3 to 10 minutes depending on the machine. It ends with a `Finished` line. The engine is then `target/release/codefixture-audit` (`target\release\codefixture-audit.exe` on Windows), next to the rule pack `target/release/rules.cfpack`.
 
+```mermaid
+flowchart LR
+    CODE["src/<br/>the engine's code"] -- "cargo build" --> BIN
+    RULES["rules/rules.cfpack<br/>38 demo rules"] -- "cargo build copies it" --> PACK
+    subgraph REL["target/release/"]
+        BIN["codefixture-audit<br/>(.exe on Windows)"]
+        PACK["rules.cfpack"]
+    end
+    BIN -- "reads next to itself" --> PACK
+```
+
 ## Step 5: check the build
 
 macOS and Linux:
@@ -121,7 +153,7 @@ Every command below is run from the `codefixture-audit-public` folder, with the 
 
 With the 38 demonstration rules, the analysis works at once but covers a small part of what the engine detects. The full catalog has more than 700 rules. It also covers every published vulnerability (CVE, GHSA) of the five ecosystems, against which your dependencies are checked.
 
-The full catalog is not a file to add to this repository. A tester or a client of [CodeFixture](https://codefixture.com) is given access to its private repository on GitHub. Clone that repository and follow its own `docs/INSTALLATION.md`. Its build writes the full catalog next to the engine. Its step A7 (B7 on Windows) downloads the published vulnerabilities onto your machine. Its updates are `git pull` and a new build, as in step 11.
+The full catalog is not a file to add to this repository. A tester or a client of [CodeFixture](https://codefixture.com) is given access to its private repository on GitHub. Clone that repository and follow its own `docs/INSTALLATION.md`. Its build writes the full catalog next to the engine. Its step 7 downloads the published vulnerabilities onto your machine. Its updates are `git pull` and a new build, as in step 11.
 
 Without that access, keep this repository: the steps below work the same with the demonstration rules.
 
@@ -141,6 +173,24 @@ Windows:
 ```powershell
 cd ~\codefixture-audit-public
 .\target\release\codefixture-audit.exe scan C:\path\to\your\project --lang en
+```
+
+```mermaid
+sequenceDiagram
+    actor You
+    participant E as codefixture-audit
+    participant P as your project
+    You->>E: scan /path/to/your/project
+    E->>P: looks for audit.config.json: none
+    E->>You: whole folder, or which sub-folders?
+    You->>E: your choice (Enter: whole folder)
+    E->>You: which folders to exclude?
+    You->>E: your choice (Enter: none)
+    E->>You: shows the file, with the languages found
+    You->>E: confirm
+    E->>P: writes audit.config.json
+    E->>You: run the same command again
+    Note over You,E: Nothing is analysed during this run
 ```
 
 It asks whether to analyse the whole folder or some sub-folders, and which folders to exclude. It then shows the file with the languages it detected, and writes it once you confirm. Nothing is analysed during this step: run the same command again for the analysis (step 8).
@@ -211,6 +261,27 @@ Options are added to the same command, for example `./target/release/codefixture
 
 Open the file named on the `Report generated` line in a browser. The report is written into your project, under `audit-reports/`; do not commit that folder, it holds the results.
 
+```mermaid
+flowchart TD
+    AR["audit-reports/"] --> HTML["SCA-REPORT-date.html<br/>the report: open it in a browser"]
+    AR --> AD["audit-datas/"]
+    AD --> JSON["SCA-DATA-date.json<br/>the results, compared by the next analysis"]
+    AD --> SBOM["SCA-SBOM-date.json<br/>with --sbom only"]
+    AD --> CACHE["cache/<br/>speeds up the next analysis"]
+```
+
+```mermaid
+flowchart TD
+    R["Report"] --> SUM["Summary and charts<br/>security score, compliance score,<br/>findings by severity"]
+    R --> RULES["Findings, grouped by rule"]
+    RULES --> RB["For each rule: Risk, Solution,<br/>Playbook, generic fix example"]
+    RULES --> F["For each finding:<br/>Your code — file:line"]
+    F --> FIX{"What the engine<br/>can tell you"}
+    FIX --> P1["Proposed fix:<br/>your own line rewritten"]
+    FIX --> P2["To fix (data-flow finding):<br/>every step from where the data<br/>enters to the line to change"]
+    FIX --> P3["No automatic fix:<br/>apply the Solution above"]
+```
+
 The report starts with a summary and charts, then lists the findings by severity, category and rule. For each rule, a shared block explains:
 
 - **Risk**: what can go wrong;
@@ -232,11 +303,34 @@ The 🚫 button on a finding marks it as a false positive or an accepted risk; s
 
 Fix your code, then run the same command as in step 8. Each analysis keeps a copy of its results in `audit-reports/audit-datas/` and compares with the previous one: the report shows what was fixed, what is new and what remains.
 
+```mermaid
+flowchart TD
+    RUN["scan"] --> CH{"Has anything changed since<br/>the last analysis? (files, rules,<br/>.sca-suppress.json, options)"}
+    CH -- "No" --> SAME["Nothing analysed, no new report:<br/>the output gives the path<br/>of the last report"]
+    CH -- "Yes" --> PART["Only the changed files and those<br/>that depend on them are analysed again,<br/>the rest comes from the cache"]
+    PART --> NEW["New report, compared<br/>with the previous one"]
+```
+
 The next analysis is much faster: it only redoes the files you changed and those that depend on them, and reuses the rest from `audit-reports/audit-datas/cache/`. Two lines of the output say how much was redone, for example `Cache (python): 1/460 file(s) changed since the last scan, 34/10580 taint analyses redone.` The report is the same as with a full analysis. Each version of the engine keeps its own cache in a sub-folder named after it, so two versions used on the same project do not overwrite each other; the three most recently used are kept. To force a full analysis, add `--no-cache`; deleting the `cache/` folder does the same.
 
 If no file has changed since the last analysis, nothing is analysed and no new report is written. The output says so and gives the path of the last report, for example `No file has changed since the scan of 18/11/2026 13:36: nothing was analysed again.` A changed file, rule pack, `.sca-suppress.json` or option runs the analysis again. `--format sarif` and `--format text` still print their result, taken from the last analysis, and `--sbom` gives the path of the SBOM already written instead of writing a new one.
 
 To silence a finding you have reviewed:
+
+```mermaid
+sequenceDiagram
+    actor You
+    participant R as HTML report
+    participant P as your project
+    participant E as next analysis
+    You->>R: click 🚫 on each finding to hide
+    You->>R: click the download button of the panel
+    R->>You: .sca-suppress.json
+    You->>P: move the file to the root of the project
+    E->>P: reads .sca-suppress.json
+    E->>You: the finding no longer appears
+    Note over E,P: If the line changes, the finding comes back:<br/>a new problem is never hidden
+```
 
 1. click 🚫 on the finding in the report (as many as needed), then the download button in the panel that appears: it saves a `.sca-suppress.json` file;
 2. move that file to the root of your project.
@@ -291,6 +385,18 @@ The file prefix `SCA` follows `brand.json` when you customise it.
 The engine and `rules.cfpack` are all an analysis needs: copy them together to another folder and run the engine from anywhere. Without the pack beside it, the engine stops and names the file it looked for.
 
 ### When something goes wrong
+
+```mermaid
+flowchart TD
+    P{"Where does it fail?"}
+    P -- "cargo: command not found" --> A1["Close and reopen the terminal,<br/>on Windows, restart the session"]
+    P -- "linker 'cc' not found (Linux)" --> A2["sudo apt install build-essential"]
+    P -- "linker 'link.exe' not found (Windows)" --> A3["Run the third winget line of step 2"]
+    P -- "the engine names a missing rules.cfpack" --> A4["cargo build --release"]
+    P -- "dependencies never checked" --> A5["No --quick, the project must<br/>declare them (pom.xml, package.json…)"]
+    P -- "a language never checked" --> A6["Add it to languages<br/>in audit.config.json"]
+    P -- "git pull refuses" --> A7["See the end of step 11"]
+```
 
 | Message or symptom | What to do |
 |---|---|

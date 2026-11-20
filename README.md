@@ -1,48 +1,27 @@
 # codefixture-audit
 
-Security scanner for source code by [CodeFixture](https://codefixture.com). It analyzes Python, Java, JavaScript/TypeScript, PHP, C#, HTML, YAML and Dockerfile sources, including data-flow (taint) analysis, and writes an HTML report.
+*Version française : [README.fr.md](README.fr.md)*
 
-This repository holds the complete engine and a sample of its detection rules. The analysis runs on your machine: your code never leaves it.
+A security scanner for source code, by [CodeFixture](https://codefixture.com). It reads your project, finds code that can be attacked (SQL injection, secrets written in the code, vulnerable dependencies…) and writes an HTML report that shows each problem on your own line, with the fix.
 
-## Known limits
+- **Nothing leaves your machine**: the analysis never uses the network.
+- **8 languages**: Python, Java, JavaScript/TypeScript, PHP, C#, HTML templates, YAML (CI/CD) and Dockerfile.
+- **Data-flow analysis**: it follows a value from where it enters your program (a form field, an HTTP parameter) to where it is used dangerously (an SQL query), across functions and files.
 
-Read this before you start: these are the cases where the engine may not behave as you expect.
+This repository holds the complete engine and **38 demonstration rules**, a sample of the catalog.
 
-| Limit | What it means for you |
-|---|---|
-| **Tested on macOS and Linux** | Linux was checked on Ubuntu 24.04. Windows has not been tested yet: the Windows commands are given but have never been run; please report any problem. |
-| **The first analysis takes two runs** | The first command asks 2 or 3 questions (press Enter to keep the defaults), writes `audit.config.json` in your project, then stops and asks you to run the same command again. The second run produces the report. |
-| **The demo rules give a thin report** | This repository ships 38 demonstration rules, a small part of the catalog. Without the full rule pack, most findings may come from a few rules (for example JavaScript written in HTML attributes). |
-| **The demo pack knows few published vulnerabilities** | Your dependencies are compared with the 21 well-known vulnerabilities this repository's pack carries (Log4Shell, Spring4Shell, lodash, lxml…). A dependency not reported may still be affected by another one. The full pack carries every published vulnerability of the five ecosystems. |
-| **First installation takes time** | Installing Rust and the first build take about 10 to 15 minutes. Later builds and analyses are much faster. |
+## In 10 minutes
 
-Details and workarounds: [Known limits](INSTALLATION.md#known-limits) in the guide.
-
-## Analyse a folder
-
-Once the engine is built (see below), run from the `codefixture-audit-public` folder, replacing the path with the folder of your code:
-
-macOS:
-
-```bash
-./target/release/codefixture-audit scan /path/to/your/project --lang en
+```mermaid
+flowchart LR
+    A["1. Install git and Rust<br/><i>5 to 10 min, once</i>"] --> B["2. git clone"]
+    B --> C["3. cargo build --release<br/><i>3 to 10 min the first time</i>"]
+    C --> D["4. scan your project<br/><i>it asks 2 or 3 questions</i>"]
+    D --> E["5. scan again<br/><i>the report is written</i>"]
+    E --> F["6. open the HTML report"]
 ```
 
-Windows (PowerShell):
-
-```powershell
-.\target\release\codefixture-audit.exe scan C:\path\to\your\project --lang en
-```
-
-- `--lang` sets the report language: `en`, `fr`, `es` or `de`.
-- When your project declares dependencies (`requirements.txt`, `package.json`, `pom.xml`, `composer.json`, `.csproj`…), their pinned versions are compared with the published vulnerabilities the rule pack carries, offline. A vulnerability that CISA lists as exploited in real attacks (KEV) makes the finding critical, and each CVE shows its EPSS score, the probability that it gets exploited in the next 30 days.
-- `--sbom` also writes a CycloneDX SBOM (software bill of materials) of the dependencies your project declares: see [SBOM export](INSTALLATION.md#sbom-export).
-- The first run on a project asks what to analyse and writes `audit.config.json`; run the same command again for the analysis.
-- The report is written into your project, under `audit-reports/`: the terminal prints its path on the `Report generated` line. Open it in a browser.
-
-## First installation
-
-From nothing installed to the first analysis, in a terminal (macOS):
+macOS, in the Terminal:
 
 ```bash
 xcode-select --install
@@ -53,9 +32,10 @@ git clone https://github.com/ka8t/codefixture-audit-public.git
 cd codefixture-audit-public
 cargo build --release
 ./target/release/codefixture-audit scan /path/to/your/project --lang en
+./target/release/codefixture-audit scan /path/to/your/project --lang en
 ```
 
-Windows (PowerShell):
+Windows, in PowerShell:
 
 ```powershell
 winget install Git.Git
@@ -67,28 +47,69 @@ git clone https://github.com/ka8t/codefixture-audit-public.git
 cd codefixture-audit-public
 cargo build --release
 .\target\release\codefixture-audit.exe scan C:\path\to\your\project --lang en
+.\target\release\codefixture-audit.exe scan C:\path\to\your\project --lang en
 ```
 
-[`INSTALLATION.md`](INSTALLATION.md) takes you step by step from download to a full analysis of your own code: installing the tools, building the engine, describing your project, running the analysis, reading the report (your code, the proposed fix, the data-flow path) and analysing again after a fix.
+The scan runs twice on purpose: the first run asks what to analyse, writes `audit.config.json` in your project and stops. The second run analyses. The last lines print the path of the report, under `audit-reports/` in your project: open it in a browser.
 
-The sample rules come compiled into one file, `rules/rules.cfpack`: the engine you build uses it at once, and the two can be moved anywhere together. Each scan keeps only the rules of the scanned project's languages: see [step 7](INSTALLATION.md#step-7-describe-your-project-first-run).
+Linux, the details of each step and what to expect: [`INSTALLATION.md`](INSTALLATION.md).
 
-## Already installed?
+## What the engine does
 
-From your `codefixture-audit-public` folder:
-
-```bash
-git pull
-cargo build --release
+```mermaid
+flowchart TD
+    P["Your project"] --> FILES["Pick the files<br/>skips dependencies, build output,<br/>minified files"]
+    FILES --> A["Text rules:<br/>patterns in the code"]
+    FILES --> B["Data-flow rules:<br/>follow outside data<br/>to a dangerous call"]
+    FILES --> C["Dependencies:<br/>pinned versions vs<br/>published vulnerabilities"]
+    A --> R["HTML report<br/>your code, the fix,<br/>the path of the data"]
+    B --> R
+    C --> R
+    R --> NEXT["Fix, then scan again:<br/>the report shows what is<br/>fixed, new and remaining"]
 ```
 
-## Full rule catalog
+## Known limits
 
-The sample covers a small part of what the engine detects. The full catalog has more than 700 rules and checks dependencies against every published vulnerability of the five ecosystems. [CodeFixture](https://codefixture.com) gives its testers and clients access to the private repository that builds it: see [step 6](INSTALLATION.md#step-6-add-the-full-catalog-optional).
+| Limit | What it means for you |
+|---|---|
+| **Tested on macOS and Linux** | Linux was checked on Ubuntu 24.04. The Windows commands are given but have not been run yet: please report any problem. |
+| **The first analysis takes two runs** | The first run asks 2 or 3 questions (press Enter to keep the defaults), writes `audit.config.json`, then stops. The second run produces the report. |
+| **The demo rules give a thin report** | 38 rules are a small part of the catalog. Most findings may come from a few rules, such as JavaScript written in HTML attributes. |
+| **The demo rules know few published vulnerabilities** | Your dependencies are compared with 21 well-known vulnerabilities (Log4Shell, Spring4Shell, lodash, lxml…). A dependency not reported may still be affected by another one. |
+| **First installation takes time** | Installing Rust and the first build take 10 to 15 minutes. Later builds and analyses are much faster. |
+
+Details and workarounds: [Known limits](INSTALLATION.md#known-limits) in the guide.
+
+## Everyday commands
+
+From the `codefixture-audit-public` folder (on Windows, `.\target\release\codefixture-audit.exe`):
+
+| You want to | Command |
+|---|---|
+| Analyse a project | `./target/release/codefixture-audit scan /path/to/your/project --lang en` |
+| Report in French, Spanish or German | `--lang fr`, `--lang es` or `--lang de` |
+| List the rules | `./target/release/codefixture-audit list-rules` |
+| A CycloneDX SBOM of your dependencies | add `--sbom` (see [SBOM export](INSTALLATION.md#sbom-export)) |
+| Update the engine | `git pull`, then `cargo build --release` |
+
+When your project declares dependencies (`requirements.txt`, `package.json`, `pom.xml`, `composer.json`, `.csproj`…), their pinned versions are compared with the published vulnerabilities the rules carry, offline. A vulnerability that CISA lists as exploited in real attacks (KEV) makes the finding critical, and each CVE shows its EPSS score: the probability that it gets exploited in the next 30 days.
+
+The rules come compiled into one file, `rules/rules.cfpack`. The build copies it next to the engine, and the two can be moved anywhere together.
+
+## The full catalog
+
+```mermaid
+flowchart LR
+    Q{"Has CodeFixture given you access<br/>to its private repository?"}
+    Q -- "No" --> HERE["Stay here:<br/>38 demonstration rules"]
+    Q -- "Yes: tester or client" --> PRIV["Clone the private repository<br/>and follow its INSTALLATION.md:<br/>more than 700 rules, every published<br/>vulnerability of 5 ecosystems"]
+```
+
+The full catalog is not a file to add here: CodeFixture gives its testers and clients access to the private repository that builds it. See [step 6](INSTALLATION.md#step-6-add-the-full-catalog-optional).
 
 ## Vulnerability data
 
-The published vulnerabilities and the exploitation data in the rule packs come from these databases, each used under its license:
+The published vulnerabilities and the exploitation data in the rules come from these databases, each used under its license:
 
 | Database | License |
 |---|---|
@@ -102,8 +123,8 @@ The published vulnerabilities and the exploitation data in the rule packs come f
 | [CISA Known Exploited Vulnerabilities](https://www.cisa.gov/known-exploited-vulnerabilities-catalog) | CC0 1.0 |
 | [FIRST EPSS](https://www.first.org/epss) | [EPSS usage agreement](https://www.first.org/epss/#Usage-Agreement), credit requested |
 
-The records are reduced to the package names and affected versions the engine compares. Each report lists the databases its rule pack used, in its scope table.
+The records are reduced to the package names and affected versions the engine compares. Each report lists the databases its rules used, in its scope table.
 
 ## License
 
-Proprietary evaluation license — see [`LICENSE`](LICENSE). You may build and test the engine to evaluate it; any other use, including within a company, requires an agreement with [CodeFixture](https://codefixture.com).
+Proprietary evaluation license: see [`LICENSE`](LICENSE). You may build and test the engine to evaluate it; any other use, including within a company, requires an agreement with [CodeFixture](https://codefixture.com).
