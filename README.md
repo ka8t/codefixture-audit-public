@@ -82,11 +82,9 @@ git pull
 cargo build --release
 ```
 
-With the full rule catalog, copy `rules.cfpack` next to the engine again afterwards: see [step 11](INSTALLATION.md#step-11-update-the-engine).
-
 ## Full rule catalog
 
-The sample covers a small part of what the engine detects. The full catalog has more than 700 rules and is available from [CodeFixture](https://codefixture.com), with its updates, as a rule pack that replaces the sample one, with every published vulnerability of the five ecosystems: see [step 6](INSTALLATION.md#step-6-add-the-full-catalog-optional).
+The sample covers a small part of what the engine detects. The full catalog has more than 700 rules and checks dependencies against every published vulnerability of the five ecosystems. [CodeFixture](https://codefixture.com) gives its testers and clients access to the private repository that builds it: see [step 6](INSTALLATION.md#step-6-add-the-full-catalog-optional).
 
 ## Vulnerability data
 

@@ -9,7 +9,7 @@ This guide takes you, step by step, from nothing installed to a complete analysi
 | [3](#step-3-download-the-repository) | Download the repository | 1 min |
 | [4](#step-4-build-the-engine) | Build the engine | 3–10 min the first time |
 | [5](#step-5-check-the-build) | Check the build | 1 min |
-| [6](#step-6-add-the-full-catalog-optional) | Add the full catalog (optional) | 2 min |
+| [6](#step-6-add-the-full-catalog-optional) | Add the full catalog (optional) | 1 min to read |
 | [7](#step-7-describe-your-project-first-run) | Describe your project (first run) | 2 min, once per project |
 | [8](#step-8-run-the-analysis) | Run the analysis | seconds to a few minutes |
 | [9](#step-9-read-the-report) | Read the report | — |
@@ -26,8 +26,8 @@ These are the cases where the engine may not behave as you expect, with what to 
 
 - **Not yet tested on Windows.** Every step of this guide was run on macOS, and on Linux (Ubuntu 24.04). The Windows commands are given, but you may be the first to run them. If a step fails, note the command and the full message it printed, and send them to CodeFixture.
 - **The first analysis takes two runs.** The first time you analyse a project, the engine asks what to analyse (step 7), writes `audit.config.json`, and stops without a report. This is expected: run the same command again. In a script or a CI job there are no questions and the first run produces the report.
-- **The demo rules give a thin report.** The 38 demonstration rules of this repository cover a small part of what the engine detects. On a real project their findings may come mostly from a few rules, such as JavaScript written in HTML attributes (`onclick=…`). The full rule pack (step 6) gives the complete report.
-- **The demo pack knows few published vulnerabilities.** Your dependencies are compared with the published vulnerabilities the rule pack carries: 21 well-known ones in this repository's pack (Log4Shell, Spring4Shell, lodash, lxml…). A dependency the report does not name may still be affected by another one. The full pack (step 6) carries every published vulnerability of the five ecosystems, as of the day it was built: ask for a new one from time to time.
+- **The demo rules give a thin report.** The 38 demonstration rules of this repository cover a small part of what the engine detects. On a real project their findings may come mostly from a few rules, such as JavaScript written in HTML attributes (`onclick=…`). The full catalog (step 6) gives the complete report.
+- **The demo pack knows few published vulnerabilities.** Your dependencies are compared with the published vulnerabilities the rule pack carries: 21 well-known ones in this repository's pack (Log4Shell, Spring4Shell, lodash, lxml…). A dependency the report does not name may still be affected by another one. The full catalog (step 6) checks them against every published vulnerability of the five ecosystems, as of the day its data was last downloaded.
 - **Some findings have no automatic fix.** When the engine cannot rewrite your line safely, the report says so and gives the solution in words, with a generic example. Fixing the line is then up to you.
 - **A finding can be a false positive.** If a finding is wrong (the value is already checked, or cannot come from a user), hide it with 🚫 (step 10) and report it: it helps improve the rules.
 - **First installation takes time.** Installing Rust and the first build take about 10 to 15 minutes (steps 2 and 4). Later builds and analyses are much faster; a re-run on an unchanged project takes less than a second and writes no new report.
@@ -119,29 +119,11 @@ Every command below is run from the `codefixture-audit-public` folder, with the 
 
 ## Step 6: add the full catalog (optional)
 
-With the 38 demonstration rules, the analysis works at once but covers a small part of what the engine detects. A client of [CodeFixture](https://codefixture.com) receives one file, `rules.cfpack`: the full catalog, more than 700 rules, and every published vulnerability (CVE, GHSA) of the five ecosystems, against which your dependencies are checked.
+With the 38 demonstration rules, the analysis works at once but covers a small part of what the engine detects. The full catalog has more than 700 rules. It also covers every published vulnerability (CVE, GHSA) of the five ecosystems, against which your dependencies are checked.
 
-Keep it in a folder of its own, outside `codefixture-audit-public`, so that updates (step 11) never meet a modified file. Then copy it next to the engine.
+The full catalog is not a file to add to this repository. A tester or a client of [CodeFixture](https://codefixture.com) is given access to its private repository on GitHub. Clone that repository and follow its own `docs/INSTALLATION.md`. Its build writes the full catalog next to the engine. Its step A7 (B7 on Windows) downloads the published vulnerabilities onto your machine. Its updates are `git pull` and a new build, as in step 11.
 
-macOS and Linux:
-
-```bash
-mkdir -p ~/codefixture-audit-rules
-cp ~/Downloads/rules.cfpack ~/codefixture-audit-rules/
-cp ~/codefixture-audit-rules/rules.cfpack target/release/
-./target/release/codefixture-audit list-rules | head -1
-```
-
-Windows:
-
-```powershell
-mkdir ~\codefixture-audit-rules
-copy ~\Downloads\rules.cfpack ~\codefixture-audit-rules\
-copy ~\codefixture-audit-rules\rules.cfpack target\release\
-.\target\release\codefixture-audit.exe list-rules | Select-Object -First 1
-```
-
-`list-rules` must now print more than 700 rules. Each build (steps 4 and 11) puts the demonstration pack back next to the engine: copy the full pack again after every build. Instead of copying the rules, you can also add `--rules ~/codefixture-audit-rules/rules.cfpack` to each analysis.
+Without that access, keep this repository: the steps below work the same with the demonstration rules.
 
 ## Step 7: describe your project (first run)
 
@@ -198,17 +180,19 @@ For a report in French, Spanish or German, replace `--lang en` with `--lang fr`,
 - When your project declares dependencies (`requirements.txt`, `package.json`, `pom.xml`, `composer.json`…), their pinned versions are compared with the published vulnerabilities the rule pack carries, offline; the output names the pack, the date of its data and its counts. A range such as `>=2.0` names no installed version and is not compared. In the finding, each vulnerability gives its severity, then `exploited in attacks, CISA KEV since <date>` when CISA's catalog of Known Exploited Vulnerabilities lists it, and `EPSS <n>%`, FIRST's probability that it gets exploited in the next 30 days. An exploited vulnerability makes the finding critical, whatever its severity; the EPSS score changes nothing. The databases of this data and their licenses are listed in the report's scope table and in the [README](README.md#vulnerability-data).
 - `--sbom` also writes the list of your declared dependencies as a CycloneDX file: see [SBOM export](#sbom-export).
 
-The terminal first shows what was loaded, then the progress and a summary:
+The terminal shows the progress, what was loaded and a summary. Here, the analysis of OWASP Juice Shop with this repository's demonstration rules:
 
 ```text
-[codefixture-audit] codefixture-audit 0.1.0+42.c5be809
-[codefixture-audit] Scope (audit.config.json): include src/; exclude 7 default patterns
+[codefixture-audit] codefixture-audit 0.1.0+54.171ec77
+[codefixture-audit] Scope (audit.config.json): include the whole project; exclude 7 default patterns
 [codefixture-audit] Analysis in progress...
-[codefixture-audit] Rules: 166/708 rule file(s) kept for the project's languages, from the pack /…/target/release/rules.cfpack
-[codefixture-audit] 166 rule(s) loaded for languages: dockerfile, python
 …
-[codefixture-audit] Report generated : /path/to/your/project/audit-reports/SCA-REPORT-2026-11-14-09-47.html
-[codefixture-audit] 601 file(s) scanned, 101913 line(s) of code, 2960 finding(s)
+[codefixture-audit] Rules: 23/38 rule file(s) kept for the project's languages, from the pack /…/target/release/rules.cfpack
+[codefixture-audit] 23 rule(s) loaded for languages: dockerfile, html, javascript, python, yaml
+…
+[codefixture-audit] Version rules: 26 published vulnerabilities from the rule pack /…/target/release/rules.cfpack, OSV data up to 2026-11-18T12:11:06.983073747Z: Maven 5, NuGet 3, Packagist 3, PyPI 10, npm 5.
+[codefixture-audit] Report generated : /path/to/your/project/audit-reports/SCA-REPORT-2026-11-20-13-17.html
+[codefixture-audit] 871 file(s) scanned, 91999 line(s) of code, 31 finding(s)
 ```
 
 Options are added to the same command, for example `./target/release/codefixture-audit scan /path/to/your/project --lang en --no-cache`:
@@ -270,7 +254,7 @@ git pull
 cargo build --release
 ```
 
-`git pull` downloads only the new commits; `cargo build --release` rebuilds the engine, faster than the first time. Check with `--version`: the commit count must have grown. With the full catalog, copy `rules.cfpack` next to the engine again (step 6). Ask CodeFixture for a new pack from time to time: published vulnerabilities keep coming, and the pack knows those of the day it was built.
+`git pull` downloads only the new commits; `cargo build --release` rebuilds the engine, faster than the first time. Check with `--version`: the commit count must have grown.
 
 If `git pull` refuses because of local changes, `git stash` sets them aside and `git pull` then works (`git stash pop` brings them back). To match GitHub exactly and drop your local edits for good: `git fetch origin` then `git reset --hard origin/main`.
 
@@ -313,7 +297,7 @@ The engine and `rules.cfpack` are all an analysis needs: copy them together to a
 | `cargo: command not found` | close and reopen the terminal (step 2); on Windows, restart the session |
 | `linker 'cc' not found` (Linux) | the C compiler is missing: install `build-essential` (step 2) |
 | `linker 'link.exe' not found` (Windows) | the C++ build tools are missing: run the third `winget` line of step 2 |
-| the engine stops and names a missing `rules.cfpack` | run `cargo build --release` again, or copy the pack next to the engine (step 6) |
+| the engine stops and names a missing `rules.cfpack` | run `cargo build --release` again: it puts the pack back next to the engine |
 | dependencies are never checked | the project declares none in a file the engine reads (`requirements.txt`, `package.json`, `pom.xml`, `composer.json`, `.csproj`…), or `--quick` was given |
 | a language of your project is never checked | add it to `languages` in `audit.config.json` (step 7) |
 | `git pull` refuses | see the end of step 11 |
