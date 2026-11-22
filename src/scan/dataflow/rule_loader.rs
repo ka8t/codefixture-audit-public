@@ -61,25 +61,47 @@ fn strip_lookaround_groups(pattern: &str) -> String {
     let mut out = String::new();
     let mut i = 0usize;
     while i < chars.len() {
+        // An escaped character is a literal, never the start of a group:
+        // `\(?=` is the text `(?=` (ticket #245).
+        if chars[i] == '\\' {
+            out.extend(chars.get(i..i + 2).unwrap_or(&chars[i..]));
+            i += 2;
+            continue;
+        }
         let rest: String = chars[i..].iter().collect();
         if let Ok(Some(m)) = LOOKAROUND_OPEN_RE.find(&rest) {
-            let mut depth = 1i32;
-            let mut j = i + m.end();
-            while j < chars.len() && depth > 0 {
-                match chars[j] {
-                    '(' => depth += 1,
-                    ')' => depth -= 1,
-                    _ => {}
-                }
-                j += 1;
-            }
-            i = j;
+            i = lookaround_end(&chars, i + m.end());
             continue;
         }
         out.push(chars[i]);
         i += 1;
     }
     out
+}
+
+/// Index just past the `)` that closes the look-around group whose
+/// body starts at `start`: nested groups count, an escaped character
+/// (`\(`, `\)`) and the content of a character class (`[)(]`) do not.
+/// The former count read `\(` as an opening parenthesis: a look-around
+/// holding one (`(?<!normalize\()path\.join`) never closed, the rest of
+/// the pattern was dropped with it and the rule's sink matched no call
+/// (ticket #245). The end of the pattern when the group is not closed.
+fn lookaround_end(chars: &[char], start: usize) -> usize {
+    let mut depth = 1i32;
+    let mut j = start;
+    let mut in_class = false;
+    while j < chars.len() && depth > 0 {
+        match chars[j] {
+            '\\' => j += 1, // the escaped character is skipped below
+            ']' if in_class => in_class = false,
+            '[' if !in_class => in_class = true,
+            '(' if !in_class => depth += 1,
+            ')' if !in_class => depth -= 1,
+            _ => {}
+        }
+        j += 1;
+    }
+    j.min(chars.len())
 }
 
 /// Expands `(a|b|c)` alternation groups into multiple patterns.
@@ -481,6 +503,50 @@ mod tests {
     #[test]
     fn test_dot_only_result_filtered_out() {
         assert_eq!(regex_to_dotted_patterns(r"\."), Vec::<String>::new());
+    }
+
+    /// Ticket #245: an escaped parenthesis or a character class inside a
+    /// look-around does not open or close a group: the look-around goes,
+    /// the rest of the pattern stays.
+    #[test]
+    fn test_lookaround_with_escaped_parenthesis_or_class_is_stripped_alone() {
+        for (regex, dotted) in [
+            (r"(?<!normalize\()path\.join\s*\(", "path.join"),
+            (r"(?<!GetFullPath\()Path\.Combine\s*\(", "Path.Combine"),
+            (r"Paths\.get\s*\((?![^;]*\.normalize\s*\()", "Paths.get"),
+            (r"Path\s*\((?![^#\n]*\.resolve\s*\()", "Path"),
+            (r"(?<![)(])open\s*\(", "open"),
+            (r"(?<!a\\)os\.system", "os.system"),
+        ] {
+            assert_eq!(
+                regex_to_dotted_patterns(regex),
+                vec![dotted.to_string()],
+                "{regex}"
+            );
+        }
+        // The path sinks of #245: their look-arounds leave the call they
+        // guard, as the pattern without them gives it.
+        for (regex, without) in [
+            (
+                r"new\s+(?:\S*\.)?File\s*\((?![^;]*getCanonical(?:Path|File)\s*\()",
+                r"new\s+(?:\S*\.)?File\s*\(",
+            ),
+            (
+                r"Paths\.get\s*\((?![^;]*(?:\.normalize|toRealPath)\s*\()",
+                r"Paths\.get\s*\(",
+            ),
+            (
+                r"(?<!normalize\()path\.resolve\s*\((?![^;]*normalize\s*\()",
+                r"path\.resolve\s*\(",
+            ),
+        ] {
+            assert_eq!(
+                regex_to_dotted_patterns(regex),
+                regex_to_dotted_patterns(without),
+                "{regex}"
+            );
+            assert!(!regex_to_dotted_patterns(without).is_empty());
+        }
     }
 
     #[test]
