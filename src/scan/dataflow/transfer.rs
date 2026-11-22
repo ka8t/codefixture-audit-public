@@ -71,7 +71,7 @@ fn is_identifier_char(c: char) -> bool {
 /// Deliberate deviation from `Audit/sca/dataflow/transfer.py`, which
 /// tests `var_name in line` (a plain substring test) in the same three
 /// places: the sinks loop and the two guard clean-ups.
-fn mentions_identifier(text: &str, name: &str) -> bool {
+pub(crate) fn mentions_identifier(text: &str, name: &str) -> bool {
     let (Some(first), Some(last)) = (name.chars().next(), name.chars().next_back()) else {
         return false;
     };
@@ -225,24 +225,26 @@ fn discard_sinks_failing_raw_regex(
     *findings = kept;
 }
 
-/// True when the line compares the call of one of the rule's
-/// sanitizers to the value of a failed check, `strpos($p, $base) !== 0`
-/// or `p.startsWith(base) == false` (ticket #250): the guard written
-/// without `!` or `not`. `calls` holds the `(` of the calls the line
-/// compares so (`GuardFacts::failure_compared_calls`); a sanitizer match
-/// names the call whose `(` it holds last (`\.startsWith\s*\(`), or the
-/// `(` that follows it (`re\.match`).
-fn sanitizer_compared_to_failure(line: &str, specs: &RuleSpecs, calls: &[usize]) -> bool {
-    if calls.is_empty() {
-        return false;
-    }
+/// True when one of the rule's sanitizers names the call whose `(` is
+/// at byte `paren` of `line`. A sanitizer match names the call whose
+/// `(` it holds last (`\.startsWith\s*\(`, or `\bif\s*\(.*\bstrpos\s*\(`
+/// for the `strpos` of an `if` line), or the `(` that follows it after
+/// whitespace (`re\.match`, `secure_filename`). Shared by the guard
+/// written as a comparison (ticket #250) and the check passed on the
+/// TRUE edge of a branch (`passed_check.rs`, ticket #252).
+///
+/// A match covers the text once: a pattern that spans several calls
+/// (`\bif\s*\(.*\bstrpos\s*\(` on `if (strpos($a, $b) === 0 &&
+/// strpos($c, $d) === 0)`) names only the last one, its greedy `.*`
+/// running to the last `strpos(`.
+pub(crate) fn sanitizer_names_call(line: &str, specs: &RuleSpecs, paren: usize) -> bool {
     specs
         .sanitizers
         .iter()
         .filter_map(|san| san.raw_regex.as_ref())
         .any(|rx| {
             rx.find_iter(line).flatten().any(|m| {
-                let paren = match m.as_str().rfind('(') {
+                let named = match m.as_str().rfind('(') {
                     Some(offset) => Some(m.start() + offset),
                     None => {
                         let after = &line[m.end()..];
@@ -250,9 +252,21 @@ fn sanitizer_compared_to_failure(line: &str, specs: &RuleSpecs, calls: &[usize])
                         after[gap..].starts_with('(').then_some(m.end() + gap)
                     }
                 };
-                paren.is_some_and(|paren| calls.contains(&paren))
+                named == Some(paren)
             })
         })
+}
+
+/// True when the line compares the call of one of the rule's
+/// sanitizers to the value of a failed check, `strpos($p, $base) !== 0`
+/// or `p.startsWith(base) == false` (ticket #250): the guard written
+/// without `!` or `not`. `calls` holds the `(` of the calls the line
+/// compares so (`GuardFacts::failure_compared_calls`); which call a
+/// sanitizer names: [`sanitizer_names_call`].
+fn sanitizer_compared_to_failure(line: &str, specs: &RuleSpecs, calls: &[usize]) -> bool {
+    calls
+        .iter()
+        .any(|&paren| sanitizer_names_call(line, specs, paren))
 }
 
 /// Auxiliary regex matching against the raw source line (§10bis).

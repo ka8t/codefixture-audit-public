@@ -38,6 +38,7 @@ pub mod js_taint_scan;
 pub mod lattice;
 pub mod line_facts;
 pub mod lowering;
+pub mod passed_check;
 pub mod php_call_graph;
 pub mod php_cfg;
 pub mod php_lowering;

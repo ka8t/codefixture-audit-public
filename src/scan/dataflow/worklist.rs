@@ -37,6 +37,7 @@ use super::ir::{IrStmt, Rhs, canon_rhs};
 use super::lattice::{State, empty_state, state_equal, state_join_into, state_widen};
 use super::line_facts::RuleLines;
 use super::lowering::{lower_expr_standalone, lower_for_target_assign, lower_stmts};
+use super::passed_check::PassedChecks;
 use super::transfer::{Finding, RuleSpecs, transfer_stmts};
 
 /// Spec §4.3: widening threshold for loops.
@@ -600,6 +601,10 @@ pub fn analyze_prepared<'tree>(
         .map(|(&nid, _)| nid)
         .collect();
 
+    // The checks the TRUE edge of each branch proves (ticket #252):
+    // the state that edge carries loses the variables they mention.
+    let passed_checks = PassedChecks::compute(cfg, specs, source_lines);
+
     let mut worklist: VecDeque<usize> = VecDeque::from([cfg.entry]);
     let mut in_worklist: HashSet<usize> = HashSet::from([cfg.entry]);
 
@@ -625,7 +630,10 @@ pub fn analyze_prepared<'tree>(
                 // `state_join` over the predecessors from an empty state.
                 let mut new_in = empty_state();
                 for p in &live_preds {
-                    state_join_into(&mut new_in, &state_out[p]);
+                    match passed_checks.refine(*p, n, &state_out[p]) {
+                        Some(refined) => state_join_into(&mut new_in, &refined),
+                        None => state_join_into(&mut new_in, &state_out[p]),
+                    }
                 }
                 state_in.insert(n, new_in);
             }

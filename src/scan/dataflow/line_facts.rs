@@ -83,8 +83,8 @@ fn has_negation_bang(text: &str) -> bool {
 }
 
 /// How a call result is compared in a condition (ticket #250).
-#[derive(Clone, Copy)]
-enum Comparison {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Comparison {
     /// `==`, `===`, Python `is`.
     Equal,
     /// `!=`, `!==`, Python `is not`.
@@ -109,7 +109,7 @@ fn is_operand_byte(b: u8) -> bool {
 /// True when a comparison of a check's result with `operand` holds when
 /// the check failed: equal to a failure value (`=== false`, `is None`),
 /// or different from anything else (`!== 0`, `!= base`, `!= true`).
-fn compares_to_failure(comparison: Comparison, operand: &str) -> bool {
+pub(crate) fn compares_to_failure(comparison: Comparison, operand: &str) -> bool {
     match comparison {
         Comparison::Equal => is_failure_value(operand),
         Comparison::NotEqual => !operand.is_empty() && !is_failure_value(operand),
