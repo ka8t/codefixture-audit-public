@@ -118,6 +118,66 @@ pub(super) trait TaintLanguage<'a>: Sync + Sized {
     ) -> TaintFindings;
 }
 
+/// Number of rules a taint pass runs at the same time (ticket #247): half
+/// the threads of the pool, at least one. A rule keeps the summaries of
+/// every function of the project until its files are analysed: with every
+/// rule of a pass at once, the 22 Java rules on the 46,793 files of the
+/// Juliet Java suite held about 4 GB more than one rule at a time (11.96
+/// against 7.98 GB), but one rule at a time doubled the time (76 → 144 s),
+/// a rule's summary resolution being sequential. The files of a rule are
+/// still analysed by every thread of the pool.
+fn rule_lanes() -> usize {
+    (rayon::current_num_threads() / 2).max(1)
+}
+
+/// Runs `run` on every rule of `rule_jsons` with its specs, at most
+/// `lanes` rules at a time, and returns the results in rule order. Each
+/// lane takes the next rule as soon as its own is done: no group of
+/// rules waits for its slowest member. The work inside a rule (its files'
+/// `par_iter`) uses the whole pool.
+fn run_in_lanes<T: Send>(
+    rule_jsons: &[&serde_json::Value],
+    all_specs: Vec<Option<RuleSpecs>>,
+    lanes: usize,
+    run: impl Fn(&serde_json::Value, Option<RuleSpecs>) -> T + Sync,
+) -> Vec<T> {
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let specs: Vec<Mutex<Option<Option<RuleSpecs>>>> =
+        all_specs.into_iter().map(|s| Mutex::new(Some(s))).collect();
+    let results: Vec<Mutex<Option<T>>> = rule_jsons.iter().map(|_| Mutex::new(None)).collect();
+    let next = AtomicUsize::new(0);
+    rayon::scope(|scope| {
+        for _ in 0..lanes.min(rule_jsons.len()) {
+            scope.spawn(|_| {
+                loop {
+                    let index = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(rule_json) = rule_jsons.get(index) else {
+                        break;
+                    };
+                    let specs = specs[index]
+                        .lock()
+                        .expect("no lane panics while holding it")
+                        .take()
+                        .expect("each rule is taken once");
+                    let result = run(rule_json, specs);
+                    *results[index]
+                        .lock()
+                        .expect("no lane panics while holding it") = Some(result);
+                }
+            });
+        }
+    });
+    results
+        .into_iter()
+        .map(|cell| {
+            cell.into_inner()
+                .expect("no lane panicked")
+                .expect("every rule ran")
+        })
+        .collect()
+}
+
 /// Whether `rule_jsons` hold a taint rule of `rule_language`: one that
 /// gives taint specs (`rule_loader::has_taint_specs`). The scan keeps the
 /// parse trees of a pass's files only when it does, and the pass only
@@ -291,10 +351,8 @@ fn cached_rule_runs<'a, L: TaintLanguage<'a>>(
             .filter(|pf| previous.is_none() || dirty.contains(&pf.rel_path))
             .for_each(|pf| pf.source.fill_exprs(&exprs.table));
     }
-    let runs: Vec<Option<RuleRun>> = rule_jsons
-        .par_iter()
-        .zip(all_specs.into_par_iter())
-        .map(|(rule_json, base_specs)| {
+    let run_rule =
+        |rule_json: &serde_json::Value, base_specs: Option<RuleSpecs>| -> Option<RuleRun> {
             let base_specs = base_specs?;
             let rule_hash = sha256_hex(
                 serde_json::to_string(rule_json)
@@ -357,8 +415,8 @@ fn cached_rule_runs<'a, L: TaintLanguage<'a>>(
                     .collect(),
             });
             Some((per_file, base_specs.rule_id.clone(), state, analysed))
-        })
-        .collect();
+        };
+    let runs = run_in_lanes(rule_jsons, all_specs, rule_lanes(), run_rule);
 
     let mut per_rule = Vec::with_capacity(runs.len());
     let mut states = Vec::new();
@@ -595,5 +653,46 @@ mod tests {
         assert_eq!(counts(&ignored), each(0), "{:?}", ignored.findings);
 
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Ticket #247: the rules run in lanes give their results in rule
+    /// order, each rule runs once with its own specs, and no more rules run
+    /// at the same time than there are lanes.
+    #[test]
+    fn test_rules_run_in_lanes() {
+        use crate::scan::dataflow::transfer::RuleSpecs;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let jsons: Vec<serde_json::Value> =
+            (0..23).map(|i| serde_json::json!({ "n": i })).collect();
+        let refs: Vec<&serde_json::Value> = jsons.iter().collect();
+        for lanes in [1, 3, 8, 40] {
+            let specs: Vec<Option<RuleSpecs>> = (0..23)
+                .map(|i| {
+                    (i % 5 != 0).then(|| RuleSpecs {
+                        rule_id: format!("r{i}"),
+                        ..RuleSpecs::default()
+                    })
+                })
+                .collect();
+            let (running, most, calls) = (
+                AtomicUsize::new(0),
+                AtomicUsize::new(0),
+                AtomicUsize::new(0),
+            );
+            let results = super::run_in_lanes(&refs, specs, lanes, |json, specs| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                let now = running.fetch_add(1, Ordering::SeqCst) + 1;
+                most.fetch_max(now, Ordering::SeqCst);
+                std::thread::sleep(std::time::Duration::from_millis(2));
+                running.fetch_sub(1, Ordering::SeqCst);
+                (json["n"].as_u64().unwrap(), specs.map(|s| s.rule_id))
+            });
+            let expected: Vec<(u64, Option<String>)> = (0..23)
+                .map(|i| (i, (i % 5 != 0).then(|| format!("r{i}"))))
+                .collect();
+            assert_eq!(results, expected, "{lanes} lanes");
+            assert_eq!(calls.load(Ordering::SeqCst), 23);
+            assert!(most.load(Ordering::SeqCst) <= lanes, "{lanes} lanes");
+        }
     }
 }
