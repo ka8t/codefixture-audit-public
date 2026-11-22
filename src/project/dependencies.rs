@@ -212,6 +212,8 @@ pub enum DepFileType {
     BuildGradle,
     Csproj,
     ComposerJson,
+    /// Pipenv's `Pipfile` (ticket #213).
+    Pipfile,
 }
 
 fn read_lines(path: &Path) -> Vec<(usize, String)> {
@@ -226,9 +228,10 @@ fn read_lines(path: &Path) -> Vec<(usize, String)> {
         .unwrap_or_default()
 }
 
-const ROOT_DEP_FILES: [(&str, DepFileType); 5] = [
+const ROOT_DEP_FILES: [(&str, DepFileType); 6] = [
     ("requirements.txt", DepFileType::Requirements),
     ("pyproject.toml", DepFileType::Requirements),
+    ("Pipfile", DepFileType::Pipfile),
     ("pom.xml", DepFileType::PomXml),
     ("build.gradle", DepFileType::BuildGradle),
     ("composer.json", DepFileType::ComposerJson),
@@ -488,6 +491,140 @@ pub fn parse_pyproject_toml(path: &Path) -> Vec<Dependency> {
         if string_re.replace_all(items, "").contains(']') {
             in_array = false;
         }
+    }
+    deps.extend(transitive_dependencies(&lock, path, "PyPI", &direct));
+    deps
+}
+
+/// Pipenv's `Pipfile` (ticket #213): a TOML file whose package tables
+/// map a name to its specifier, `requests = "==2.31.0"`, `django = "*"`,
+/// or to a table, `flask = { version = ">=2.0", extras = ["async"] }`,
+/// possibly written as its own table (`[packages.flask]` then
+/// `version = ">=2.0"`). Specifiers follow PEP 440; `*`, a git address or
+/// a local path name no version, and the dependency is unpinned.
+///
+/// The package tables are `[packages]`, `[dev-packages]` and, since
+/// Pipenv 2022.10, any custom category (`[docs]`): every top-level table
+/// but `[[source]]`, `[requires]`, `[scripts]` and `[pipenv]`, which hold
+/// settings. The version installed comes from `Pipfile.lock` first
+/// (ADR-0053), never from another lockfile of the folder.
+///
+/// Simplified reading, like `parse_pyproject_toml`: one key per line,
+/// strings in double or single quotes. No equivalent in
+/// `Audit/sca/dependencies.py`, which does not read `Pipfile` either.
+pub fn parse_pipfile(path: &Path) -> Vec<Dependency> {
+    let string_re = Regex::new(r#""((?:[^"\\]|\\.)*)"|'([^']*)'"#).unwrap();
+    let key_re = Regex::new(r#"^("[^"]+"|'[^']+'|[A-Za-z0-9_.-]+)\s*=\s*(.*)$"#).unwrap();
+    let version_re = Regex::new(r#"(?:^|[{,\s])version\s*=\s*(?:"([^"]*)"|'([^']*)')"#).unwrap();
+    let lock = path.parent().map_or(Lock::Absent, lockfiles::pipfile);
+    const SETTINGS_TABLES: [&str; 4] = ["source", "requires", "scripts", "pipenv"];
+    let first_string = |caps: regex::Captures| {
+        caps.get(1)
+            .or_else(|| caps.get(2))
+            .map_or(String::new(), |m| m.as_str().to_string())
+    };
+
+    // The package being read from its own table (`[packages.flask]`):
+    // name, line of its header, and the version found so far.
+    struct Pending {
+        name: String,
+        line: usize,
+        raw: String,
+        spec: String,
+    }
+    let mut deps = Vec::new();
+    let mut direct: Vec<(String, String)> = Vec::new();
+    let mut push = |name: &str, spec: &str, line: usize, raw: &str| {
+        let name = name.to_lowercase();
+        // `*` is Pipenv's "any version": no minimum, as PEP 440 reads it.
+        let spec = if spec.trim() == "*" { "" } else { spec.trim() };
+        direct.push((name.clone(), spec.to_string()));
+        let (version, version_source) = resolve_version(
+            &name,
+            spec,
+            crate::project::version_constraint::pep440(spec),
+            &lock,
+        );
+        deps.push(Dependency {
+            name,
+            version,
+            ecosystem: "PyPI".to_string(),
+            file: path.to_path_buf(),
+            line,
+            raw_line: raw.to_string(),
+            version_source,
+        });
+    };
+    let mut in_packages = false;
+    let mut pending: Option<Pending> = None;
+    for (line_num, line) in read_lines(path) {
+        let stripped = line.trim();
+        if stripped.is_empty() || stripped.starts_with('#') {
+            continue;
+        }
+        if stripped.starts_with('[') {
+            if let Some(p) = pending.take() {
+                push(&p.name, &p.spec, p.line, &p.raw);
+            }
+            if stripped.starts_with("[[") {
+                in_packages = false; // `[[source]]`
+                continue;
+            }
+            let header = stripped.trim_start_matches('[');
+            let header = header.split(']').next().unwrap_or_default().trim();
+            // `category` or `category.package`, the name possibly quoted.
+            let (category, package) = match header.split_once('.') {
+                Some((c, p)) => (
+                    c.trim(),
+                    Some(p.trim().trim_matches(|c| c == '"' || c == '\'')),
+                ),
+                None => (header, None),
+            };
+            let category = category.trim_matches(|c| c == '"' || c == '\'');
+            let is_category = !SETTINGS_TABLES.contains(&category);
+            in_packages = is_category && package.is_none();
+            if is_category && let Some(package) = package {
+                pending = Some(Pending {
+                    name: package.to_string(),
+                    line: line_num,
+                    raw: stripped.to_string(),
+                    spec: String::new(),
+                });
+            }
+            continue;
+        }
+        if let Some(p) = pending.as_mut() {
+            if let Some(caps) = key_re.captures(stripped)
+                && caps[1].trim_matches(|c| c == '"' || c == '\'') == "version"
+                && let Some(value) = string_re.captures(caps.get(2).map_or("", |m| m.as_str()))
+            {
+                p.spec = first_string(value);
+            }
+            continue;
+        }
+        if !in_packages {
+            continue;
+        }
+        let Some(caps) = key_re.captures(stripped) else {
+            continue;
+        };
+        let name = caps[1].trim_matches(|c| c == '"' || c == '\'');
+        let value = caps.get(2).map_or("", |m| m.as_str()).trim();
+        let spec = if value.starts_with('"') || value.starts_with('\'') {
+            string_re
+                .captures(value)
+                .map(first_string)
+                .unwrap_or_default()
+        } else {
+            version_re
+                .captures(value)
+                .map(first_string)
+                .unwrap_or_default()
+        };
+        push(name, &spec, line_num, stripped);
+    }
+    if let Some(p) = pending.take() {
+        push(&p.name, &p.spec, p.line, &p.raw);
     }
     deps.extend(transitive_dependencies(&lock, path, "PyPI", &direct));
     deps
@@ -1014,6 +1151,7 @@ pub fn parse_dependency_file(path: &Path, file_type: DepFileType) -> Vec<Depende
         DepFileType::BuildGradle => parse_build_gradle(path),
         DepFileType::Csproj => parse_csproj(path),
         DepFileType::ComposerJson => parse_composer_json(path),
+        DepFileType::Pipfile => parse_pipfile(path),
     }
 }
 
@@ -1652,6 +1790,124 @@ local = { path = "../local" }
             VersionSource::UnresolvedProperty {
                 property: "libs.versions.y.get()".to_string()
             }
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Ticket #213: a `Pipfile` is found as a manifest, each package
+    /// table read (custom categories, quoted names, inline and separate
+    /// tables), settings tables skipped, versions taken from
+    /// `Pipfile.lock` first even when a `poetry.lock` sits beside it.
+    #[test]
+    fn test_pipfile_is_read_with_its_own_lockfile() {
+        let dir = std::env::temp_dir().join(format!(
+            "codefixture-audit-deps-pipfile-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("Pipfile"),
+            concat!(
+                "[[source]]\n",
+                "url = \"https://pypi.org/simple\"\n",
+                "verify_ssl = true\n",
+                "name = \"pypi\"\n",
+                "\n",
+                "[packages]\n",
+                "requests = \"*\"\n",
+                "Django = \">=3.2\"\n",
+                "\"zope.interface\" = \"==5.4.0\"\n",
+                "flask = { version = \"~=2.0\", extras = [\"async\"] }\n",
+                "mylib = { git = \"https://example.com/mylib.git\", ref = \"v1\" }\n",
+                "\n",
+                "[dev-packages]\n",
+                "pytest = '==7.4.0'\n",
+                "\n",
+                "[docs]\n",
+                "sphinx = \"*\"\n",
+                "\n",
+                "[packages.jinja2]\n",
+                "version = \">=3.0\"\n",
+                "\n",
+                "[requires]\n",
+                "python_version = \"3.11\"\n",
+                "\n",
+                "[scripts]\n",
+                "serve = \"python app.py\"\n",
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("Pipfile.lock"),
+            concat!(
+                "{\n",
+                "  \"_meta\": {\"hash\": {\"sha256\": \"x\"}},\n",
+                "  \"default\": {\n",
+                "    \"requests\": {\"version\": \"==2.31.0\"},\n",
+                "    \"urllib3\": {\"version\": \"==2.0.7\"}\n",
+                "  },\n",
+                "  \"develop\": {},\n",
+                "  \"docs\": {\n",
+                "    \"sphinx\": {\"version\": \"==7.2.6\"}\n",
+                "  }\n",
+                "}\n",
+            ),
+        )
+        .unwrap();
+        // Belongs to a `pyproject.toml`, not to the `Pipfile`.
+        std::fs::write(
+            dir.join("poetry.lock"),
+            "[[package]]\nname = \"requests\"\nversion = \"1.0.0\"\n",
+        )
+        .unwrap();
+
+        let files = find_dependency_files(&dir, &[]);
+        assert_eq!(files, vec![(dir.join("Pipfile"), DepFileType::Pipfile)]);
+
+        let deps = collect_dependencies(&dir, &[]);
+        let listed: Vec<(&str, Option<&str>, usize, &VersionSource)> = deps
+            .iter()
+            .map(|d| {
+                (
+                    d.name.as_str(),
+                    d.version.as_deref(),
+                    d.line,
+                    &d.version_source,
+                )
+            })
+            .collect();
+        let locked = VersionSource::Lockfile {
+            file: "Pipfile.lock".to_string(),
+        };
+        let minimum = |constraint: &str| VersionSource::DeclaredMinimum {
+            constraint: constraint.to_string(),
+            lock: LockStatus::NotListed {
+                file: "Pipfile.lock".to_string(),
+            },
+        };
+        assert_eq!(
+            listed,
+            vec![
+                ("requests", Some("2.31.0"), 7, &locked),
+                ("django", Some("3.2"), 8, &minimum(">=3.2")),
+                ("zope.interface", Some("5.4.0"), 9, &VersionSource::Manifest),
+                ("flask", Some("2.0"), 10, &minimum("~=2.0")),
+                ("mylib", None, 11, &VersionSource::Manifest),
+                ("pytest", Some("7.4.0"), 14, &VersionSource::Manifest),
+                ("sphinx", Some("7.2.6"), 17, &locked),
+                ("jinja2", Some("3.0"), 19, &minimum(">=3.0")),
+                (
+                    "urllib3",
+                    Some("2.0.7"),
+                    5,
+                    &VersionSource::Transitive {
+                        file: "Pipfile.lock".to_string(),
+                        via: Vec::new(),
+                        graph: false,
+                    }
+                ),
+            ]
         );
         std::fs::remove_dir_all(&dir).ok();
     }

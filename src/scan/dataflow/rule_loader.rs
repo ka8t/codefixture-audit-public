@@ -230,11 +230,34 @@ pub(crate) fn extract_cwe(rule_json: &Value) -> Option<String> {
     }
 }
 
+/// Whether [`rule_json_to_specs`] gives specs for this rule: at least
+/// one source and one sink convert to a dotted pattern. Answers without
+/// compiling the rule's regexes, so that the scan can tell, before
+/// reading the files, which languages have a taint rule and keep the
+/// parse trees of those only (ticket #241). `rule_json_to_specs` asks
+/// it first, so the two always agree.
+pub fn has_taint_specs(rule_json: &Value) -> bool {
+    let converts = |key: &str| {
+        rule_json
+            .get(key)
+            .and_then(|v| v.as_array())
+            .is_some_and(|specs| {
+                specs
+                    .iter()
+                    .any(|s| !regex_to_dotted_patterns(json_str(s, "pattern")).is_empty())
+            })
+    };
+    converts("sources") && converts("sinks")
+}
+
 /// Converts a compiled SCA rule (JSON) into dataflow engine
 /// `RuleSpecs`. "Best-effort" conversion: each regex pattern
 /// generates 1..N dotted patterns. `None` if the rule doesn't have at
-/// least one convertible source AND sink.
+/// least one convertible source AND sink ([`has_taint_specs`]).
 pub fn rule_json_to_specs(rule_json: &Value, lang: &str) -> Option<RuleSpecs> {
+    if !has_taint_specs(rule_json) {
+        return None;
+    }
     let empty: Vec<Value> = Vec::new();
     let mut sources = Vec::new();
     for s in rule_json
@@ -332,9 +355,10 @@ pub fn rule_json_to_specs(rule_json: &Value, lang: &str) -> Option<RuleSpecs> {
         }
     }
 
-    if sources.is_empty() || sinks.is_empty() {
-        return None;
-    }
+    debug_assert!(
+        !sources.is_empty() && !sinks.is_empty(),
+        "has_taint_specs said this rule converts"
+    );
 
     let rule_id = rule_json
         .get("id")
@@ -360,6 +384,8 @@ pub fn rule_json_to_specs(rule_json: &Value, lang: &str) -> Option<RuleSpecs> {
         passthroughs,
         summaries: Default::default(),
         type_map: Default::default(),
+        summary_fallback: None,
+        exprs: None,
     })
 }
 
@@ -525,6 +551,28 @@ mod tests {
     fn test_rule_json_to_specs_none_without_sources() {
         let rule = json!({"id": "r", "sinks": [{"pattern": "eval"}]});
         assert!(rule_json_to_specs(&rule, "en").is_none());
+    }
+
+    /// Ticket #241: a rule whose only sink converts to no dotted pattern
+    /// has no taint specs, and `has_taint_specs` says so without
+    /// compiling anything; one convertible sink is enough.
+    #[test]
+    fn test_has_taint_specs_agrees_with_the_conversion() {
+        for (sinks, converts) in [
+            (json!([{"pattern": ""}]), false),
+            (json!([{"pattern": r"\."}]), false),
+            (json!([{"pattern": ""}, {"pattern": "eval"}]), true),
+            (json!([]), false),
+            (json!("eval"), false),
+        ] {
+            let rule = json!({"id": "r", "sources": [{"pattern": "input"}], "sinks": sinks});
+            assert_eq!(has_taint_specs(&rule), converts, "{sinks}");
+            assert_eq!(
+                rule_json_to_specs(&rule, "en").is_some(),
+                converts,
+                "{sinks}"
+            );
+        }
     }
 
     #[test]

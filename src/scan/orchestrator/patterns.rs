@@ -94,6 +94,11 @@ pub(super) fn run_pattern_pass(
         });
     }
     for findings in reportable {
+        // A pattern finding is never merged with another rule's: it is the
+        // rule's own finding too (ticket #242).
+        if let Some(rule_findings) = context.rule_findings.as_deref_mut() {
+            rule_findings.extend(findings.iter().cloned());
+        }
         context.findings.extend(findings);
     }
     (
@@ -136,7 +141,11 @@ fn run_file(
     governance: &[String],
     previous: Option<&PatternCache>,
 ) -> FileRun {
-    let hash = sha256_hex(&pf.source_bytes);
+    // The bytes of the text the rules read (ticket #241): for a file that
+    // is not valid UTF-8, those of the text with its invalid bytes
+    // replaced, not those on disk. Two versions of such a file that only
+    // differ by invalid bytes give the same findings, and share a hash.
+    let hash = sha256_hex(pf.bytes());
     let governance = governance_fingerprint(&pf.filepath, governance);
     if let Some(prior) = previous.and_then(|c| c.files.get(&pf.rel_path))
         && prior.hash == hash
@@ -168,6 +177,10 @@ fn run_file(
 fn rules_on_file(pf: &ParsedFile, rule_jsons: &[serde_json::Value]) -> Vec<(usize, Finding)> {
     let mut findings = Vec::new();
     let syntax = pf.language.comment_syntax();
+    // The numbered lines the pattern rules read, built when the first
+    // rule of the file's language reaches it and dropped with this
+    // call: the scan keeps one copy of each text (ticket #241).
+    let mut numbered_lines = None;
     for (index, rule_json) in rule_jsons.iter().enumerate() {
         if rule_json.get("language").and_then(|v| v.as_str()) != Some(pf.language.rule_tag()) {
             continue;
@@ -178,8 +191,8 @@ fn rules_on_file(pf: &ParsedFile, rule_jsons: &[serde_json::Value]) -> Vec<(usiz
         let DispatchOutcome::Findings(found) = dispatch_rule(
             rule_json,
             pf.location(),
-            &pf.all_lines,
-            &pf.source_text,
+            numbered_lines.get_or_insert_with(|| pf.source.numbered_lines()),
+            pf.source.text(),
             syntax,
         ) else {
             continue; // Taint/Ast/Hook: handled elsewhere (phase C) or out of scope.
@@ -217,13 +230,7 @@ fn reportable_findings(
         .filter(|(_, f)| !suppressions.is_suppressed(&f.rule_id, &pf.rel_path, &f.code))
         .filter(|(_, f)| !is_inline_ignored(&f.code, &f.rule_id))
         .map(|(index, f)| {
-            engine_finding_to_report(
-                f,
-                &rule_jsons[*index],
-                &pf.rel_path,
-                &pf.source_lines_plain,
-                lang,
-            )
+            engine_finding_to_report(f, &rule_jsons[*index], &pf.rel_path, &pf.source, lang)
         })
         .collect()
 }
@@ -283,7 +290,7 @@ mod tests {
         let parsed: Vec<_> = files
             .iter()
             .map(|f| {
-                parse_file(root, &root.join(f))
+                parse_file(root, &root.join(f), &[])
                     .into_parsed()
                     .expect("parsable fixture")
             })
@@ -302,6 +309,7 @@ mod tests {
             cache: cache.as_ref(),
             findings: &mut findings,
             cache_stats: &mut cache_stats,
+            rule_findings: None,
         };
         run_pattern_pass(&parsed, rules, &mut context);
         PassRun {

@@ -55,7 +55,7 @@ use std::sync::Arc;
 use tree_sitter::Node;
 
 use super::csharp_cfg::flatten_preproc_members;
-use super::line_facts::RuleLines;
+use super::line_facts::{RuleLines, SourceLines};
 pub use super::transfer::FunctionSummary;
 use super::transfer::RuleSpecs;
 
@@ -291,9 +291,13 @@ pub fn compute_csharp_file_summaries<'tree>(
     root: Node<'tree>,
     specs: &RuleSpecs,
     source: &'tree [u8],
-    source_lines: Option<&[String]>,
+    source_lines: Option<&SourceLines>,
 ) -> BTreeMap<String, Arc<FunctionSummary>> {
-    compute_csharp_file_summaries_prepared(&prepare_csharp_file(root, source), specs, source_lines)
+    compute_csharp_file_summaries_prepared(
+        &prepare_csharp_file(root, source),
+        specs,
+        source_lines.map(|lines| RuleLines::new(lines, specs)),
+    )
 }
 
 /// [`compute_csharp_file_summaries`] on a file already prepared by
@@ -302,11 +306,8 @@ pub fn compute_csharp_file_summaries<'tree>(
 pub fn compute_csharp_file_summaries_prepared(
     file: &PreparedFile<CSharpFunctionInfo>,
     specs: &RuleSpecs,
-    source_lines: Option<&[String]>,
+    rule_lines: Option<RuleLines>,
 ) -> BTreeMap<String, Arc<FunctionSummary>> {
-    // One per-line cache of the hybrid layer for every summary of this
-    // rule on this file (ticket #190).
-    let rule_lines = source_lines.map(|lines| RuleLines::new(lines, specs));
     let mut summaries = BTreeMap::new();
     for function in &file.functions {
         let Some(body) = function.body.as_ref() else {
@@ -521,6 +522,8 @@ mod tests {
             passthroughs: vec![],
             summaries: BTreeMap::new(),
             type_map: BTreeMap::new(),
+            summary_fallback: None,
+            exprs: None,
         }
     }
 
@@ -686,7 +689,7 @@ mod tests {
     fn test_return_tainted_uncond() {
         let src = "class Api { string GetInput() { return Request.GetParameter(\"q\"); } }";
         let tree = parse(src);
-        let lines: Vec<String> = src.lines().map(str::to_string).collect();
+        let lines: SourceLines = src.lines().collect();
         let sums = compute_csharp_file_summaries(
             tree.root_node(),
             &sqli_specs(),
@@ -703,7 +706,7 @@ mod tests {
     fn test_expression_bodied_method_return_tainted_uncond() {
         let src = "class Api { string GetInput() => Request.GetParameter(\"q\"); }";
         let tree = parse(src);
-        let lines: Vec<String> = src.lines().map(str::to_string).collect();
+        let lines: SourceLines = src.lines().collect();
         let sums = compute_csharp_file_summaries(
             tree.root_node(),
             &sqli_specs(),
@@ -719,7 +722,7 @@ mod tests {
     fn test_expression_bodied_method_sink_param_finding() {
         let src = "class Api { void RunQuery(string query, object db) => db.Execute(query); }";
         let tree = parse(src);
-        let lines: Vec<String> = src.lines().map(str::to_string).collect();
+        let lines: SourceLines = src.lines().collect();
         let sums = compute_csharp_file_summaries(
             tree.root_node(),
             &sqli_specs(),
@@ -733,7 +736,7 @@ mod tests {
     fn test_sink_param_finding() {
         let src = "class Api { void RunQuery(string query, object db) { db.Execute(query); } }";
         let tree = parse(src);
-        let lines: Vec<String> = src.lines().map(str::to_string).collect();
+        let lines: SourceLines = src.lines().collect();
         let sums = compute_csharp_file_summaries(
             tree.root_node(),
             &sqli_specs(),
@@ -747,7 +750,7 @@ mod tests {
     fn test_clean_function_summary_is_empty() {
         let src = "class Api { void RunQuery(object db) { db.Execute(\"SELECT 1\"); } }";
         let tree = parse(src);
-        let lines: Vec<String> = src.lines().map(str::to_string).collect();
+        let lines: SourceLines = src.lines().collect();
         let sums = compute_csharp_file_summaries(
             tree.root_node(),
             &sqli_specs(),
@@ -764,7 +767,7 @@ mod tests {
     fn test_bare_name_alias_added_when_unambiguous() {
         let src = "class Api { void RunQuery(string q, object db) { db.Execute(q); } }";
         let tree = parse(src);
-        let lines: Vec<String> = src.lines().map(str::to_string).collect();
+        let lines: SourceLines = src.lines().collect();
         let sums = compute_csharp_file_summaries(
             tree.root_node(),
             &sqli_specs(),
@@ -779,7 +782,7 @@ mod tests {
     fn test_bare_name_alias_not_added_when_ambiguous() {
         let src = "class A { void RunQuery() {} } class B { void RunQuery() {} }";
         let tree = parse(src);
-        let lines: Vec<String> = src.lines().map(str::to_string).collect();
+        let lines: SourceLines = src.lines().collect();
         let sums = compute_csharp_file_summaries(
             tree.root_node(),
             &sqli_specs(),
@@ -795,7 +798,7 @@ mod tests {
     fn test_bare_name_alias_excludes_constructors() {
         let src = "class Api { Api(string x) {} }";
         let tree = parse(src);
-        let lines: Vec<String> = src.lines().map(str::to_string).collect();
+        let lines: SourceLines = src.lines().collect();
         let sums = compute_csharp_file_summaries(
             tree.root_node(),
             &sqli_specs(),

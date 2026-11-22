@@ -17,6 +17,11 @@
 //! is still computed by `aux_match_line` at each statement, so the
 //! findings do not change.
 //!
+//! What depends on the text of a line only — its guard facts — is not
+//! bound to a rule: a [`SourceLines`] holds it for every rule of the
+//! scan, so that a line is examined once per scan instead of once per
+//! rule (ticket #240).
+//!
 //! A [`RuleLines`] is bound to ONE rule: the facts read the regexes of
 //! the `RuleSpecs` it was created for. The analysis clones that
 //! `RuleSpecs` to seed callee summaries (`compute_one` in the call
@@ -24,20 +29,30 @@
 //! binding is checked on the rule id and the spec counts, not on the
 //! address of the specs.
 
-use std::ops::Deref;
+use std::ops::{Deref, Index};
 use std::sync::{Arc, LazyLock, OnceLock};
 
 use fancy_regex::Regex;
 
+use super::expr_table::{ExprBits, ExprTable};
 use super::lattice::SharedText;
 use super::transfer::RuleSpecs;
+
+// The fixed patterns of this module (guards, string literals) need no
+// look-around: they run on the `regex` crate (automaton, linear time)
+// rather than on `fancy_regex`, whose backtracking VM took most of the
+// taint time of a C# scan (ticket #240). The answers are the same:
+// `fancy_regex` hands a pattern without fancy features to this same
+// crate, and the one pattern that had a look-ahead, `!(?!=)`, is now a
+// byte search (`has_negation_bang`). `test_guard_engines_agree` keeps
+// the former engine as the oracle.
 
 /// Terminator of a sanitizer-guard: the line following
 /// `if not <san>(x): ...` must contain one of these calls for the
 /// block to be considered a guard (the downstream sink is no longer
 /// reached if the predicate fails).
-static GUARD_TERMINATOR_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\b(?:abort|raise|return|exit|sys\.exit|os\._exit)\b")
+static GUARD_TERMINATOR_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r"\b(?:abort|raise|return|exit|sys\.exit|os\._exit)\b")
         .expect("regex statique valide")
 });
 
@@ -46,8 +61,8 @@ static GUARD_TERMINATOR_RE: LazyLock<Regex> = LazyLock::new(|| {
 /// Audit's lexical engine (`lexical_taint.py::
 /// _GUARD_TERMINATOR_RE_MULTILANG`), which is the reference behavior for
 /// C#, PHP and JavaScript (ADR-0003, ADR-0007). Ticket #178.
-static GUARD_TERMINATOR_SAMELINE_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
+static GUARD_TERMINATOR_SAMELINE_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(
         r"\b(?:return|throw|raise|break|continue|exit|die|abort|halt|Forbid|Halt|sendError|sendRedirect|RedirectToAction|Response\.End)\b",
     )
     .expect("regex statique valide")
@@ -55,9 +70,17 @@ static GUARD_TERMINATOR_SAMELINE_RE: LazyLock<Regex> = LazyLock::new(|| {
 
 /// `!` negation (Java/C#/JS style, e.g. `if (!isValid(x))`) —
 /// alternative to Python's `not`/`in`. Excludes `!=` (not a negation
-/// of a sanitizer call).
-static NEGATION_BANG_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"!(?!=)").expect("regex statique valide"));
+/// of a sanitizer call): a `!` that is not followed by `=`, the pattern
+/// `!(?!=)` of the Audit's lexical engine, as a byte search (ticket
+/// #240). A byte that follows `!` in UTF-8 is never part of a longer
+/// character equal to `=`, so the bytes give the answer of the chars.
+fn has_negation_bang(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    bytes
+        .iter()
+        .enumerate()
+        .any(|(i, &b)| b == b'!' && bytes.get(i + 1) != Some(&b'='))
+}
 
 /// Reassignment to a literal inside a guard
 /// `if (!check(x)) x = "literal";` (same physical line as the if).
@@ -66,8 +89,8 @@ static NEGATION_BANG_RE: LazyLock<Regex> =
 /// the group; the first port had lost it, so a PHP guard
 /// `if (!filter_var($next, ...)) { $next = '/'; }` left `$next` tainted
 /// (ticket #157).
-static GUARD_REASSIGN_SAMELINE_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
+static GUARD_REASSIGN_SAMELINE_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(
         r#"\)\s*\{?\s*(\$?[A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:["'][^"']*["']|[+-]?[0-9]+|null|None|undefined|true|false)"#,
     )
     .expect("regex statique valide")
@@ -76,8 +99,8 @@ static GUARD_REASSIGN_SAMELINE_RE: LazyLock<Regex> = LazyLock::new(|| {
 /// Same idiom, but as a whole following line (multi-line guard body).
 /// Anchored at the start of the line (standalone statement, not a
 /// continuation of `)`). Same `$` as `GUARD_REASSIGN_SAMELINE_RE`.
-static GUARD_REASSIGN_NEXTLINE_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
+static GUARD_REASSIGN_NEXTLINE_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(
         r#"^\s*(\$?[A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:["'][^"']*["']|[+-]?[0-9]+|null|None|undefined|true|false)\s*;"#,
     )
     .expect("regex statique valide")
@@ -95,9 +118,11 @@ static GUARD_REASSIGN_NEXTLINE_RE: LazyLock<Regex> = LazyLock::new(|| {
 /// the variable of the same name; `strip_plain_string_literals` keeps a
 /// backtick literal holding a `$`, so a template that interpolates and a
 /// PHP shell command (`` `ls $dir` ``) are still searched.
-static STRING_LIT_STRIP_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#""[^"\\]*(?:\\.[^"\\]*)*"|'[^'\\]*(?:\\.[^'\\]*)*'|`[^`\\]*(?:\\.[^`\\]*)*`"#)
-        .expect("regex statique valide")
+static STRING_LIT_STRIP_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(
+        r#""[^"\\]*(?:\\.[^"\\]*)*"|'[^'\\]*(?:\\.[^'\\]*)*'|`[^`\\]*(?:\\.[^`\\]*)*`"#,
+    )
+    .expect("regex statique valide")
 });
 
 /// Longest call the sink search follows past an unbalanced `(`, in
@@ -116,7 +141,6 @@ pub(crate) fn strip_plain_string_literals(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut last = 0;
     for m in STRING_LIT_STRIP_RE.find_iter(text) {
-        let Ok(m) = m else { break };
         out.push_str(&text[last..m.start()]);
         let matched = m.as_str();
         let interpolates = matched.contains('{')
@@ -140,13 +164,222 @@ fn matches(regex: &Regex, text: &str) -> bool {
     regex.is_match(text).unwrap_or(false)
 }
 
+/// The value of `cell`, computed by `init` when the cell is empty,
+/// without waiting for another thread (ticket #240).
+///
+/// The cells of [`SourceLines`] are shared by the rules of a pass, which
+/// run in parallel over the same files in the same order: they reach a
+/// line together. With `OnceLock::get_or_init`, one rule computed it while
+/// the others slept until it was done; waking them up cost more than the
+/// computation itself, and on the `Java` project the threads spent more
+/// time waiting than working. Here each rule that finds the cell empty
+/// computes the value itself and the first one stored is kept. The value
+/// only depends on the line, so every rule reads the same answer.
+fn get_or_compute<T>(cell: &OnceLock<T>, init: impl FnOnce() -> T) -> &T {
+    if let Some(value) = cell.get() {
+        return value;
+    }
+    // Another thread may have stored its value meanwhile: `set` then
+    // drops this one, equal to it.
+    let _ = cell.set(init());
+    cell.get().expect("stored above or by another thread")
+}
+
+/// The guard facts of every line of one file, each computed on first
+/// use. They do not depend on the rule: a table shared by every rule of
+/// a scan computes them once per line instead of once per rule and per
+/// line, which was about 18 % of the taint time of a C# scan with 19
+/// rules (ticket #240).
+#[derive(Default)]
+struct GuardTable {
+    /// One slot per line, allocated when the first guard of the file is
+    /// asked for.
+    slots: OnceLock<Box<[OnceLock<GuardFacts>]>>,
+}
+
+impl GuardTable {
+    /// Guard facts of line `lineno` (1-based) of `lines`, the lines this
+    /// table belongs to; `None` outside the file.
+    fn get(&self, lines: &SourceLines, lineno: usize) -> Option<&GuardFacts> {
+        let text = lineno.checked_sub(1).and_then(|i| lines.get(i))?;
+        let slots = get_or_compute(&self.slots, || {
+            (0..lines.len()).map(|_| OnceLock::new()).collect()
+        });
+        Some(get_or_compute(&slots[lineno - 1], || {
+            GuardFacts::compute(text)
+        }))
+    }
+}
+
+/// The text of one file and its lines, with the facts of its lines that
+/// do not depend on the rule, shared by every rule of the scan (ticket
+/// #240): what the scan keeps of each file's text, read by the pattern
+/// pass, by the language passes through [`RuleLines::shared`], and by
+/// the report.
+///
+/// The text is kept once (ticket #241): a line is a slice of it, found
+/// through the offsets where the lines start. A scan used to keep the
+/// text four times per file (the bytes read, the text, and two lists of
+/// one `String` per line). Line `n` (1-based) is at index `n - 1`
+/// ([`SourceLines::get`], `lines[n - 1]`) and keeps its terminator
+/// (`\n`, `\r\n`), as the lines read by Python's `readlines()`.
+///
+/// The facts are filled while the rules run, from several threads: each
+/// slot is a `OnceLock`, so a line is computed once.
+pub struct SourceLines {
+    text: String,
+    /// Offset in `text` where each line starts, then the length of
+    /// `text`: line index `i` is `text[bounds[i]..bounds[i + 1]]`. Never
+    /// empty.
+    bounds: Vec<usize>,
+    guards: GuardTable,
+    /// The answers of the raw regexes of the pass's rules on each line
+    /// (`expr_table.rs`), with the number of the table that computed
+    /// them: allocated when the first rule reaches the file.
+    exprs: OnceLock<(usize, Box<[OnceLock<ExprBits>]>)>,
+}
+
+impl SourceLines {
+    /// The lines of `text`, each ending after its `\n` (the last one
+    /// without, when the text does not end with one): the split of
+    /// `str::split_inclusive('\n')`, which the scan has always used. An
+    /// empty text has no line. No fact is computed yet.
+    pub fn from_text(text: String) -> Self {
+        let mut bounds = vec![0];
+        bounds.extend(text.match_indices('\n').map(|(at, _)| at + 1));
+        if bounds.last() != Some(&text.len()) {
+            bounds.push(text.len());
+        }
+        Self::with_bounds(text, bounds)
+    }
+
+    fn with_bounds(text: String, bounds: Vec<usize>) -> Self {
+        Self {
+            text,
+            bounds,
+            guards: GuardTable::default(),
+            exprs: OnceLock::new(),
+        }
+    }
+
+    /// The whole text of the file.
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// Number of lines.
+    pub fn len(&self) -> usize {
+        self.bounds.len() - 1
+    }
+
+    /// Whether the file has no line (empty text).
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The line at `index` (line number `index + 1`), terminator
+    /// included; `None` past the last line.
+    pub fn get(&self, index: usize) -> Option<&str> {
+        let end = *self.bounds.get(index + 1)?;
+        Some(&self.text[self.bounds[index]..end])
+    }
+
+    /// The lines, in order.
+    pub fn iter(&self) -> impl DoubleEndedIterator<Item = &str> + ExactSizeIterator + Clone {
+        self.bounds
+            .windows(2)
+            .map(|bounds| &self.text[bounds[0]..bounds[1]])
+    }
+
+    /// The lines numbered from 1, each as its own `String`: the form the
+    /// pattern rules read (`engine::dispatch_rule`). Built for one file
+    /// at a time and dropped after its rules ran, so the scan does not
+    /// keep a second copy of every text (ticket #241).
+    pub fn numbered_lines(&self) -> Vec<(usize, String)> {
+        self.iter()
+            .enumerate()
+            .map(|(i, line)| (i + 1, line.to_string()))
+            .collect()
+    }
+
+    /// Computes the answers of every pattern of `table` on every line,
+    /// before the rules run (ticket #240). Left to the first rule that
+    /// reaches a line, the rules of a pass, which reach the lines
+    /// together, either waited for one another or computed the same line
+    /// several times: 90 s of CPU more on the `Java` project. Lines the
+    /// file already answered for another table are left alone (the rules
+    /// then test their own regexes, see [`SourceLines::expr_bits`]).
+    pub fn fill_exprs(&self, table: &ExprTable) {
+        for lineno in 1..=self.len() {
+            if self.expr_bits(lineno, table).is_none() {
+                return;
+            }
+        }
+    }
+
+    /// The answers of every pattern of `table` on line `lineno`
+    /// (1-based), computed on first use; `None` outside the file, or
+    /// when the answers kept for the file are those of another table (a
+    /// file read by two passes: the rule then tests its own regexes).
+    fn expr_bits(&self, lineno: usize, table: &ExprTable) -> Option<&ExprBits> {
+        let text = lineno.checked_sub(1).and_then(|i| self.get(i))?;
+        let (id, slots) = get_or_compute(&self.exprs, || {
+            (
+                table.id(),
+                (0..self.len()).map(|_| OnceLock::new()).collect(),
+            )
+        });
+        (*id == table.id()).then(|| get_or_compute(&slots[lineno - 1], || table.matches(text)))
+    }
+}
+
+impl Index<usize> for SourceLines {
+    type Output = str;
+
+    /// The line at `index`, as [`SourceLines::get`]; panics past the
+    /// last line, as a slice index does.
+    fn index(&self, index: usize) -> &str {
+        self.get(index).unwrap_or_else(|| {
+            panic!(
+                "line index {index} out of range for a file of {} lines",
+                self.len()
+            )
+        })
+    }
+}
+
+/// The given lines, kept as they are: a line need not end with `\n`
+/// (the tests write lines without terminator), so the text is their
+/// concatenation and each line keeps its own bounds.
+impl<S: AsRef<str>> FromIterator<S> for SourceLines {
+    fn from_iter<I: IntoIterator<Item = S>>(lines: I) -> Self {
+        let mut text = String::new();
+        let mut bounds = vec![0];
+        for line in lines {
+            text.push_str(line.as_ref());
+            bounds.push(text.len());
+        }
+        Self::with_bounds(text, bounds)
+    }
+}
+
+/// The source lines of every file of a language pass, keyed by file
+/// path: what the call graphs read to compute the summaries.
+pub type LinesByFile = std::collections::BTreeMap<String, Arc<SourceLines>>;
+
 /// The source lines of one file, with the per-line facts of one rule.
 ///
-/// Dereferences to the lines themselves (`[String]`, line `n` at index
-/// `n - 1`), so code that only reads the text keeps indexing it as
+/// Dereferences to the lines themselves ([`SourceLines`], line `n` at
+/// index `n - 1`), so code that only reads the text keeps indexing it as
 /// before. See the module doc for what is cached and why.
 pub struct RuleLines<'a> {
-    lines: &'a [String],
+    lines: &'a SourceLines,
+    /// The lines with the facts shared by the rules of the scan
+    /// ([`RuleLines::shared`]), else `None` and `own_guards` is used.
+    shared: Option<&'a SourceLines>,
+    /// The guard table of lines given without one ([`RuleLines::new`]):
+    /// a test, or a file the pass did not prepare.
+    own_guards: GuardTable,
     rule_id: String,
     spec_counts: (usize, usize, usize),
     /// One slot per line, allocated when the first fact of the file is
@@ -156,27 +389,38 @@ pub struct RuleLines<'a> {
 }
 
 impl<'a> RuleLines<'a> {
-    /// Binds the lines of a file to the rule described by `specs`.
-    pub fn new(lines: &'a [String], specs: &RuleSpecs) -> Self {
+    /// Binds the lines of a file to the rule described by `specs`. The
+    /// guard facts are computed for this rule only: see
+    /// [`RuleLines::shared`] for lines shared by the rules of a scan.
+    pub fn new(lines: &'a SourceLines, specs: &RuleSpecs) -> Self {
         Self {
             lines,
+            shared: None,
+            own_guards: GuardTable::default(),
             rule_id: specs.rule_id.clone(),
             spec_counts: spec_counts(specs),
             facts: OnceLock::new(),
         }
     }
 
+    /// Binds the lines of a file to the rule described by `specs`,
+    /// reading the guard facts and the answers of the raw regexes from
+    /// `lines`, shared by every rule (ticket #240).
+    pub fn shared(lines: &'a SourceLines, specs: &RuleSpecs) -> Self {
+        Self {
+            shared: Some(lines),
+            ..Self::new(lines, specs)
+        }
+    }
+
     /// The raw lines of the file.
-    pub fn lines(&self) -> &'a [String] {
+    pub fn lines(&self) -> &'a SourceLines {
         self.lines
     }
 
     /// Text of line `lineno` (1-based), `None` outside the file.
     pub fn line(&self, lineno: usize) -> Option<&'a str> {
-        lineno
-            .checked_sub(1)
-            .and_then(|i| self.lines.get(i))
-            .map(String::as_str)
+        lineno.checked_sub(1).and_then(|i| self.lines.get(i))
     }
 
     /// Facts of line `lineno` (1-based) for the bound rule, computed on
@@ -196,14 +440,25 @@ impl<'a> RuleLines<'a> {
             .facts
             .get_or_init(|| (0..self.lines.len()).map(|_| OnceLock::new()).collect());
         let slot = &slots[lineno - 1];
-        Some(slot.get_or_init(|| Box::new(LineFacts::compute(text, specs))))
+        Some(slot.get_or_init(|| {
+            let bits = self
+                .shared
+                .zip(specs.exprs.as_ref())
+                .and_then(|(lines, exprs)| {
+                    lines
+                        .expr_bits(lineno, &exprs.table)
+                        .map(|bits| (bits, exprs.as_ref()))
+                });
+            Box::new(LineFacts::compute(text, specs, bits))
+        }))
     }
 
-    /// Guard facts of line `lineno` (1-based), computed on first use.
-    pub fn guard(&self, lineno: usize, specs: &RuleSpecs) -> Option<&GuardFacts> {
-        let text = self.line(lineno)?;
-        let facts = self.facts(lineno, specs)?;
-        Some(facts.guard.get_or_init(|| GuardFacts::compute(text)))
+    /// Guard facts of line `lineno` (1-based), computed on first use;
+    /// `None` outside the file. They do not depend on the rule.
+    pub fn guard(&self, lineno: usize) -> Option<&GuardFacts> {
+        self.shared
+            .map_or(&self.own_guards, |lines| &lines.guards)
+            .get(self.lines, lineno)
     }
 
     /// The text the sink search of line `lineno` (1-based) reads, see
@@ -243,9 +498,9 @@ impl<'a> RuleLines<'a> {
 }
 
 impl Deref for RuleLines<'_> {
-    type Target = [String];
+    type Target = SourceLines;
 
-    fn deref(&self) -> &[String] {
+    fn deref(&self) -> &SourceLines {
         self.lines
     }
 }
@@ -271,7 +526,6 @@ pub struct LineFacts {
     /// Indices in `specs.sinks` of the sinks whose raw regex matches
     /// the line, in rule order.
     pub sinks: Vec<usize>,
-    guard: OnceLock<GuardFacts>,
     sink_scan: OnceLock<SinkScan>,
     without_literals: OnceLock<String>,
     trimmed: OnceLock<SharedText>,
@@ -285,32 +539,54 @@ thread_local! {
 }
 
 impl LineFacts {
-    fn compute(text: &str, specs: &RuleSpecs) -> Self {
+    /// The specs of `specs` whose raw regex matches `text`. With `bits`,
+    /// the answers the line computed for every rule of the pass and the
+    /// numbers of this rule's regexes in them (ticket #240); without,
+    /// each regex is tested here. Same answers either way.
+    fn compute(
+        text: &str,
+        specs: &RuleSpecs,
+        bits: Option<(&ExprBits, &super::expr_table::RuleExprs)>,
+    ) -> Self {
         #[cfg(test)]
         FACT_COMPUTATIONS.with(|count| count.set(count.get() + 1));
+        // Whether spec `index` of a list, of raw regex `regex` and
+        // number `ids[index]` in the table, matches the line.
+        let hit = |regex: Option<&Regex>,
+                   ids: fn(&super::expr_table::RuleExprs) -> &[Option<usize>],
+                   index: usize| {
+            let Some(regex) = regex else { return false };
+            match bits {
+                Some((bits, exprs)) => match ids(exprs).get(index).copied().flatten() {
+                    Some(id) => bits.contains(id),
+                    None => matches(regex, text),
+                },
+                None => matches(regex, text),
+            }
+        };
         let first_sanitizer = specs
             .sanitizers
             .iter()
-            .position(|s| s.raw_regex.as_ref().is_some_and(|rx| matches(rx, text)));
+            .enumerate()
+            .position(|(i, s)| hit(s.raw_regex.as_ref(), |e| &e.sanitizers, i));
         let sources = specs
             .sources
             .iter()
             .enumerate()
-            .filter(|(_, s)| s.raw_regex.as_ref().is_some_and(|rx| matches(rx, text)))
+            .filter(|(i, s)| hit(s.raw_regex.as_ref(), |e| &e.sources, *i))
             .map(|(i, _)| i)
             .collect();
         let sinks = specs
             .sinks
             .iter()
             .enumerate()
-            .filter(|(_, s)| s.raw_regex.as_ref().is_some_and(|rx| matches(rx, text)))
+            .filter(|(i, s)| hit(s.raw_regex.as_ref(), |e| &e.sinks, *i))
             .map(|(i, _)| i)
             .collect();
         Self {
             first_sanitizer,
             sources,
             sinks,
-            guard: OnceLock::new(),
             sink_scan: OnceLock::new(),
             without_literals: OnceLock::new(),
             trimmed: OnceLock::new(),
@@ -319,6 +595,7 @@ impl LineFacts {
 }
 
 /// Guard patterns of one line, independent of the rule.
+#[cfg_attr(test, derive(Debug, PartialEq))]
 ///
 /// A line plays two roles in guard detection: the `if` line itself
 /// (`starts_*`, `has_not_or_in`, `negation_bang`, `terminator_same_line`,
@@ -349,13 +626,20 @@ pub struct GuardFacts {
     pub reassign_next_line: Option<String>,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Number of `GuardFacts::compute` calls on this thread: lets the
+    /// tests check that the rules of a scan share a line's guard facts.
+    static GUARD_COMPUTATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 impl GuardFacts {
     fn compute(text: &str) -> Self {
+        #[cfg(test)]
+        GUARD_COMPUTATIONS.with(|count| count.set(count.get() + 1));
         let stripped = text.trim_start();
-        let capture = |rx: &Regex| {
+        let capture = |rx: &regex::Regex| {
             rx.captures(text)
-                .ok()
-                .flatten()
                 .and_then(|caps| caps.get(1).map(|m| m.as_str().to_string()))
         };
         Self {
@@ -364,9 +648,9 @@ impl GuardFacts {
             starts_python_if: stripped.starts_with("if ") || stripped.starts_with("elif "),
             starts_brace_if: stripped.starts_with("if (") || stripped.starts_with("if("),
             has_not_or_in: text.contains(" not ") || text.contains(" in "),
-            negation_bang: matches(&NEGATION_BANG_RE, text),
-            terminator: matches(&GUARD_TERMINATOR_RE, text),
-            terminator_same_line: matches(&GUARD_TERMINATOR_SAMELINE_RE, text),
+            negation_bang: has_negation_bang(text),
+            terminator: GUARD_TERMINATOR_RE.is_match(text),
+            terminator_same_line: GUARD_TERMINATOR_SAMELINE_RE.is_match(text),
             reassign_same_line: capture(&GUARD_REASSIGN_SAMELINE_RE),
             reassign_next_line: capture(&GUARD_REASSIGN_NEXTLINE_RE),
         }
@@ -401,7 +685,7 @@ impl SinkScan {
     /// over the whole call but the sanitizer on its first line only:
     /// every SQLAlchemy `db.execute(\n select(...).where(x == p))` was an
     /// injection (my-ia, 2026-11-14).
-    fn compute(lines: &[String], lineno: usize, specs: &RuleSpecs) -> Self {
+    fn compute(lines: &SourceLines, lineno: usize, specs: &RuleSpecs) -> Self {
         let line_text = &lines[lineno - 1];
         let mut paren_depth =
             line_text.matches('(').count() as i64 - line_text.matches(')').count() as i64;
@@ -409,7 +693,7 @@ impl SinkScan {
             return Self {
                 continuation_sanitized: false,
                 text_without_literals: strip_plain_string_literals(line_text),
-                span: line_text.clone(),
+                span: line_text.to_string(),
             };
         }
         let mut span: Vec<&str> = vec![line_text];
@@ -510,15 +794,16 @@ pub fn call_arguments(span: &str, sink: &Regex) -> Option<Vec<String>> {
 pub type RuleLinesByFile<'a> = std::collections::BTreeMap<&'a str, RuleLines<'a>>;
 
 /// Binds the lines of every file in `lines_by_file` to the rule
-/// `specs`. Cheap: a file's per-line table is only allocated when a
-/// summary of that file first reads a fact.
+/// `specs`, sharing their guard facts with the other rules. Cheap: a
+/// file's per-line table is only allocated when a summary of that file
+/// first reads a fact.
 pub fn rule_lines_by_file<'a>(
-    lines_by_file: &'a std::collections::BTreeMap<String, Vec<String>>,
+    lines_by_file: &'a LinesByFile,
     specs: &RuleSpecs,
 ) -> RuleLinesByFile<'a> {
     lines_by_file
         .iter()
-        .map(|(path, lines)| (path.as_str(), RuleLines::new(lines, specs)))
+        .map(|(path, lines)| (path.as_str(), RuleLines::shared(lines, specs)))
         .collect()
 }
 
@@ -619,11 +904,56 @@ mod tests {
             passthroughs: vec![],
             summaries: BTreeMap::new(),
             type_map: BTreeMap::new(),
+            summary_fallback: None,
+            exprs: None,
         }
     }
 
-    fn lines(text: &str) -> Vec<String> {
-        text.lines().map(str::to_string).collect()
+    fn lines(text: &str) -> SourceLines {
+        text.lines().collect()
+    }
+
+    /// Ticket #241: the lines of a text are the slices
+    /// `str::split_inclusive('\n')` gives, the split the scan used when
+    /// it kept one `String` per line.
+    #[test]
+    fn test_lines_of_a_text_are_those_of_split_inclusive() {
+        for text in [
+            "",
+            "a",
+            "a\n",
+            "a\nb",
+            "a\r\nb\r\n",
+            "\n\n",
+            "\n",
+            "é\nà€\n𝄞",
+            "x = 1\n\n  y\n",
+        ] {
+            let lines = SourceLines::from_text(text.to_string());
+            let expected: Vec<&str> = text.split_inclusive('\n').collect();
+            assert_eq!(lines.iter().collect::<Vec<_>>(), expected, "{text:?}");
+            assert_eq!(lines.len(), expected.len());
+            assert_eq!(lines.text(), text);
+            for (index, line) in expected.iter().enumerate() {
+                assert_eq!(lines.get(index), Some(*line));
+                assert_eq!(&lines[index], *line);
+            }
+            assert_eq!(lines.get(expected.len()), None);
+            let numbered: Vec<(usize, String)> = expected
+                .iter()
+                .enumerate()
+                .map(|(i, l)| (i + 1, l.to_string()))
+                .collect();
+            assert_eq!(lines.numbered_lines(), numbered);
+        }
+    }
+
+    /// Lines given one by one keep their own bounds, terminator or not.
+    #[test]
+    fn test_lines_given_one_by_one_are_kept_as_given() {
+        let lines: SourceLines = ["a = 1", "", "b\n", "c"].into_iter().collect();
+        assert_eq!(lines.iter().collect::<Vec<_>>(), ["a = 1", "", "b\n", "c"]);
+        assert_eq!(lines.text(), "a = 1b\nc");
     }
 
     fn computations() -> usize {
@@ -748,24 +1078,238 @@ mod tests {
         let text = lines("    if (!ok(x)) x = 'safe';\n        return\n   \n    y = 0;");
         let rule_lines = RuleLines::new(&text, &specs);
 
-        let line = rule_lines.guard(1, &specs).unwrap();
+        let line = rule_lines.guard(1).unwrap();
         assert_eq!(line.indent, 4);
         assert!(line.starts_brace_if && line.starts_python_if);
         assert!(line.negation_bang && !line.has_not_or_in);
         assert_eq!(line.reassign_same_line.as_deref(), Some("x"));
         assert!(!line.terminator_same_line);
 
-        let body = rule_lines.guard(2, &specs).unwrap();
+        let body = rule_lines.guard(2).unwrap();
         assert!(body.terminator && body.indent == 8 && !body.is_blank);
-        assert!(rule_lines.guard(3, &specs).unwrap().is_blank);
+        assert!(rule_lines.guard(3).unwrap().is_blank);
         assert_eq!(
-            rule_lines
-                .guard(4, &specs)
-                .unwrap()
-                .reassign_next_line
-                .as_deref(),
+            rule_lines.guard(4).unwrap().reassign_next_line.as_deref(),
             Some("y")
         );
+    }
+
+    /// The guard facts and the literal stripping as the former engine
+    /// computed them: every fixed pattern on `fancy_regex`, `!` negation
+    /// as `!(?!=)` (ticket #240). The oracle of the two tests below.
+    fn former_engine(text: &str) -> (GuardFacts, String) {
+        /// The fixed patterns compiled on `fancy_regex`, once.
+        struct Former {
+            negation: Regex,
+            terminator: Regex,
+            terminator_same_line: Regex,
+            reassign_same_line: Regex,
+            reassign_next_line: Regex,
+            literals: Regex,
+        }
+        static FORMER: LazyLock<Former> = LazyLock::new(|| Former {
+            negation: Regex::new(r"!(?!=)").unwrap(),
+            terminator: Regex::new(GUARD_TERMINATOR_RE.as_str()).unwrap(),
+            terminator_same_line: Regex::new(GUARD_TERMINATOR_SAMELINE_RE.as_str()).unwrap(),
+            reassign_same_line: Regex::new(GUARD_REASSIGN_SAMELINE_RE.as_str()).unwrap(),
+            reassign_next_line: Regex::new(GUARD_REASSIGN_NEXTLINE_RE.as_str()).unwrap(),
+            literals: Regex::new(STRING_LIT_STRIP_RE.as_str()).unwrap(),
+        });
+        let former = &*FORMER;
+        let capture = |rx: &Regex| {
+            rx.captures(text)
+                .ok()
+                .flatten()
+                .and_then(|caps| caps.get(1).map(|m| m.as_str().to_string()))
+        };
+        let stripped = text.trim_start();
+        let facts = GuardFacts {
+            indent: text.len() - stripped.len(),
+            is_blank: text.trim().is_empty(),
+            starts_python_if: stripped.starts_with("if ") || stripped.starts_with("elif "),
+            starts_brace_if: stripped.starts_with("if (") || stripped.starts_with("if("),
+            has_not_or_in: text.contains(" not ") || text.contains(" in "),
+            negation_bang: matches(&former.negation, text),
+            terminator: matches(&former.terminator, text),
+            terminator_same_line: matches(&former.terminator_same_line, text),
+            reassign_same_line: capture(&former.reassign_same_line),
+            reassign_next_line: capture(&former.reassign_next_line),
+        };
+        let literals = &former.literals;
+        let mut without = String::new();
+        let mut last = 0;
+        for m in literals.find_iter(text) {
+            let m = m.expect("no backtracking limit on this pattern");
+            without.push_str(&text[last..m.start()]);
+            let matched = m.as_str();
+            if matched.contains('{')
+                || matched.contains('}')
+                || (matched.starts_with('`') && matched.contains('$'))
+            {
+                without.push_str(matched);
+            } else {
+                without.push(' ');
+            }
+            last = m.end();
+        }
+        without.push_str(&text[last..]);
+        (facts, without)
+    }
+
+    fn assert_engines_agree(text: &str) {
+        let (facts, without) = former_engine(text);
+        assert_eq!(GuardFacts::compute(text), facts, "guard facts of {text:?}");
+        assert_eq!(
+            strip_plain_string_literals(text),
+            without,
+            "literals of {text:?}"
+        );
+    }
+
+    /// Ticket #240: the `regex` crate and the byte search give the
+    /// answers of the former `fancy_regex` patterns, on the edge cases
+    /// of each pattern.
+    #[test]
+    fn test_guard_engines_agree() {
+        for text in [
+            "",
+            "   ",
+            "if (!ok(x)) x = 'safe';",
+            "if (a != b) return;",
+            "if (a !== b) { $next = '/'; }",
+            "x = !",
+            "!=",
+            "!!x",
+            "a!é",
+            "é!=",
+            "if not valid(x): raise Forbidden()",
+            "    elif x in allowed: return",
+            "returned = 1",
+            "sys.exit(1)",
+            "os._exit(2)",
+            "Response.End();",
+            "RedirectToAction(\"Index\")",
+            "  $v = null;",
+            "  v = -12;",
+            "v = \"a\" + b;",
+            "  ok = undefined ;",
+            "f(\"it\\\"s\", 'a\\'b', `t ${x}`, `plain`, \"{y}\")",
+            "`ls $dir` and 'unclosed",
+            "émoji 🦀 = \"ü\"; return",
+        ] {
+            assert_engines_agree(text);
+        }
+    }
+
+    /// Ticket #240: the same comparison on every line of the reference
+    /// corpus (`$CODEFIXTURE_AUDIT_NOISE_CORPUS`, else
+    /// `AuditBenchmarks/data` beside the repository). Slow, hence
+    /// ignored: `cargo test --release -- --ignored guard_engines`.
+    #[test]
+    #[ignore]
+    fn test_guard_engines_agree_on_the_corpus() {
+        let root = std::env::var("CODEFIXTURE_AUDIT_NOISE_CORPUS")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| {
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../AuditBenchmarks/data")
+            });
+        assert!(root.is_dir(), "corpus not found: {}", root.display());
+        let extensions = [
+            "py", "java", "js", "jsx", "mjs", "cjs", "ts", "tsx", "php", "cs",
+        ];
+        let mut pending = vec![root];
+        let (mut files, mut lines) = (0usize, 0usize);
+        while let Some(dir) = pending.pop() {
+            for entry in std::fs::read_dir(&dir).expect("readable folder") {
+                let path = entry.expect("readable entry").path();
+                if path.is_symlink() {
+                    continue;
+                }
+                if path.is_dir() {
+                    pending.push(path);
+                } else if path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .is_some_and(|e| extensions.contains(&e))
+                {
+                    let bytes = std::fs::read(&path).expect("readable file");
+                    let text = String::from_utf8_lossy(&bytes);
+                    for line in text.lines() {
+                        assert_engines_agree(line);
+                        lines += 1;
+                    }
+                    files += 1;
+                }
+            }
+        }
+        assert!(files > 0, "no source file in the corpus");
+        eprintln!("{files} files, {lines} lines: same answers");
+    }
+
+    /// Ticket #240: the rules reading the same [`SourceLines`] compute a
+    /// line's guard facts once; lines given without a shared table
+    /// compute them for each rule, as before.
+    #[test]
+    fn test_guard_facts_are_shared_by_the_rules() {
+        let first = hybrid_specs();
+        let second = RuleSpecs {
+            rule_id: "other_rule".to_string(),
+            ..hybrid_specs()
+        };
+        let count = || GUARD_COMPUTATIONS.with(|count| count.get());
+        let text = lines("if (!ok(x)) return;\nrun(x)");
+
+        let shared = text.iter().collect::<SourceLines>();
+        let before = count();
+        for specs in [&first, &second, &first] {
+            let rule_lines = RuleLines::shared(&shared, specs);
+            assert!(rule_lines.guard(1).unwrap().negation_bang);
+            assert!(!rule_lines.guard(2).unwrap().terminator);
+        }
+        assert_eq!(count() - before, 2, "one computation per line");
+
+        let before = count();
+        for specs in [&first, &second] {
+            RuleLines::new(&text, specs).guard(1);
+        }
+        assert_eq!(count() - before, 2, "one computation per rule");
+    }
+
+    /// Ticket #240: two rules numbered in one table read the answers
+    /// their line computed once, and find the facts each rule finds
+    /// testing its own regexes.
+    #[test]
+    fn test_raw_regex_answers_are_shared_by_the_rules() {
+        use crate::scan::dataflow::expr_table::{ExprTable, MATCH_COMPUTATIONS};
+        let mut first = hybrid_specs();
+        let mut second = RuleSpecs {
+            rule_id: "other_rule".to_string(),
+            sinks: vec![SinkSpec::new("run").with_raw_regex(regex(r"\brun\s*\((?!0)"))],
+            ..hybrid_specs()
+        };
+        let alone = [first.clone(), second.clone()];
+        ExprTable::attach([&mut first, &mut second]);
+        let text = lines("x = eval(req.body.a)\nrun(escape(q))\nrun(0)\nw = 1");
+        let shared = text.iter().collect::<SourceLines>();
+        let count = || MATCH_COMPUTATIONS.with(|count| count.get());
+        let before = count();
+        for (specs, alone) in [(&first, &alone[0]), (&second, &alone[1])] {
+            let with_table = RuleLines::shared(&shared, specs);
+            let without = RuleLines::new(&text, alone);
+            for lineno in 1..=4 {
+                let (a, b) = (
+                    with_table.facts(lineno, specs).unwrap(),
+                    without.facts(lineno, alone).unwrap(),
+                );
+                assert_eq!(
+                    (a.first_sanitizer, &a.sources, &a.sinks),
+                    (b.first_sanitizer, &b.sources, &b.sinks),
+                    "{} line {lineno}",
+                    specs.rule_id
+                );
+            }
+        }
+        assert_eq!(count() - before, 4, "one computation per line");
     }
 
     #[test]

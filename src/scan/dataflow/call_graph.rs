@@ -34,12 +34,13 @@ use rayon::prelude::*;
 use tree_sitter::Node;
 
 use super::lattice::SharedText;
-use super::line_facts::{RuleLinesByFile, rule_lines_by_file};
+use super::line_facts::{LinesByFile, RuleLinesByFile, SourceLines, rule_lines_by_file};
 use super::prepared::{PreparedFile, PreparedFiles};
 use super::summary::{
     FunctionInfo, ImportInfo, collect_imports, compute_summary_with, prepare_python_file,
 };
 use super::transfer::{FunctionSummary, RuleSpecs};
+use super::visibility::{ImportEntry, ImportVisibility, Visibility, graph_fingerprint};
 
 /// (file path, function name).
 pub type NodeKey = (String, String);
@@ -72,7 +73,7 @@ pub const MAX_SCC_FIXPOINT_ITER: u32 = 3;
 /// from a deeper callee and keeps its own file. Once a summary is used
 /// in another file, its steps still say where they are, so the report
 /// can show the real line of a query written two calls away.
-fn stamp_steps(summary: &mut FunctionSummary, filepath: &str, lines: Option<&[String]>) {
+fn stamp_steps(summary: &mut FunctionSummary, filepath: &str, lines: Option<&SourceLines>) {
     for template in summary.sink_param_findings.values_mut() {
         for step in &mut template.flow {
             if step.file.is_some() {
@@ -211,12 +212,87 @@ fn resolve_target_file(
     match_unique_suffix(&target_suffix, false, importer, known_files)
 }
 
+/// The imports of a file, resolved to analyzed files and kept as written
+/// (ticket #239): the explicit ones in source order, and the targets of
+/// its `from mod import *`. Mirrors `_resolve_one_import` /
+/// `_apply_star_imports` (module_registry.py) like the former
+/// [`resolve_import_bindings`], which expanded them into one binding per
+/// function of each imported module, for every file; the
+/// [`ImportVisibility`] built from these entries answers each name on
+/// demand, with the same precedence (Python's: explicit imports first, the
+/// last one binding a name winning; then the star imports, a name defined
+/// by two of them dropped; a dotted function name, `Klass.method`, is
+/// never bound through a module).
+fn resolve_import_entries(
+    filepath: &str,
+    imports: &[ImportInfo],
+    known_files: &KnownFiles,
+    file_function_names: &BTreeMap<String, BTreeSet<String>>,
+) -> (Vec<ImportEntry>, Vec<String>) {
+    let mut entries = Vec::new();
+    let mut star_targets = Vec::new();
+    for imp in imports {
+        if imp.orig_name == "*" {
+            if let Some(target) = resolve_target_file(filepath, imp, known_files) {
+                star_targets.push(target);
+            }
+            continue;
+        }
+        if imp.orig_name.is_empty() {
+            // `import mod [as m]` -> calls of the form `m.func(...)`.
+            if let Some(target) = resolve_target_file(filepath, imp, known_files) {
+                entries.push(ImportEntry::Module {
+                    local: imp.local_name.clone(),
+                    target,
+                });
+            }
+            continue;
+        }
+        // `from mod import X`: X is either a function or a submodule.
+        if let Some(target) = resolve_target_file(filepath, imp, known_files)
+            && file_function_names
+                .get(&target)
+                .is_some_and(|names| names.contains(&imp.orig_name))
+        {
+            entries.push(ImportEntry::Function {
+                local: imp.local_name.clone(),
+                target,
+                name: imp.orig_name.clone(),
+            });
+            continue;
+        }
+        let submod_module = if imp.module.is_empty() {
+            imp.orig_name.clone()
+        } else {
+            format!("{}.{}", imp.module, imp.orig_name)
+        };
+        let submod_import = ImportInfo {
+            local_name: imp.local_name.clone(),
+            module: submod_module,
+            orig_name: String::new(),
+            level: imp.level,
+        };
+        if let Some(submod) = resolve_target_file(filepath, &submod_import, known_files) {
+            entries.push(ImportEntry::Module {
+                local: imp.local_name.clone(),
+                target: submod,
+            });
+        }
+    }
+    (entries, star_targets)
+}
+
 /// Returns the bindings brought in by a file's imports, indexed by
 /// the **local** call name as it appears in that file's code. Mirrors
 /// `_resolve_one_import`/`_apply_star_imports` (module_registry.py),
 /// but returns `NodeKey` rather than `FunctionSummary` — summary
 /// resolution does not happen yet at this stage (structural pre-pass
 /// of the graph, independent of the specs).
+///
+/// Test only since ticket #239: the graph no longer builds this map for
+/// every file (see [`resolve_import_entries`]); kept as the oracle its
+/// lookups are checked against.
+#[cfg(test)]
 fn resolve_import_bindings(
     filepath: &str,
     imports: &[ImportInfo],
@@ -357,7 +433,7 @@ fn outgoing_edges(
     source: &[u8],
     filepath: &str,
     local_names: &BTreeSet<String>,
-    import_bindings: &BTreeMap<String, NodeKey>,
+    visibility: &dyn Visibility,
 ) -> BTreeMap<String, NodeKey> {
     let mut edges = BTreeMap::new();
     let mut calls = Vec::new();
@@ -371,8 +447,8 @@ fn outgoing_edges(
         }
         if local_names.contains(&local_name) {
             edges.insert(local_name.clone(), (filepath.to_string(), local_name));
-        } else if let Some(target) = import_bindings.get(&local_name) {
-            edges.insert(local_name.clone(), target.clone());
+        } else if let Some(target) = visibility.binding(filepath, &local_name) {
+            edges.insert(local_name.clone(), target);
         }
     }
     edges
@@ -408,7 +484,9 @@ pub struct ResolvedSummaries {
     /// Summaries each file imports, by local name.
     pub extra: SummariesByFile,
     /// Every summary, by function: what the cache stores for the next run.
-    pub all: BTreeMap<NodeKey, Arc<FunctionSummary>>,
+    /// Shared (`Arc`): Java's taint analysis of each file looks up the
+    /// summaries its package and imports expose in it (ticket #239).
+    pub all: Arc<BTreeMap<NodeKey, Arc<FunctionSummary>>>,
     /// Functions whose summary differs from the previous run.
     pub changed: BTreeSet<NodeKey>,
     /// Functions whose summary was computed rather than reused.
@@ -425,11 +503,11 @@ pub struct ResolvedSummaries {
 pub struct CallGraph<'tree> {
     pub nodes: BTreeMap<NodeKey, FunctionInfo<'tree>>,
     pub edges: BTreeMap<NodeKey, BTreeMap<String, NodeKey>>,
-    /// All resolved imports of each file (local name → target node),
-    /// whether they are called inside a function or at module level —
-    /// used to rebuild `extra` (component 3), never restricted to a
-    /// particular function.
-    pub import_bindings: BTreeMap<String, BTreeMap<String, NodeKey>>,
+    /// The resolved imports of each file, whether they are called inside a
+    /// function or at module level, looked up on demand (ticket #239):
+    /// the former per-file map of every imported name (`import_bindings`)
+    /// held one entry per function of every module a file imports.
+    visibility: Arc<ImportVisibility>,
     source_by_file: BTreeMap<String, &'tree [u8]>,
     /// Every file of the graph prepared once for all the rules of the
     /// scan (ticket #192): read for the summaries and handed to the
@@ -438,6 +516,12 @@ pub struct CallGraph<'tree> {
 }
 
 impl<'tree> CallGraph<'tree> {
+    /// What each file of the graph sees of the others, shared with the
+    /// taint analysis of each file (ticket #239).
+    pub fn visibility(&self) -> &Arc<ImportVisibility> {
+        &self.visibility
+    }
+
     /// The prepared form of `filepath`, one of the graph's files, for
     /// the taint analysis of each rule (ticket #192).
     pub fn prepared_file(
@@ -487,10 +571,24 @@ impl<'tree> CallGraph<'tree> {
 
         let known_files: Vec<String> = file_function_names.keys().cloned().collect();
         let known_index = KnownFiles::new(&known_files);
+        let mut entries = BTreeMap::new();
+        let mut star_targets = BTreeMap::new();
         for filepath in &known_files {
             let imports = imports_by_file.get(filepath).cloned().unwrap_or_default();
-            let bindings =
-                resolve_import_bindings(filepath, &imports, &known_index, &file_function_names);
+            let (file_entries, file_stars) =
+                resolve_import_entries(filepath, &imports, &known_index, &file_function_names);
+            entries.insert(filepath.clone(), file_entries);
+            star_targets.insert(filepath.clone(), file_stars);
+        }
+        graph.visibility = Arc::new(ImportVisibility::new(
+            entries,
+            star_targets,
+            BTreeMap::new(),
+            file_function_names.clone(),
+            false,
+            false,
+        ));
+        for filepath in &known_files {
             let local_names = file_function_names
                 .get(filepath)
                 .cloned()
@@ -510,11 +608,10 @@ impl<'tree> CallGraph<'tree> {
                     source,
                     filepath,
                     &local_names,
-                    &bindings,
+                    graph.visibility.as_ref(),
                 );
                 graph.edges.insert(key, edges);
             }
-            graph.import_bindings.insert(filepath.clone(), bindings);
         }
         graph
     }
@@ -639,7 +736,7 @@ impl<'tree> CallGraph<'tree> {
     pub fn resolve_summaries(
         &self,
         base_specs: &RuleSpecs,
-        source_lines_by_file: Option<&BTreeMap<String, Vec<String>>>,
+        source_lines_by_file: Option<&LinesByFile>,
     ) -> (SummariesByFile, SummariesByFile) {
         let resolved = self.resolve_summaries_incremental(base_specs, source_lines_by_file, None);
         (resolved.own, resolved.extra)
@@ -661,7 +758,7 @@ impl<'tree> CallGraph<'tree> {
     pub fn resolve_summaries_incremental(
         &self,
         base_specs: &RuleSpecs,
-        source_lines_by_file: Option<&BTreeMap<String, Vec<String>>>,
+        source_lines_by_file: Option<&LinesByFile>,
         reuse: Option<&SummaryReuse>,
     ) -> ResolvedSummaries {
         let empty_lines = BTreeMap::new();
@@ -671,24 +768,22 @@ impl<'tree> CallGraph<'tree> {
         let lines_for_rule = rule_lines_by_file(source_lines_by_file, base_specs);
 
         let sccs = self.strongly_connected_components();
-        resolve_incremental(
-            sccs,
-            &self.edges,
-            &self.import_bindings,
-            reuse,
-            |node, resolved, current| {
-                let seed = self.build_seed(node, resolved, current);
-                self.compute_one(node, seed, base_specs, &lines_for_rule)
-            },
-        )
+        resolve_incremental(sccs, &self.edges, reuse, |node, resolved, current| {
+            let seed = self.build_seed(node, resolved, current);
+            self.compute_one(node, seed, base_specs, &lines_for_rule)
+        })
     }
 
-    /// True when `file` reads a summary that changed in this run: one of
-    /// its own functions (module code and functions call each other) or a
-    /// function it imports. Such a file must be analysed again even if its
-    /// text did not change.
-    pub fn consumes_changed(&self, file: &str, changed: &BTreeSet<NodeKey>) -> bool {
-        consumes_changed_in(&self.import_bindings, file, changed)
+    /// The files that read a summary that changed in this run: those
+    /// defining a changed function (module code and functions call each
+    /// other) and those importing one. Such a file must be analysed again
+    /// even if its text did not change. Computed once per rule (ticket
+    /// #239): asking it file by file scanned every changed summary for
+    /// every file.
+    pub fn readers(&self, changed: &BTreeSet<NodeKey>) -> BTreeSet<String> {
+        let mut readers = self.visibility.readers_of(changed);
+        readers.extend(changed.iter().map(|node| node.0.clone()));
+        readers
     }
 
     /// What, besides its own text, decides the analysis of `file`: its
@@ -697,20 +792,24 @@ impl<'tree> CallGraph<'tree> {
     /// that changes a resolution, so that a cached result is never reused
     /// against a different graph.
     pub fn dependency_fingerprint(&self, file: &str) -> String {
-        dependency_fingerprint_in(&self.edges, self.nodes.keys(), &self.import_bindings, file)
+        graph_fingerprint(&self.edges, &self.nodes, self.visibility.as_ref(), file)
     }
 }
 
 /// The incremental summary resolution shared by every language's call
 /// graph (scan cache, 2026-11-14): `sccs` in topological order (callees
-/// first), the graph's `edges` and `import_bindings`, and `compute`, which
-/// computes one function's summary from the summaries resolved so far and
-/// those of the current cycle. See `CallGraph::resolve_summaries_incremental`
-/// for what is reused and what is listed as changed.
+/// first), the graph's `edges`, and `compute`, which computes one
+/// function's summary from the summaries resolved so far and those of the
+/// current cycle. See `CallGraph::resolve_summaries_incremental` for what
+/// is reused and what is listed as changed.
+///
+/// `extra` stays empty: the summaries a file imports are no longer copied
+/// into it for every file and every rule (ticket #239), the taint analysis
+/// of each file looks them up through its graph's [`Visibility`]
+/// (`RuleSpecs::summary_fallback`).
 pub(crate) fn resolve_incremental(
     sccs: Vec<Vec<NodeKey>>,
     edges: &BTreeMap<NodeKey, BTreeMap<String, NodeKey>>,
-    import_bindings: &BTreeMap<String, BTreeMap<String, NodeKey>>,
     reuse: Option<&SummaryReuse>,
     compute: impl Fn(
         &NodeKey,
@@ -819,67 +918,13 @@ pub(crate) fn resolve_incremental(
         }
     }
 
-    let mut extra: SummariesByFile = BTreeMap::new();
-    for (filepath, bindings) in import_bindings {
-        for (local_name, target) in bindings {
-            if let Some(s) = resolved.get(target) {
-                extra
-                    .entry(filepath.clone())
-                    .or_default()
-                    .insert(local_name.clone(), s.clone());
-            }
-        }
-    }
-
     ResolvedSummaries {
         own,
-        extra,
-        all: resolved,
+        extra: BTreeMap::new(),
+        all: Arc::new(resolved),
         changed,
         recomputed,
     }
-}
-
-/// `CallGraph::consumes_changed` for any language's graph.
-pub(crate) fn consumes_changed_in(
-    import_bindings: &BTreeMap<String, BTreeMap<String, NodeKey>>,
-    file: &str,
-    changed: &BTreeSet<NodeKey>,
-) -> bool {
-    changed.iter().any(|n| n.0 == file)
-        || import_bindings
-            .get(file)
-            .is_some_and(|b| b.values().any(|t| changed.contains(t)))
-}
-
-/// `CallGraph::dependency_fingerprint` for any language's graph.
-pub(crate) fn dependency_fingerprint_in<'a>(
-    edges: &BTreeMap<NodeKey, BTreeMap<String, NodeKey>>,
-    nodes: impl Iterator<Item = &'a NodeKey>,
-    import_bindings: &BTreeMap<String, BTreeMap<String, NodeKey>>,
-    file: &str,
-) -> String {
-    let mut out = String::new();
-    for (node, targets) in edges.range((file.to_string(), String::new())..) {
-        if node.0 != file {
-            break;
-        }
-        out.push_str(&node.1);
-        out.push('>');
-        for (name, target) in targets {
-            out.push_str(&format!("{name}={}#{};", target.0, target.1));
-        }
-        out.push('\n');
-    }
-    for node in nodes.filter(|n| n.0 == file) {
-        out.push_str(&format!("fn {}\n", node.1));
-    }
-    if let Some(bindings) = import_bindings.get(file) {
-        for (name, target) in bindings {
-            out.push_str(&format!("import {name}={}#{}\n", target.0, target.1));
-        }
-    }
-    out
 }
 
 #[derive(Default)]
@@ -921,6 +966,8 @@ mod tests {
             passthroughs: vec![],
             summaries: BTreeMap::new(),
             type_map: BTreeMap::new(),
+            summary_fallback: None,
+            exprs: None,
         }
     }
 
@@ -1094,7 +1141,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extra_summaries_indexed_by_local_import_name() {
+    fn test_imported_summaries_found_by_local_import_name() {
         let src_a = b"import utils\n".to_vec();
         let src_u = b"def helper():\n    pass\n".to_vec();
         let tree_a = parse(std::str::from_utf8(&src_a).unwrap());
@@ -1113,11 +1160,25 @@ mod tests {
         ];
         let graph = CallGraph::build(&files);
         let specs = specs_with(vec![]);
-        let (_own, extra) = graph.resolve_summaries(&specs, None);
-        assert!(
-            extra["a.py"].contains_key("utils.helper"),
-            "import module (pas appelé) doit quand même apparaître dans extra"
+        // An imported module function, even not called, is found by the
+        // name `a.py` calls it with; since ticket #239 through the graph's
+        // visibility (`RuleSpecs::summary_fallback`), no longer copied
+        // into `extra`.
+        let resolved = graph.resolve_summaries_incremental(&specs, None, None);
+        assert!(resolved.extra.is_empty(), "nothing copied into extra");
+        let visibility: Arc<dyn crate::scan::dataflow::visibility::Visibility> =
+            graph.visibility().clone();
+        let lookup = crate::scan::dataflow::visibility::FileSummaries::new(
+            visibility,
+            "a.py",
+            resolved.all.clone(),
         );
+        use crate::scan::dataflow::transfer::SummaryLookup;
+        assert!(
+            lookup.get("utils.helper").is_some(),
+            "an imported module function, even not called, is found from a.py"
+        );
+        assert!(lookup.get("utils.missing").is_none());
     }
 
     #[test]
@@ -1142,5 +1203,124 @@ mod tests {
             pos("mid") < pos("top"),
             "mid (callee) doit précéder top (caller)"
         );
+    }
+
+    /// Ticket #239: the imports kept as written and looked up on demand
+    /// answer every name as the former per-file map did
+    /// (`resolve_import_bindings`, the oracle), and the files to redo for a
+    /// changed function are exactly those whose former map held it.
+    #[test]
+    fn test_lookups_match_the_materialized_import_maps() {
+        let sources: &[(&str, &str)] = &[
+            (
+                "pkg/utils.py",
+                "def helper():\n    pass\n\ndef other():\n    pass\n\nclass Klass:\n    def method(self):\n        pass\n",
+            ),
+            (
+                "pkg/extra.py",
+                "def helper():\n    pass\n\ndef unique():\n    pass\n",
+            ),
+            (
+                "pkg/star1.py",
+                "def shared():\n    pass\n\ndef s1():\n    pass\n",
+            ),
+            (
+                "pkg/star2.py",
+                "def shared():\n    pass\n\ndef s2():\n    pass\n",
+            ),
+            (
+                "app.py",
+                "import pkg.utils as u\nfrom pkg.utils import helper\nfrom pkg.extra import helper\nfrom pkg.star1 import *\nfrom pkg.star2 import *\nfrom pkg.extra import unique as uq\nfrom pkg.extra import unique as s1\nfrom pkg import utils\nimport pkg.extra as u\nfrom .pkg import star1\n",
+            ),
+            (
+                "other/app2.py",
+                "from ..pkg.utils import other\nimport pkg.star1\nfrom pkg.star1 import *\n",
+            ),
+        ];
+        let trees: Vec<_> = sources.iter().map(|(_, src)| parse(src)).collect();
+        let files: Vec<FileInput> = sources
+            .iter()
+            .zip(&trees)
+            .map(|((path, src), tree)| FileInput {
+                filepath: path.to_string(),
+                root: tree.root_node(),
+                source: src.as_bytes(),
+            })
+            .collect();
+        let graph = CallGraph::build(&files);
+        let mut names: BTreeMap<String, BTreeSet<String>> = sources
+            .iter()
+            .map(|(path, _)| (path.to_string(), BTreeSet::new()))
+            .collect();
+        for (file, name) in graph.nodes.keys() {
+            names.entry(file.clone()).or_default().insert(name.clone());
+        }
+        let known: Vec<String> = names.keys().cloned().collect();
+        let known_index = KnownFiles::new(&known);
+        let all_names: BTreeSet<String> = names.values().flatten().cloned().collect();
+        let mut probes = all_names.clone();
+        for local in [
+            "u",
+            "utils",
+            "uq",
+            "s1",
+            "pkg",
+            "pkg.utils",
+            "pkg.star1",
+            "star1",
+            "helper",
+            "nothing",
+        ] {
+            probes.insert(local.to_string());
+            for name in &all_names {
+                probes.insert(format!("{local}.{name}"));
+            }
+        }
+        let visibility = graph.visibility();
+        let mut maps = BTreeMap::new();
+        for ((path, src), tree) in sources.iter().zip(&trees) {
+            let imports = collect_imports(tree.root_node(), src.as_bytes());
+            let former = resolve_import_bindings(path, &imports, &known_index, &names);
+            for key in &probes {
+                assert_eq!(
+                    visibility.binding(path, key).as_ref(),
+                    former.get(key),
+                    "{key} from {path}"
+                );
+            }
+            maps.insert(path.to_string(), former);
+        }
+        for node in graph.nodes.keys() {
+            let expected: BTreeSet<String> = maps
+                .iter()
+                .filter(|(_, map)| map.values().any(|target| target == node))
+                .map(|(file, _)| file.clone())
+                .collect();
+            assert_eq!(
+                visibility.readers_of(&BTreeSet::from([node.clone()])),
+                expected,
+                "readers of {node:?}"
+            );
+        }
+        // The fixture does exercise each precedence rule.
+        let at = |file: &str, name: &str| Some((file.to_string(), name.to_string()));
+        assert_eq!(
+            visibility.binding("app.py", "helper"),
+            at("pkg/extra.py", "helper")
+        );
+        assert_eq!(visibility.binding("app.py", "shared"), None);
+        assert_eq!(
+            visibility.binding("app.py", "u.other"),
+            at("pkg/utils.py", "other")
+        );
+        assert_eq!(
+            visibility.binding("app.py", "u.helper"),
+            at("pkg/extra.py", "helper")
+        );
+        assert_eq!(
+            visibility.binding("app.py", "s1"),
+            at("pkg/extra.py", "unique")
+        );
+        assert_eq!(visibility.binding("app.py", "u.Klass.method"), None);
     }
 }

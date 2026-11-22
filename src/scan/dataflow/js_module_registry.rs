@@ -281,28 +281,31 @@ fn navigate_relative(importer: &str, specifier: &str) -> Option<String> {
 /// (exact-path resolution, no concept of ambiguity here unlike the
 /// Python suffix approach: a normalized relative path designates only
 /// one possible file on disk).
+///
+/// `known_files` is built once per scan by the caller (ticket #239): this
+/// function used to build its own set from a list at every call, a time
+/// growing with the number of imports times the number of files.
 pub fn resolve_target_file(
     importer: &str,
     specifier: &str,
-    known_files: &[String],
+    known_files: &HashSet<String>,
 ) -> Option<String> {
     if !(specifier.starts_with("./") || specifier.starts_with("../")) {
         return None;
     }
     let base = navigate_relative(importer, specifier)?;
-    let known: HashSet<&str> = known_files.iter().map(|s| s.as_str()).collect();
-    if known.contains(base.as_str()) {
+    if known_files.contains(base.as_str()) {
         return Some(base);
     }
     for ext in JS_EXTENSIONS {
         let candidate = format!("{base}{ext}");
-        if known.contains(candidate.as_str()) {
+        if known_files.contains(candidate.as_str()) {
             return Some(candidate);
         }
     }
     for ext in JS_EXTENSIONS {
         let candidate = format!("{base}/index{ext}");
-        if known.contains(candidate.as_str()) {
+        if known_files.contains(candidate.as_str()) {
             return Some(candidate);
         }
     }
@@ -403,13 +406,13 @@ mod tests {
 
     #[test]
     fn test_bare_import_not_resolved() {
-        let known = vec!["a.js".to_string()];
+        let known = HashSet::from(["a.js".to_string()]);
         assert_eq!(resolve_target_file("a.js", "lodash", &known), None);
     }
 
     #[test]
     fn test_relative_import_exact_extension_match() {
-        let known = vec!["a.js".to_string(), "foo.js".to_string()];
+        let known = HashSet::from(["a.js".to_string(), "foo.js".to_string()]);
         assert_eq!(
             resolve_target_file("a.js", "./foo", &known),
             Some("foo.js".to_string())
@@ -418,7 +421,7 @@ mod tests {
 
     #[test]
     fn test_relative_import_into_subdirectory() {
-        let known = vec!["src/a.js".to_string(), "src/utils/foo.ts".to_string()];
+        let known = HashSet::from(["src/a.js".to_string(), "src/utils/foo.ts".to_string()]);
         assert_eq!(
             resolve_target_file("src/a.js", "./utils/foo", &known),
             Some("src/utils/foo.ts".to_string())
@@ -427,7 +430,7 @@ mod tests {
 
     #[test]
     fn test_relative_import_parent_directory() {
-        let known = vec!["src/a/b.js".to_string(), "src/utils.js".to_string()];
+        let known = HashSet::from(["src/a/b.js".to_string(), "src/utils.js".to_string()]);
         assert_eq!(
             resolve_target_file("src/a/b.js", "../utils", &known),
             Some("src/utils.js".to_string())
@@ -436,7 +439,7 @@ mod tests {
 
     #[test]
     fn test_relative_import_resolves_index() {
-        let known = vec!["a.js".to_string(), "lib/index.js".to_string()];
+        let known = HashSet::from(["a.js".to_string(), "lib/index.js".to_string()]);
         assert_eq!(
             resolve_target_file("a.js", "./lib", &known),
             Some("lib/index.js".to_string())
@@ -445,7 +448,7 @@ mod tests {
 
     #[test]
     fn test_relative_import_with_explicit_extension_in_specifier() {
-        let known = vec!["a.js".to_string(), "foo.js".to_string()];
+        let known = HashSet::from(["a.js".to_string(), "foo.js".to_string()]);
         assert_eq!(
             resolve_target_file("a.js", "./foo.js", &known),
             Some("foo.js".to_string())
@@ -454,13 +457,13 @@ mod tests {
 
     #[test]
     fn test_relative_import_unresolved_when_no_matching_file() {
-        let known = vec!["a.js".to_string()];
+        let known = HashSet::from(["a.js".to_string()]);
         assert_eq!(resolve_target_file("a.js", "./missing", &known), None);
     }
 
     #[test]
     fn test_relative_import_too_many_parent_segments_gives_up() {
-        let known = vec!["a.js".to_string()];
+        let known = HashSet::from(["a.js".to_string()]);
         assert_eq!(resolve_target_file("a.js", "../../../x", &known), None);
     }
 }

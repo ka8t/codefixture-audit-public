@@ -18,6 +18,7 @@ use crate::scan::dataflow::csharp_summary::{
     compute_csharp_file_summaries_prepared, prepare_csharp_file,
 };
 use crate::scan::dataflow::csharp_taint_scan::run_taint_rule_csharp_prepared;
+use crate::scan::dataflow::line_facts::RuleLines;
 use crate::scan::dataflow::prepared::PreparedFile;
 use crate::scan::dataflow::transfer::RuleSpecs;
 use crate::scan::orchestrator::{ParsedFile, SourceLanguage};
@@ -42,9 +43,9 @@ impl<'a> TaintLanguage<'a> for CSharpTaint<'a> {
         let type_maps = files
             .iter()
             .map(|pf| {
-                let root = pf.tree.root_node();
-                let mut type_map = collect_csharp_field_types(root, &pf.source_bytes);
-                type_map.extend(collect_csharp_local_types(root, &pf.source_bytes));
+                let root = pf.tree().root_node();
+                let mut type_map = collect_csharp_field_types(root, pf.bytes());
+                type_map.extend(collect_csharp_local_types(root, pf.bytes()));
                 (pf.rel_path.clone(), type_map)
             })
             .collect();
@@ -54,7 +55,7 @@ impl<'a> TaintLanguage<'a> for CSharpTaint<'a> {
             .map(|pf| {
                 (
                     pf.rel_path.clone(),
-                    prepare_csharp_file(pf.tree.root_node(), &pf.source_bytes),
+                    prepare_csharp_file(pf.tree().root_node(), pf.bytes()),
                 )
             })
             .collect();
@@ -76,8 +77,8 @@ impl<'a> TaintLanguage<'a> for CSharpTaint<'a> {
     }
 
     /// A file reads no summary of another file.
-    fn consumes_changed(&self, _file: &str, _changed: &BTreeSet<NodeKey>) -> bool {
-        false
+    fn readers(&self, _changed: &BTreeSet<NodeKey>) -> BTreeSet<String> {
+        BTreeSet::new()
     }
 
     fn analyse_file(
@@ -98,17 +99,23 @@ impl<'a> TaintLanguage<'a> for CSharpTaint<'a> {
         let prepared = match self.prepared.get(&file.rel_path) {
             Some(prepared) => prepared,
             None => {
-                fresh = prepare_csharp_file(file.tree.root_node(), &file.source_bytes);
+                fresh = prepare_csharp_file(file.tree().root_node(), file.bytes());
                 &fresh
             }
         };
-        let lines = Some(file.source_lines_plain.as_slice());
-        specs.summaries = compute_csharp_file_summaries_prepared(prepared, specs, lines);
+        // The guard facts of the lines are shared by every rule (ticket
+        // #240); the other facts are bound to this rule.
+        let lines = &file.source;
+        specs.summaries = compute_csharp_file_summaries_prepared(
+            prepared,
+            specs,
+            Some(RuleLines::shared(lines, specs)),
+        );
         specs.type_map = self
             .type_maps
             .get(&file.rel_path)
             .cloned()
             .unwrap_or_default();
-        run_taint_rule_csharp_prepared(prepared, specs, lines)
+        run_taint_rule_csharp_prepared(prepared, specs, Some(RuleLines::shared(lines, specs)))
     }
 }

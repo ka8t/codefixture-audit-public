@@ -176,8 +176,10 @@ pub struct RuleState {
     /// SHA-256 of the rule's compiled JSON: a changed rule is computed
     /// from scratch.
     pub rule_hash: String,
-    /// Every function summary, as `(file, function, summary)`.
-    pub summaries: Vec<(String, String, FunctionSummary)>,
+    /// Every function summary, as `(file, function, summary)`. Shared
+    /// with the summaries of the pass rather than copied (ticket #240);
+    /// written and read as the summary itself.
+    pub summaries: Vec<(String, String, Arc<FunctionSummary>)>,
     /// Every file's findings, in the order the pass produced them.
     pub findings: BTreeMap<String, Vec<Finding>>,
 }
@@ -187,7 +189,7 @@ impl RuleState {
     pub fn previous_summaries(&self) -> BTreeMap<NodeKey, Arc<FunctionSummary>> {
         self.summaries
             .iter()
-            .map(|(f, n, s)| ((f.clone(), n.clone()), Arc::new(s.clone())))
+            .map(|(f, n, s)| ((f.clone(), n.clone()), Arc::clone(s)))
             .collect()
     }
 }

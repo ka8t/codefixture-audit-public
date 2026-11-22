@@ -41,7 +41,7 @@
 //! already notes that most vulnerable JS code lives in callbacks passed
 //! as arguments, a pattern even more dominant than in Python.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
 
 use rayon::prelude::*;
@@ -51,9 +51,10 @@ use tree_sitter::Node;
 pub use super::call_graph::{FileInput, MAX_SCC_FIXPOINT_ITER, NodeKey, SummariesByFile};
 use super::js_module_registry::{JsImportInfo, collect_js_imports, resolve_target_file};
 use super::js_summary::{JsFunctionInfo, compute_js_summary_with, prepare_js_file};
-use super::line_facts::{RuleLinesByFile, rule_lines_by_file};
+use super::line_facts::{LinesByFile, RuleLinesByFile, rule_lines_by_file};
 use super::prepared::{PreparedFile, PreparedFiles};
 use super::transfer::{FunctionSummary, RuleSpecs};
+use super::visibility::{ImportEntry, ImportVisibility, Visibility, graph_fingerprint};
 
 fn text(node: Node, source: &[u8]) -> String {
     node.utf8_text(source).unwrap_or("").to_string()
@@ -73,10 +74,15 @@ fn text(node: Node, source: &[u8]) -> String {
 /// designates a known function of the target file (anti-FP guard
 /// identical to Python: never invent a link to an export that doesn't
 /// exist).
+///
+/// Test only since ticket #239: the graph no longer builds this map for
+/// every file (see [`resolve_import_entries`]); kept as the oracle its
+/// lookups are checked against.
+#[cfg(test)]
 fn resolve_import_bindings(
     filepath: &str,
     imports: &[JsImportInfo],
-    known_files: &[String],
+    known_files: &HashSet<String>,
     file_function_names: &BTreeMap<String, BTreeSet<String>>,
 ) -> BTreeMap<String, NodeKey> {
     let mut out = BTreeMap::new();
@@ -103,6 +109,47 @@ fn resolve_import_bindings(
         }
     }
     out
+}
+
+/// The imports of a file, resolved to analyzed files and kept as written,
+/// in source order (ticket #239), instead of the former expansion into one
+/// binding per function of each imported module ([`resolve_import_bindings`],
+/// now the test oracle). A whole-module import (default import, plain
+/// `require(mod)`, namespace import: empty `orig_name` or `"*"`) is a
+/// [`ImportEntry::Module`]; a named import or a `require` destructuring is
+/// a [`ImportEntry::Function`], only when the target defines that function
+/// (anti-FP, as before). The [`ImportVisibility`] built from them answers
+/// each name with JavaScript's precedence: the last import binding a name
+/// wins, and `local.name` designates any function of the module, a dotted
+/// one (`Klass.method`) too.
+fn resolve_import_entries(
+    filepath: &str,
+    imports: &[JsImportInfo],
+    known_files: &HashSet<String>,
+    file_function_names: &BTreeMap<String, BTreeSet<String>>,
+) -> Vec<ImportEntry> {
+    let mut entries = Vec::new();
+    for imp in imports {
+        let Some(target) = resolve_target_file(filepath, &imp.specifier, known_files) else {
+            continue;
+        };
+        if imp.orig_name.is_empty() || imp.orig_name == "*" {
+            entries.push(ImportEntry::Module {
+                local: imp.local_name.clone(),
+                target,
+            });
+        } else if file_function_names
+            .get(&target)
+            .is_some_and(|names| names.contains(&imp.orig_name))
+        {
+            entries.push(ImportEntry::Function {
+                local: imp.local_name.clone(),
+                target,
+                name: imp.orig_name.clone(),
+            });
+        }
+    }
+    entries
 }
 
 /// Local call name of a `call_expression` node: `foo` for
@@ -152,7 +199,7 @@ fn outgoing_edges(
     source: &[u8],
     filepath: &str,
     local_names: &BTreeSet<String>,
-    import_bindings: &BTreeMap<String, NodeKey>,
+    visibility: &dyn Visibility,
 ) -> BTreeMap<String, NodeKey> {
     let mut edges = BTreeMap::new();
     let mut calls = Vec::new();
@@ -175,8 +222,8 @@ fn outgoing_edges(
         }
         if local_names.contains(&local_name) {
             edges.insert(local_name.clone(), (filepath.to_string(), local_name));
-        } else if let Some(target) = import_bindings.get(&local_name) {
-            edges.insert(local_name.clone(), target.clone());
+        } else if let Some(target) = visibility.binding(filepath, &local_name) {
+            edges.insert(local_name.clone(), target);
         }
     }
     edges
@@ -193,7 +240,9 @@ fn outgoing_edges(
 pub struct JsCallGraph<'tree> {
     pub nodes: BTreeMap<NodeKey, JsFunctionInfo<'tree>>,
     pub edges: BTreeMap<NodeKey, BTreeMap<String, NodeKey>>,
-    pub import_bindings: BTreeMap<String, BTreeMap<String, NodeKey>>,
+    /// The resolved imports of each file, looked up on demand (ticket
+    /// #239), instead of the former per-file map of every imported name.
+    visibility: Arc<ImportVisibility>,
     source_by_file: BTreeMap<String, &'tree [u8]>,
     /// Every file of the graph prepared once for all the rules of the
     /// scan (ticket #192): read for the summaries and handed to the
@@ -250,10 +299,28 @@ impl<'tree> JsCallGraph<'tree> {
         }
 
         let known_files: Vec<String> = file_function_names.keys().cloned().collect();
+        // Built once (ticket #239): the resolution used to build it again
+        // for every import.
+        let known_set: HashSet<String> = known_files.iter().cloned().collect();
+        let entries = known_files
+            .iter()
+            .map(|filepath| {
+                let imports = imports_by_file.get(filepath).cloned().unwrap_or_default();
+                (
+                    filepath.clone(),
+                    resolve_import_entries(filepath, &imports, &known_set, &file_function_names),
+                )
+            })
+            .collect();
+        graph.visibility = Arc::new(ImportVisibility::new(
+            entries,
+            BTreeMap::new(),
+            BTreeMap::new(),
+            file_function_names.clone(),
+            true,
+            false,
+        ));
         for filepath in &known_files {
-            let imports = imports_by_file.get(filepath).cloned().unwrap_or_default();
-            let bindings =
-                resolve_import_bindings(filepath, &imports, &known_files, &file_function_names);
             let local_names = file_function_names
                 .get(filepath)
                 .cloned()
@@ -273,11 +340,10 @@ impl<'tree> JsCallGraph<'tree> {
                     source,
                     filepath,
                     &local_names,
-                    &bindings,
+                    graph.visibility.as_ref(),
                 );
                 graph.edges.insert(key, edges);
             }
-            graph.import_bindings.insert(filepath.clone(), bindings);
         }
         graph
     }
@@ -391,7 +457,7 @@ impl<'tree> JsCallGraph<'tree> {
     pub fn resolve_summaries(
         &self,
         base_specs: &RuleSpecs,
-        source_lines_by_file: Option<&BTreeMap<String, Vec<String>>>,
+        source_lines_by_file: Option<&LinesByFile>,
     ) -> (SummariesByFile, SummariesByFile) {
         let resolved = self.resolve_summaries_incremental(base_specs, source_lines_by_file, None);
         (resolved.own, resolved.extra)
@@ -404,7 +470,7 @@ impl<'tree> JsCallGraph<'tree> {
     pub fn resolve_summaries_incremental(
         &self,
         base_specs: &RuleSpecs,
-        source_lines_by_file: Option<&BTreeMap<String, Vec<String>>>,
+        source_lines_by_file: Option<&LinesByFile>,
         reuse: Option<&super::call_graph::SummaryReuse>,
     ) -> super::call_graph::ResolvedSummaries {
         let empty_lines = BTreeMap::new();
@@ -416,7 +482,6 @@ impl<'tree> JsCallGraph<'tree> {
         super::call_graph::resolve_incremental(
             sccs,
             &self.edges,
-            &self.import_bindings,
             reuse,
             |node, resolved, current| {
                 let seed = self.build_seed(node, resolved, current);
@@ -425,23 +490,24 @@ impl<'tree> JsCallGraph<'tree> {
         )
     }
 
-    /// True when `file` reads a summary that changed in this scan.
-    pub fn consumes_changed(
-        &self,
-        file: &str,
-        changed: &std::collections::BTreeSet<NodeKey>,
-    ) -> bool {
-        super::call_graph::consumes_changed_in(&self.import_bindings, file, changed)
+    /// What each file of the graph sees of the others, shared with the
+    /// taint analysis of each file (ticket #239).
+    pub fn visibility(&self) -> &Arc<ImportVisibility> {
+        &self.visibility
+    }
+
+    /// The files that read a summary that changed in this scan: those
+    /// defining a changed function and those importing one. Computed once
+    /// per rule (ticket #239), see `call_graph::CallGraph::readers`.
+    pub fn readers(&self, changed: &BTreeSet<NodeKey>) -> BTreeSet<String> {
+        let mut readers = self.visibility.readers_of(changed);
+        readers.extend(changed.iter().map(|node| node.0.clone()));
+        readers
     }
 
     /// What, besides its own text, decides the analysis of `file`.
     pub fn dependency_fingerprint(&self, file: &str) -> String {
-        super::call_graph::dependency_fingerprint_in(
-            &self.edges,
-            self.nodes.keys(),
-            &self.import_bindings,
-            file,
-        )
+        graph_fingerprint(&self.edges, &self.nodes, self.visibility.as_ref(), file)
     }
 }
 
@@ -484,6 +550,8 @@ mod tests {
             passthroughs: vec![],
             summaries: BTreeMap::new(),
             type_map: BTreeMap::new(),
+            summary_fallback: None,
+            exprs: None,
         }
     }
 
@@ -658,7 +726,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extra_summaries_indexed_by_local_import_name() {
+    fn test_imported_summaries_found_by_local_import_name() {
         let src_a = b"const utils = require('./utils');\n".to_vec();
         let src_u = b"function helper() {}\n".to_vec();
         let tree_a = parse(std::str::from_utf8(&src_a).unwrap());
@@ -677,10 +745,122 @@ mod tests {
         ];
         let graph = JsCallGraph::build(&files);
         let specs = specs_with(vec![]);
-        let (_own, extra) = graph.resolve_summaries(&specs, None);
-        assert!(
-            extra["a.js"].contains_key("utils.helper"),
-            "import du module (pas appelé) doit quand même apparaître dans extra"
+        // An imported module function, even not called, is found by the
+        // name `a.js` calls it with; since ticket #239 through the graph's
+        // visibility (`RuleSpecs::summary_fallback`), no longer copied
+        // into `extra`.
+        let resolved = graph.resolve_summaries_incremental(&specs, None, None);
+        assert!(resolved.extra.is_empty(), "nothing copied into extra");
+        let visibility: Arc<dyn crate::scan::dataflow::visibility::Visibility> =
+            graph.visibility().clone();
+        let lookup = crate::scan::dataflow::visibility::FileSummaries::new(
+            visibility,
+            "a.js",
+            resolved.all.clone(),
         );
+        use crate::scan::dataflow::transfer::SummaryLookup;
+        assert!(
+            lookup.get("utils.helper").is_some(),
+            "an imported module function, even not called, is found from a.js"
+        );
+        assert!(lookup.get("utils.missing").is_none());
+    }
+
+    /// Ticket #239: the imports kept as written and looked up on demand
+    /// answer every name as the former per-file map did
+    /// (`resolve_import_bindings`, the oracle), and the files to redo for a
+    /// changed function are exactly those whose former map held it.
+    #[test]
+    fn test_lookups_match_the_materialized_import_maps() {
+        let sources: &[(&str, &str)] = &[
+            (
+                "lib/utils.js",
+                "function helper() {}\nfunction other() {}\nclass K { m() {} }\nmodule.exports = { helper, other, K };\n",
+            ),
+            (
+                "lib/extra.js",
+                "function helper() {}\nfunction unique() {}\nmodule.exports = { helper, unique };\n",
+            ),
+            ("lib/index.js", "function fromIndex() {}\n"),
+            (
+                "a.js",
+                "var u = require('./lib/utils');\nconst { helper } = require('./lib/utils');\nconst { helper: h2, unique } = require('./lib/extra');\nimport * as ns from './lib/extra';\nimport dflt from './lib/utils';\nimport { other } from './lib/utils';\nvar u = require('./lib/extra');\nconst idx = require('./lib');\nconst { missing } = require('./lib/extra');\n",
+            ),
+            (
+                "b.js",
+                "const { other } = require('./lib/utils');\nconst lib = require('lodash');\n",
+            ),
+        ];
+        let trees: Vec<_> = sources.iter().map(|(_, src)| parse(src)).collect();
+        let files: Vec<FileInput> = sources
+            .iter()
+            .zip(&trees)
+            .map(|((path, src), tree)| FileInput {
+                filepath: path.to_string(),
+                root: tree.root_node(),
+                source: src.as_bytes(),
+            })
+            .collect();
+        let graph = JsCallGraph::build(&files);
+        let mut names: BTreeMap<String, BTreeSet<String>> = sources
+            .iter()
+            .map(|(path, _)| (path.to_string(), BTreeSet::new()))
+            .collect();
+        for (file, name) in graph.nodes.keys() {
+            names.entry(file.clone()).or_default().insert(name.clone());
+        }
+        let known: HashSet<String> = names.keys().cloned().collect();
+        let all_names: BTreeSet<String> = names.values().flatten().cloned().collect();
+        let mut probes = all_names.clone();
+        for local in [
+            "u", "helper", "h2", "unique", "ns", "dflt", "other", "idx", "missing", "lib",
+            "nothing",
+        ] {
+            probes.insert(local.to_string());
+            for name in &all_names {
+                probes.insert(format!("{local}.{name}"));
+            }
+        }
+        let visibility = graph.visibility();
+        let mut maps = BTreeMap::new();
+        for ((path, src), tree) in sources.iter().zip(&trees) {
+            let imports = collect_js_imports(tree.root_node(), src.as_bytes());
+            let former = resolve_import_bindings(path, &imports, &known, &names);
+            for key in &probes {
+                assert_eq!(
+                    visibility.binding(path, key).as_ref(),
+                    former.get(key),
+                    "{key} from {path}"
+                );
+            }
+            maps.insert(path.to_string(), former);
+        }
+        for node in graph.nodes.keys() {
+            let expected: BTreeSet<String> = maps
+                .iter()
+                .filter(|(_, map)| map.values().any(|target| target == node))
+                .map(|(file, _)| file.clone())
+                .collect();
+            assert_eq!(
+                visibility.readers_of(&BTreeSet::from([node.clone()])),
+                expected,
+                "readers of {node:?}"
+            );
+        }
+        // The fixture does exercise each precedence rule.
+        let at = |file: &str, name: &str| Some((file.to_string(), name.to_string()));
+        assert_eq!(
+            visibility.binding("a.js", "u.helper"),
+            at("lib/extra.js", "helper")
+        );
+        assert_eq!(
+            visibility.binding("a.js", "u.other"),
+            at("lib/utils.js", "other")
+        );
+        assert_eq!(
+            visibility.binding("a.js", "h2"),
+            at("lib/extra.js", "helper")
+        );
+        assert_eq!(visibility.binding("a.js", "missing"), None);
     }
 }

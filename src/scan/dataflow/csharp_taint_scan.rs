@@ -22,7 +22,7 @@
 use tree_sitter::Node;
 
 use super::csharp_summary::{CSharpFunctionInfo, prepare_csharp_file};
-use super::line_facts::RuleLines;
+use super::line_facts::{RuleLines, SourceLines};
 use super::prepared::PreparedFile;
 use super::transfer::{Finding, RuleSpecs};
 
@@ -34,9 +34,13 @@ pub fn run_taint_rule_csharp<'tree>(
     root: Node<'tree>,
     source: &'tree [u8],
     specs: &RuleSpecs,
-    source_lines: Option<&[String]>,
+    source_lines: Option<&SourceLines>,
 ) -> Vec<Finding> {
-    run_taint_rule_csharp_prepared(&prepare_csharp_file(root, source), specs, source_lines)
+    run_taint_rule_csharp_prepared(
+        &prepare_csharp_file(root, source),
+        specs,
+        source_lines.map(|lines| RuleLines::new(lines, specs)),
+    )
 }
 
 /// [`run_taint_rule_csharp`] on a file already prepared by
@@ -45,11 +49,8 @@ pub fn run_taint_rule_csharp<'tree>(
 pub fn run_taint_rule_csharp_prepared(
     file: &PreparedFile<CSharpFunctionInfo>,
     specs: &RuleSpecs,
-    source_lines: Option<&[String]>,
+    rule_lines: Option<RuleLines>,
 ) -> Vec<Finding> {
-    // One per-line cache of the hybrid layer for every analysis of this
-    // rule on this file (ticket #190).
-    let rule_lines = source_lines.map(|lines| RuleLines::new(lines, specs));
     let mut all_findings: Vec<Finding> = Vec::new();
 
     for prepared in file.functions.iter().filter_map(|f| f.body.as_ref()) {
@@ -102,12 +103,14 @@ mod tests {
             passthroughs: vec![],
             summaries: BTreeMap::new(),
             type_map: BTreeMap::new(),
+            summary_fallback: None,
+            exprs: None,
         }
     }
 
     fn run(src: &str, specs: &RuleSpecs) -> Vec<Finding> {
         let tree = parse(src);
-        let lines: Vec<String> = src.lines().map(str::to_string).collect();
+        let lines: SourceLines = src.lines().collect();
         run_taint_rule_csharp(tree.root_node(), src.as_bytes(), specs, Some(&lines))
     }
 
@@ -157,7 +160,7 @@ mod tests {
     fn test_expression_bodied_helper_return_reaches_sink() {
         let src = "class Api { string Input() => Request.GetParameter(\"q\"); void Handler(object db) { db.Execute(Input()); } }";
         let tree = parse(src);
-        let lines: Vec<String> = src.lines().map(str::to_string).collect();
+        let lines: SourceLines = src.lines().collect();
         let mut specs = sqli_specs();
         specs.summaries = crate::scan::dataflow::csharp_summary::compute_csharp_file_summaries(
             tree.root_node(),

@@ -8,6 +8,7 @@
 //! summaries are computed once by the call graph, as for Python.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use super::{
     TaintFindings, TaintLanguage, call_graph_inputs, file_summaries, source_lines_by_file,
@@ -16,14 +17,16 @@ use crate::scan::dataflow::call_graph::{NodeKey, ResolvedSummaries, SummaryReuse
 use crate::scan::dataflow::java_call_graph::JavaCallGraph;
 use crate::scan::dataflow::java_summary::{collect_java_field_types, collect_java_local_types};
 use crate::scan::dataflow::java_taint_scan::{run_taint_rule_java, run_taint_rule_java_prepared};
+use crate::scan::dataflow::line_facts::{LinesByFile, RuleLines};
 use crate::scan::dataflow::transfer::RuleSpecs;
+use crate::scan::dataflow::visibility::{FileSummaries, Visibility};
 use crate::scan::orchestrator::{ParsedFile, SourceLanguage};
 
 /// Java files of the scan, linked by their call graph, with the declared
 /// types of each file.
 pub(in crate::scan::orchestrator) struct JavaTaint<'a> {
     call_graph: JavaCallGraph<'a>,
-    source_lines: BTreeMap<String, Vec<String>>,
+    source_lines: LinesByFile,
     /// Variable or field name → declared class, per file. Recomputed here,
     /// independently of the call graph: it is the same table as the one
     /// `JavaCallGraph::build` merges and MUST stay in sync with it (see
@@ -42,9 +45,9 @@ impl<'a> TaintLanguage<'a> for JavaTaint<'a> {
         let type_maps = files
             .iter()
             .map(|pf| {
-                let root = pf.tree.root_node();
-                let mut type_map = collect_java_field_types(root, &pf.source_bytes);
-                type_map.extend(collect_java_local_types(root, &pf.source_bytes));
+                let root = pf.tree().root_node();
+                let mut type_map = collect_java_field_types(root, pf.bytes());
+                type_map.extend(collect_java_local_types(root, pf.bytes()));
                 (pf.rel_path.clone(), type_map)
             })
             .collect();
@@ -64,8 +67,8 @@ impl<'a> TaintLanguage<'a> for JavaTaint<'a> {
             .resolve_summaries_incremental(specs, Some(&self.source_lines), reuse)
     }
 
-    fn consumes_changed(&self, file: &str, changed: &BTreeSet<NodeKey>) -> bool {
-        self.call_graph.consumes_changed(file, changed)
+    fn readers(&self, changed: &BTreeSet<NodeKey>) -> BTreeSet<String> {
+        self.call_graph.readers(changed)
     }
 
     fn analyse_file(
@@ -75,6 +78,14 @@ impl<'a> TaintLanguage<'a> for JavaTaint<'a> {
         resolved: &ResolvedSummaries,
     ) -> TaintFindings {
         specs.summaries = file_summaries(resolved, &file.rel_path);
+        // What the file sees through its package and imports, looked up
+        // only when `summaries` has no entry (ticket #239).
+        let visibility: Arc<dyn Visibility> = self.call_graph.visibility().clone();
+        specs.summary_fallback = Some(Arc::new(FileSummaries::new(
+            visibility,
+            &file.rel_path,
+            resolved.all.clone(),
+        )));
         specs.type_map = self
             .type_maps
             .get(&file.rel_path)
@@ -85,14 +96,16 @@ impl<'a> TaintLanguage<'a> for JavaTaint<'a> {
         // pass is built from the files it analyzes); it would still be
         // analyzed, only prepared again for this rule.
         match self.call_graph.prepared_file(&file.rel_path) {
-            Some(prepared) => {
-                run_taint_rule_java_prepared(prepared, specs, Some(&file.source_lines_plain))
-            }
-            None => run_taint_rule_java(
-                file.tree.root_node(),
-                &file.source_bytes,
+            Some(prepared) => run_taint_rule_java_prepared(
+                prepared,
                 specs,
-                Some(&file.source_lines_plain),
+                Some(RuleLines::shared(&file.source, specs)),
+            ),
+            None => run_taint_rule_java(
+                file.tree().root_node(),
+                file.bytes(),
+                specs,
+                Some(&file.source),
             ),
         }
     }

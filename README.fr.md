@@ -61,7 +61,7 @@ flowchart TD
     P["Votre projet"] --> FILES["Choix des fichiers<br/>ignore les dépendances, les sorties de compilation,<br/>les fichiers minifiés"]
     FILES --> A["Règles textuelles :<br/>motifs dans le code"]
     FILES --> B["Règles de suivi des données :<br/>suivre les données extérieures<br/>jusqu'à un appel dangereux"]
-    FILES --> C["Dépendances :<br/>versions fixées comparées aux<br/>vulnérabilités publiées"]
+    FILES --> C["Dépendances :<br/>versions vérifiées comparées aux<br/>vulnérabilités publiées"]
     A --> R["Rapport HTML<br/>votre code, la correction,<br/>le chemin des données"]
     B --> R
     C --> R
@@ -92,7 +92,7 @@ Depuis le dossier `codefixture-audit-public` (sous Windows, `.\target\release\co
 | Un SBOM CycloneDX de vos dépendances | ajoutez `--sbom` (voir [Export SBOM](INSTALLATION.fr.md#export-sbom)) |
 | Mettre à jour le moteur | `git pull`, puis `cargo build --release` |
 
-Quand votre projet déclare des dépendances (`requirements.txt`, `package.json`, `pom.xml`, `composer.json`, `.csproj`…), leurs versions fixées sont comparées, hors ligne, aux vulnérabilités publiées que portent les règles. Une vulnérabilité que la CISA répertorie comme exploitée dans de vraies attaques (KEV) rend le constat critique, et chaque CVE affiche son score EPSS : la probabilité qu'elle soit exploitée dans les 30 prochains jours.
+Quand votre projet déclare des dépendances (`requirements.txt`, `package.json`, `pom.xml`, `composer.json`, `.csproj`…), leurs versions sont comparées, hors ligne, aux vulnérabilités publiées que portent les règles : la version qu'un fichier de verrouillage indique comme installée (`package-lock.json`, `poetry.lock`, `Pipfile.lock`, `composer.lock`…), sinon la version exacte, sinon la plus petite version qu'autorise un intervalle, que le constat indique. Les paquets qu'un fichier de verrouillage installe en plus des dépendances déclarées sont aussi vérifiés. Une vulnérabilité que la CISA répertorie comme exploitée dans de vraies attaques (KEV) rend le constat critique, et chaque CVE affiche son score EPSS : la probabilité qu'elle soit exploitée dans les 30 prochains jours.
 
 Les règles sont livrées compilées dans un seul fichier, `rules/rules.cfpack`. La compilation le copie à côté du moteur, et les deux peuvent être déplacés ensemble n'importe où.
 

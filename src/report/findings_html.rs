@@ -637,6 +637,12 @@ fn render_by_category(
     Some(html)
 }
 
+/// The HTML id of the "Dependencies" sub-group of the `severity`
+/// section: `deps-HIGH` for `HIGH`.
+pub fn dependencies_group_id(severity: &str) -> String {
+    format!("deps-{severity}")
+}
+
 /// Generates the full HTML for a severity section (business + deps,
 /// each grouped by category then by rule) — port of the body of the
 /// `for severity in [...]` loop in `_generate_html`.
@@ -683,6 +689,7 @@ pub fn render_severity_section(
                     )
                 });
         let business_group = group_tpl
+            .replace("{{group_id}}", "")
             .replace("{{icon}}", "📦")
             .replace("{{title}}", &t(report_locale, "stats.business_code"))
             .replace("{{count}}", &business_findings.len().to_string())
@@ -695,7 +702,13 @@ pub fn render_severity_section(
                     t(report_locale, "no_issues_deps")
                 )
             });
+        // The "Dependencies" stat card of the summary leads here
+        // (ticket #222, `dependencies_group_id`).
         let deps_group = group_tpl
+            .replace(
+                "{{group_id}}",
+                &format!(r#" id="{}""#, dependencies_group_id(severity)),
+            )
             .replace("{{icon}}", "🔗")
             .replace("{{title}}", &t(report_locale, "stats.dependencies"))
             .replace("{{count}}", &deps_findings.len().to_string())
@@ -1195,6 +1208,14 @@ mod tests {
         let html = render_severity_section("HIGH", &refs, &en, &catalog);
         assert!(html.contains(&t(&en, "stats.business_code")));
         assert!(html.contains(&t(&en, "stats.dependencies")));
+        // Ticket #222: only the dependency sub-group carries an id, the
+        // target of the summary's "Dependencies" card.
+        assert_eq!(
+            html.matches(r#"<div class="sub-group" id="deps-HIGH">"#)
+                .count(),
+            1
+        );
+        assert_eq!(html.matches(r#"<div class="sub-group">"#).count(), 1);
     }
 
     #[test]

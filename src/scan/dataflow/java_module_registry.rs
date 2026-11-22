@@ -198,6 +198,13 @@ pub fn build_fqcn_index(
 /// excluded. Static imports are NOT handled here (see
 /// [`build_static_import_bindings`] — different semantics: they
 /// expose a bare member, not a class).
+///
+/// Test only since ticket #239: the scan no longer builds this map for
+/// every file (it held the whole package, for every file of it), it looks
+/// classes up through `java_visibility.rs::JavaVisibility`. Kept as the
+/// reference those lookups are checked against
+/// (`java_call_graph.rs::test_lookups_match_the_materialized_maps`).
+#[cfg(test)]
 pub fn resolve_visible_classes(
     filepath: &str,
     package: &str,

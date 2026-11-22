@@ -18,6 +18,9 @@
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
+/* Ticket #243: link targets land below the stuck table-of-contents bar
+   (height set by report.js, applyScrollMargins). */
+html { scroll-padding-top: var(--toc-offset, 0px); }
 body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: var(--gray-50); color: var(--gray-800); line-height: 1.6; }
 
 /* Table of Contents Block */

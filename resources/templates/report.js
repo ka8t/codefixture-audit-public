@@ -63,6 +63,15 @@ function scrollToSection(id) {
             sg.classList.add('open');
         });
     }
+    // A sub-group target (the "Dependencies" group of a severity, from the
+    // summary's card, ticket #222) opens itself and the category and rule
+    // groups it holds, so that its findings show without more clicks.
+    if (el.classList.contains('sub-group')) {
+        el.classList.add('open');
+        el.querySelectorAll('.category-group, .rule-group').forEach(function(g) {
+            g.classList.add('open');
+        });
+    }
     // Ouvrir tout <details> ancêtre fermé (ex : paramètres d'audit dans Technical Details)
     let details = el.closest('details');
     while (details) {
@@ -239,12 +248,22 @@ function initSidebarResize() {
 
 // ========== INITIALIZATION ==========
 
-function applyScrollMargins(stuck) {
+// Ticket #243: every link target lands below the table-of-contents bar,
+// which stays fixed at the top once the page is scrolled. The offset goes
+// to the page's `scroll-padding-top` (`--toc-offset`, report.css), which
+// both the anchors and `scrollIntoView` follow, for every target. It is
+// the height of the closed bar plus its own offset from the top (the demo
+// banner), whether or not the bar is stuck yet: scrolling to a target
+// below it is what sticks it. It used to be set only while the bar was
+// stuck, and only on the `section-`/`level-` targets.
+function applyScrollMargins() {
     const toc = document.querySelector('.toc-block');
-    const h = (stuck && toc) ? toc.offsetHeight + 8 : 0;
-    document.querySelectorAll('[id^="section-"], [id^="level-"], #nav-header').forEach(el => {
-        el.style.scrollMarginTop = h + 'px';
-    });
+    const bar = toc ? (toc.querySelector('.toc-bar') || toc) : null;
+    let h = 0;
+    if (bar && bar.offsetHeight) {
+        h = (parseFloat(getComputedStyle(toc).top) || 0) + bar.offsetHeight + 8;
+    }
+    document.documentElement.style.setProperty('--toc-offset', h + 'px');
 }
 
 function toggleToc() {
@@ -253,7 +272,7 @@ function toggleToc() {
     const btn = toc.querySelector('.toc-toggle');
     const open = toc.classList.toggle('toc-open');
     if (btn) btn.setAttribute('aria-expanded', open ? 'true' : 'false');
-    setTimeout(() => applyScrollMargins(toc.classList.contains('is-stuck')), 260);
+    setTimeout(() => applyScrollMargins(), 260);
 }
 
 function closeToc() {
@@ -262,7 +281,7 @@ function closeToc() {
     toc.classList.remove('toc-open');
     const btn = toc.querySelector('.toc-toggle');
     if (btn) btn.setAttribute('aria-expanded', 'false');
-    setTimeout(() => applyScrollMargins(toc.classList.contains('is-stuck')), 260);
+    setTimeout(() => applyScrollMargins(), 260);
 }
 
 function initStickyToc() {
@@ -278,12 +297,12 @@ function initStickyToc() {
     const obs = new IntersectionObserver(([entry]) => {
         const stuck = entry.boundingClientRect.top < 0;
         toc.classList.toggle('is-stuck', stuck);
-        applyScrollMargins(stuck);
+        applyScrollMargins();
     }, { threshold: [0] });
     obs.observe(sentinel);
 
-    window.addEventListener('resize', () => applyScrollMargins(toc.classList.contains('is-stuck')), { passive: true });
-    applyScrollMargins(false);
+    window.addEventListener('resize', () => applyScrollMargins(), { passive: true });
+    applyScrollMargins();
 
     // Desktop (souris) : hover pour ouvrir/fermer
     const isTouch = window.matchMedia('(hover: none)').matches;
@@ -295,7 +314,7 @@ function initStickyToc() {
                 toc.classList.add('toc-open');
                 const btn = toc.querySelector('.toc-toggle');
                 if (btn) btn.setAttribute('aria-expanded', 'true');
-                setTimeout(() => applyScrollMargins(toc.classList.contains('is-stuck')), 260);
+                setTimeout(() => applyScrollMargins(), 260);
             }
         });
         toc.addEventListener('mouseleave', function() {

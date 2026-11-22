@@ -36,7 +36,7 @@
 //! (`anonymous_function`, classic block form) is still collected
 //! normally.
 
-use super::line_facts::RuleLines;
+use super::line_facts::{RuleLines, SourceLines};
 use super::prepared::{PreparedCfg, PreparedFile, PreparedFunction};
 use super::transfer::{FunctionSummary, RuleSpecs};
 use super::worklist::prepare_php_ir;
@@ -226,7 +226,7 @@ pub fn compute_php_file_summaries<'tree>(
     root: Node<'tree>,
     specs: &RuleSpecs,
     source: &'tree [u8],
-    source_lines: Option<&[String]>,
+    source_lines: Option<&SourceLines>,
 ) -> std::collections::BTreeMap<String, FunctionSummary> {
     // One per-line cache of the hybrid layer for every summary of this
     // rule on this file (ticket #190).
@@ -342,6 +342,8 @@ mod tests {
             passthroughs: vec![],
             summaries: Default::default(),
             type_map: Default::default(),
+            summary_fallback: None,
+            exprs: None,
         };
         let summary = compute_php_summary(&functions[0], &specs, src.as_bytes(), None);
         assert_eq!(summary.name, "safe");

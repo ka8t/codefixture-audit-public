@@ -38,14 +38,14 @@ use crate::report::compliance_html::{
 use crate::report::data::{ReportData, compute_report_data};
 use crate::report::export_json::HistoryPoint;
 use crate::report::exports::sarif::ReportFinding;
-use crate::report::findings_html::render_severity_section;
+use crate::report::findings_html::{dependencies_group_id, render_severity_section};
 use crate::report::report_assets::{
     asset_data_uri, load_asset, load_template, load_vendor_chart_js,
 };
 use crate::report::summary_html::{
     build_exec_recommendations, build_exec_trend, build_threat_context, render_heatmap,
 };
-use crate::report::text::{escape, lang_label};
+use crate::report::text::{escape, is_dependency, lang_label};
 use crate::rules::identity::RuleCatalog;
 
 /// Inputs that can't be derived from the findings — project/tool
@@ -558,6 +558,31 @@ fn keep_block(html: &str, prefix: &str) -> String {
         .replace(&format!("{{{{{prefix}_SECTION_END}}}}"), "")
 }
 
+/// The end of the opening tag of the summary's "Dependencies" stat card
+/// (ticket #222): ` clickable" onclick="…"` leading to the "Dependencies"
+/// sub-group of the most severe section that has one, or just `"` when
+/// no finding sits in a dependency file, the card then not clickable.
+///
+/// Deliberate deviation from `Audit/sca/report.py`, whose card leads to
+/// `section-dependencies`: that section is not rendered here (decision
+/// of 2026-08-25, module doc), so the click did nothing visible.
+fn dependencies_card_link(data: &ReportData) -> String {
+    let target = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]
+        .into_iter()
+        .find(|sev| {
+            data.by_severity
+                .get(sev)
+                .is_some_and(|findings| findings.iter().any(|f| is_dependency(&f.file)))
+        });
+    match target {
+        Some(sev) => format!(
+            r#" clickable" onclick="scrollToSection('{}')""#,
+            dependencies_group_id(sev)
+        ),
+        None => "\"".to_string(),
+    }
+}
+
 /// Generates the full HTML report — port of `_generate_html`.
 /// `comparison`: result of `comparison::compare_with_baseline`
 /// against the last scan, `None` if this is the first audit (no
@@ -901,6 +926,7 @@ pub fn generate_html(
     html = html.replace("{{total_successes}}", &total_successes.to_string());
     html = html.replace("{{total_business}}", &data.total_business.to_string());
     html = html.replace("{{total_deps}}", &data.total_deps.to_string());
+    html = html.replace("{{deps_card_link}}", &dependencies_card_link(&data));
     // Tests/fixtures: never active until testing.py is ported.
     html = html.replace("{{tests_color}}", "");
     html = html.replace("{{tests_rate}}", "0");
@@ -1095,6 +1121,36 @@ mod tests {
             rule_source: "json_builtin".to_string(),
             file_scope: None,
         }
+    }
+
+    /// Ticket #222: the "Dependencies" card leads to the dependency
+    /// sub-group of the most severe section that has one, and is not
+    /// clickable when no finding sits in a dependency file.
+    #[test]
+    fn test_dependencies_card_link_targets_most_severe_group() {
+        let findings = vec![
+            finding("SECURITY", "CRITICAL", "r1", "Rule", "src/app.py"),
+            finding("SECURITY", "MEDIUM", "r1", "Rule", "requirements.txt"),
+            finding("SECURITY", "LOW", "r1", "Rule", "app/vendor/lib.js"),
+        ];
+        let data = compute_report_data(&findings, 100);
+        assert_eq!(
+            dependencies_card_link(&data),
+            r#" clickable" onclick="scrollToSection('deps-MEDIUM')""#
+        );
+        let business_only = vec![finding("SECURITY", "HIGH", "r1", "Rule", "src/app.py")];
+        assert_eq!(
+            dependencies_card_link(&compute_report_data(&business_only, 100)),
+            "\""
+        );
+
+        let catalog = BTreeMap::new();
+        let html = generate_html(&findings, &ctx(&catalog), None, None, None);
+        assert!(html.contains(
+            r#"<div class="stat-card clickable" onclick="scrollToSection('deps-MEDIUM')"><div class="stat-value deps">"#
+        ));
+        assert!(html.contains(r#"<div class="sub-group" id="deps-MEDIUM">"#));
+        assert!(!html.contains("{{deps_card_link}}") && !html.contains("{{group_id}}"));
     }
 
     #[test]

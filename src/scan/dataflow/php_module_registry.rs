@@ -189,19 +189,22 @@ fn navigate_relative(importer: &str, specifier: &str) -> Option<String> {
 /// appended if missing (the extension is almost always written
 /// explicitly in PHP, unlike JS — no implicit `index.php`
 /// resolution, no equivalent convention exists on the PHP side).
+///
+/// `known_files` is built once per scan by the caller (ticket #239): this
+/// function used to build its own set from a list at every call, a time
+/// growing with the number of imports times the number of files.
 pub fn resolve_required_file(
     importer: &str,
     specifier: &str,
-    known_files: &[String],
+    known_files: &HashSet<String>,
 ) -> Option<String> {
     let base = navigate_relative(importer, specifier)?;
-    let known: HashSet<&str> = known_files.iter().map(|s| s.as_str()).collect();
-    if known.contains(base.as_str()) {
+    if known_files.contains(base.as_str()) {
         return Some(base);
     }
     if !base.ends_with(".php") {
         let candidate = format!("{base}.php");
-        if known.contains(candidate.as_str()) {
+        if known_files.contains(candidate.as_str()) {
             return Some(candidate);
         }
     }
@@ -274,7 +277,7 @@ mod tests {
 
     #[test]
     fn test_resolve_required_file_exact_path() {
-        let known = vec!["a.php".to_string(), "utils.php".to_string()];
+        let known = HashSet::from(["a.php".to_string(), "utils.php".to_string()]);
         assert_eq!(
             resolve_required_file("a.php", "./utils.php", &known),
             Some("utils.php".to_string())
@@ -283,7 +286,7 @@ mod tests {
 
     #[test]
     fn test_resolve_required_file_without_dot_slash_prefix() {
-        let known = vec!["a.php".to_string(), "utils.php".to_string()];
+        let known = HashSet::from(["a.php".to_string(), "utils.php".to_string()]);
         assert_eq!(
             resolve_required_file("a.php", "utils.php", &known),
             Some("utils.php".to_string())
@@ -292,7 +295,7 @@ mod tests {
 
     #[test]
     fn test_resolve_required_file_missing_extension_appended() {
-        let known = vec!["a.php".to_string(), "utils.php".to_string()];
+        let known = HashSet::from(["a.php".to_string(), "utils.php".to_string()]);
         assert_eq!(
             resolve_required_file("a.php", "./utils", &known),
             Some("utils.php".to_string())
@@ -301,7 +304,7 @@ mod tests {
 
     #[test]
     fn test_resolve_required_file_subdirectory() {
-        let known = vec!["src/a.php".to_string(), "src/lib/utils.php".to_string()];
+        let known = HashSet::from(["src/a.php".to_string(), "src/lib/utils.php".to_string()]);
         assert_eq!(
             resolve_required_file("src/a.php", "./lib/utils.php", &known),
             Some("src/lib/utils.php".to_string())
@@ -310,7 +313,7 @@ mod tests {
 
     #[test]
     fn test_resolve_required_file_absolute_filesystem_path_not_resolved() {
-        let known = vec!["a.php".to_string()];
+        let known = HashSet::from(["a.php".to_string()]);
         assert_eq!(
             resolve_required_file("a.php", "/etc/config.php", &known),
             None
@@ -319,7 +322,7 @@ mod tests {
 
     #[test]
     fn test_resolve_required_file_unresolved_when_missing() {
-        let known = vec!["a.php".to_string()];
+        let known = HashSet::from(["a.php".to_string()]);
         assert_eq!(
             resolve_required_file("a.php", "./missing.php", &known),
             None

@@ -227,7 +227,7 @@ cd ~\codefixture-audit-public
 For a report in French, Spanish or German, replace `--lang en` with `--lang fr`, `--lang es` or `--lang de`.
 
 - `--lang` sets the language of the report: `en`, `fr`, `es` or `de`.
-- When your project declares dependencies (`requirements.txt`, `package.json`, `pom.xml`, `composer.json`…), their pinned versions are compared with the published vulnerabilities the rule pack carries, offline; the output names the pack, the date of its data and its counts. A range such as `>=2.0` names no installed version and is not compared. In the finding, each vulnerability gives its severity, then `exploited in attacks, CISA KEV since <date>` when CISA's catalog of Known Exploited Vulnerabilities lists it, and `EPSS <n>%`, FIRST's probability that it gets exploited in the next 30 days. An exploited vulnerability makes the finding critical, whatever its severity; the EPSS score changes nothing. The databases of this data and their licenses are listed in the report's scope table and in the [README](README.md#vulnerability-data).
+- When your project declares dependencies (`requirements.txt`, `package.json`, `pom.xml`, `composer.json`…), their versions are compared with the published vulnerabilities the rule pack carries, offline; the output names the pack, the date of its data and its counts. The version compared is the one the lockfile next to the manifest gives (`package-lock.json`, `poetry.lock`, `composer.lock`…), else the exact version the manifest pins, else the lowest version a range allows (`>=2.0` gives 2.0), which the finding states with the range. A constraint without a lower bound, such as `<2.0`, is reported as unpinned. Maven, Gradle and NuGet dependencies are compared only when their version is exact. The packages a lockfile installs besides the declared ones are compared too. In the finding, each vulnerability gives its severity, then `exploited in attacks, CISA KEV since <date>` when CISA's catalog of Known Exploited Vulnerabilities lists it, and `EPSS <n>%`, FIRST's probability that it gets exploited in the next 30 days. An exploited vulnerability makes the finding critical, whatever its severity; the EPSS score changes nothing. The databases of this data and their licenses are listed in the report's scope table and in the [README](README.md#vulnerability-data).
 - `--sbom` also writes the list of your declared dependencies as a CycloneDX file: see [SBOM export](#sbom-export).
 
 The terminal shows the progress, what was loaded and a summary. Here, the analysis of OWASP Juice Shop with this repository's demonstration rules:
@@ -374,9 +374,10 @@ An SBOM (software bill of materials) lists the third-party packages a project us
 
 Besides the report, the engine writes `SCA-SBOM-<date>.json` into `audit-reports/audit-datas/` of your project and prints its path on the `SBOM :` line. The file follows CycloneDX 1.6, the OWASP format:
 
-- one component per dependency declared in `requirements.txt`, `package.json`, `pom.xml`, `build.gradle`, `.csproj` or `composer.json`, with its package URL (`pkg:pypi/requests@2.31.0`);
-- a version only when the manifest pins it exactly: a dependency declared with a range (`flask>=2.0`, `"lodash": "^4.17.0"`) or without a version is listed without one, since the installed version is not known;
-- no vulnerabilities, hashes or licenses: the vulnerabilities of pinned versions are in the HTML report.
+- one component per dependency declared in `requirements.txt`, `pyproject.toml`, `Pipfile`, `package.json`, `pom.xml`, `build.gradle`, `.csproj` or `composer.json`, with its package URL (`pkg:pypi/requests@2.31.0`);
+- one component per package a lockfile installs besides the declared ones (a transitive dependency), with its version;
+- a version only when the installed one is known: the version the lockfile gives, else the one the manifest pins exactly. A dependency declared with a range (`flask>=2.0`, `"lodash": "^4.17.0"`) and absent from any lockfile, or without a version, is listed without one;
+- no vulnerabilities, hashes or licenses: the vulnerabilities are in the HTML report.
 
 The file prefix `SCA` follows `brand.json` when you customise it.
 

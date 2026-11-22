@@ -38,7 +38,7 @@
 use tree_sitter::Node;
 
 use super::lattice::empty_state;
-use super::line_facts::RuleLines;
+use super::line_facts::{RuleLines, SourceLines};
 use super::php_summary::{PhpFunctionInfo, prepare_php_file};
 use super::prepared::PreparedFile;
 use super::transfer::{Finding, RuleSpecs};
@@ -64,9 +64,14 @@ pub fn run_taint_rule_php<'tree>(
     root: Node<'tree>,
     source: &'tree [u8],
     specs: &RuleSpecs,
-    source_lines: Option<&[String]>,
+    source_lines: Option<&SourceLines>,
 ) -> Vec<Finding> {
-    run_taint_rule_php_prepared(&prepare_php_file(root, source), source, specs, source_lines)
+    run_taint_rule_php_prepared(
+        &prepare_php_file(root, source),
+        source,
+        specs,
+        source_lines.map(|lines| RuleLines::new(lines, specs)),
+    )
 }
 
 /// [`run_taint_rule_php`] on a file already prepared by
@@ -76,11 +81,8 @@ pub fn run_taint_rule_php_prepared(
     file: &PreparedFile<PhpFunctionInfo>,
     source: &[u8],
     specs: &RuleSpecs,
-    source_lines: Option<&[String]>,
+    rule_lines: Option<RuleLines>,
 ) -> Vec<Finding> {
-    // One per-line cache of the hybrid layer for every analysis of this
-    // rule on this file (ticket #190).
-    let rule_lines = source_lines.map(|lines| RuleLines::new(lines, specs));
     let mut all_findings: Vec<Finding> = Vec::new();
 
     let bodies = file
@@ -95,7 +97,12 @@ pub fn run_taint_rule_php_prepared(
     let mut seen: std::collections::HashSet<(String, usize, Option<usize>)> =
         std::collections::HashSet::new();
     all_findings.retain(|f| seen.insert((f.rule_id.clone(), f.line, f.source_line)));
-    drop_sinks_on_sanitizer_lines(all_findings, specs, source, source_lines)
+    drop_sinks_on_sanitizer_lines(
+        all_findings,
+        specs,
+        source,
+        rule_lines.as_ref().map(RuleLines::lines),
+    )
 }
 
 /// Drops a finding whose sink line matches one of the rule's sanitizers.
@@ -114,19 +121,16 @@ fn drop_sinks_on_sanitizer_lines(
     findings: Vec<Finding>,
     specs: &RuleSpecs,
     source: &[u8],
-    source_lines: Option<&[String]>,
+    source_lines: Option<&SourceLines>,
 ) -> Vec<Finding> {
     if specs.sanitizers.iter().all(|s| s.raw_regex.is_none()) {
         return findings;
     }
-    let owned: Vec<String>;
-    let lines: &[String] = match source_lines {
+    let owned: SourceLines;
+    let lines: &SourceLines = match source_lines {
         Some(lines) => lines,
         None => {
-            owned = String::from_utf8_lossy(source)
-                .lines()
-                .map(String::from)
-                .collect();
+            owned = String::from_utf8_lossy(source).lines().collect();
             &owned
         }
     };
@@ -199,12 +203,14 @@ mod tests {
             passthroughs: vec![],
             summaries: BTreeMap::new(),
             type_map: BTreeMap::new(),
+            summary_fallback: None,
+            exprs: None,
         }
     }
 
     fn run(src: &str, specs: &RuleSpecs) -> Vec<Finding> {
         let tree = parse(src);
-        let lines: Vec<String> = src.lines().map(str::to_string).collect();
+        let lines: SourceLines = src.lines().collect();
         run_taint_rule_php(tree.root_node(), src.as_bytes(), specs, Some(&lines))
     }
 
@@ -319,6 +325,8 @@ function handler($db) { $q = "SELECT * FROM t WHERE id={$_GET['q']}"; $db->query
             passthroughs: vec![],
             summaries: BTreeMap::new(),
             type_map: BTreeMap::new(),
+            summary_fallback: None,
+            exprs: None,
         }
     }
 

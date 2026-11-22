@@ -197,6 +197,17 @@ pub fn npm(dir: &Path) -> Lock {
     Lock::Absent
 }
 
+/// The lockfile of a `Pipfile` in `dir` (ticket #213): `Pipfile.lock`,
+/// which Pipenv writes for it, whatever other Python lockfile sits in the
+/// same folder. `python` would take a `poetry.lock` first: that file
+/// belongs to the `pyproject.toml`, not to the `Pipfile`.
+pub fn pipfile(dir: &Path) -> Lock {
+    if dir.join("Pipfile.lock").is_file() {
+        return read(dir, "Pipfile.lock", read_pipfile_lock);
+    }
+    Lock::Absent
+}
+
 /// `composer.lock` in `dir`.
 pub fn composer(dir: &Path) -> Lock {
     if dir.join("composer.lock").is_file() {
@@ -963,8 +974,14 @@ fn read_toml_packages(text: &str) -> Result<LockFile, String> {
     Ok(lock)
 }
 
-/// `Pipfile.lock`: `default` and `develop`, each package with its
-/// `==version`. The format says nothing of which package needs which.
+/// `Pipfile.lock`: one object per package category, each package with
+/// its `==version`. The format says nothing of which package needs which.
+///
+/// The categories are `default` (the `Pipfile`'s `[packages]`), `develop`
+/// (`[dev-packages]`) and, since Pipenv 2022.10, one more per custom
+/// category of the `Pipfile` (`[docs]` → `docs`). Every top-level object
+/// but `_meta` is therefore a category (ticket #213): reading only the
+/// first two left a custom category's packages without their version.
 fn read_pipfile_lock(text: &str) -> Result<LockFile, String> {
     let json: Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
     let lines = json_key_lines(text);
@@ -973,11 +990,21 @@ fn read_pipfile_lock(text: &str) -> Result<LockFile, String> {
         key: NameKey::Pep503,
         ..LockFile::default()
     };
+    let Value::Object(root) = &json else {
+        return Err("not a JSON object".to_string());
+    };
+    // `default` first, then `develop`, then the custom categories by
+    // name: a package listed in several keeps the entry read last, as
+    // `develop` overrode `default` before.
+    let mut categories: Vec<(&String, &Value)> =
+        root.iter().filter(|(name, _)| *name != "_meta").collect();
+    categories.sort_by_key(|(name, _)| (*name != "default", *name != "develop", *name));
     let mut sections = 0;
-    for section in ["default", "develop"] {
-        let Some(Value::Object(packages)) = json.get(section) else {
+    for (section, value) in categories {
+        let Value::Object(packages) = value else {
             continue;
         };
+        let section = section.as_str();
         sections += 1;
         for (name, entry) in packages {
             let Some(version) = entry.get("version").and_then(Value::as_str) else {
@@ -997,7 +1024,7 @@ fn read_pipfile_lock(text: &str) -> Result<LockFile, String> {
         }
     }
     if sections == 0 {
-        return Err("neither `default` nor `develop`".to_string());
+        return Err("no package category (`default`, `develop`, …)".to_string());
     }
     Ok(lock)
 }

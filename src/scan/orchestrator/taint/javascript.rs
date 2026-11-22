@@ -9,7 +9,8 @@
 //! graph (intra-file lexical fallback only, see `js_call_graph.rs`); the
 //! pass is designed by analogy with Python and Java.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
+use std::sync::Arc;
 
 use super::{
     TaintFindings, TaintLanguage, call_graph_inputs, file_summaries, source_lines_by_file,
@@ -17,13 +18,15 @@ use super::{
 use crate::scan::dataflow::call_graph::{NodeKey, ResolvedSummaries, SummaryReuse};
 use crate::scan::dataflow::js_call_graph::JsCallGraph;
 use crate::scan::dataflow::js_taint_scan::{run_taint_rule_js, run_taint_rule_js_prepared};
+use crate::scan::dataflow::line_facts::{LinesByFile, RuleLines};
 use crate::scan::dataflow::transfer::RuleSpecs;
+use crate::scan::dataflow::visibility::{FileSummaries, Visibility};
 use crate::scan::orchestrator::{ParsedFile, SourceLanguage};
 
 /// JavaScript and TypeScript files of the scan, linked by their call graph.
 pub(in crate::scan::orchestrator) struct JsTaint<'a> {
     call_graph: JsCallGraph<'a>,
-    source_lines: BTreeMap<String, Vec<String>>,
+    source_lines: LinesByFile,
 }
 
 impl<'a> TaintLanguage<'a> for JsTaint<'a> {
@@ -50,8 +53,8 @@ impl<'a> TaintLanguage<'a> for JsTaint<'a> {
             .resolve_summaries_incremental(specs, Some(&self.source_lines), reuse)
     }
 
-    fn consumes_changed(&self, file: &str, changed: &BTreeSet<NodeKey>) -> bool {
-        self.call_graph.consumes_changed(file, changed)
+    fn readers(&self, changed: &BTreeSet<NodeKey>) -> BTreeSet<String> {
+        self.call_graph.readers(changed)
     }
 
     fn analyse_file(
@@ -61,19 +64,29 @@ impl<'a> TaintLanguage<'a> for JsTaint<'a> {
         resolved: &ResolvedSummaries,
     ) -> TaintFindings {
         specs.summaries = file_summaries(resolved, &file.rel_path);
+        // What the file imports, looked up only when `summaries` has no
+        // entry (ticket #239).
+        let visibility: Arc<dyn Visibility> = self.call_graph.visibility().clone();
+        specs.summary_fallback = Some(Arc::new(FileSummaries::new(
+            visibility,
+            &file.rel_path,
+            resolved.all.clone(),
+        )));
         // The graph prepared every file of the pass once for all its
         // rules (ticket #192). A file it does not know cannot happen (the
         // pass is built from the files it analyzes); it would still be
         // analyzed, only prepared again for this rule.
         match self.call_graph.prepared_file(&file.rel_path) {
-            Some(prepared) => {
-                run_taint_rule_js_prepared(prepared, specs, Some(&file.source_lines_plain))
-            }
-            None => run_taint_rule_js(
-                file.tree.root_node(),
-                &file.source_bytes,
+            Some(prepared) => run_taint_rule_js_prepared(
+                prepared,
                 specs,
-                Some(&file.source_lines_plain),
+                Some(RuleLines::shared(&file.source, specs)),
+            ),
+            None => run_taint_rule_js(
+                file.tree().root_node(),
+                file.bytes(),
+                specs,
+                Some(&file.source),
             ),
         }
     }

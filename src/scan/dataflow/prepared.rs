@@ -168,6 +168,8 @@ mod tests {
             passthroughs: vec![],
             summaries: Default::default(),
             type_map: Default::default(),
+            summary_fallback: None,
+            exprs: None,
         };
         for _ in 0..3 {
             assert_eq!(prepared.analyze(&specs, None, None).findings.len(), 1);

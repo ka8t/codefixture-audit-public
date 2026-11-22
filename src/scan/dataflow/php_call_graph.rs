@@ -37,7 +37,7 @@
 //!     `PhpFunctionInfo` does not keep this class-method association)
 //!     — out of scope for this effort, documented rather than guessed.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
 
 use rayon::prelude::*;
@@ -45,13 +45,14 @@ use rayon::prelude::*;
 use tree_sitter::Node;
 
 pub use super::call_graph::{FileInput, MAX_SCC_FIXPOINT_ITER, NodeKey, SummariesByFile};
-use super::line_facts::{RuleLinesByFile, rule_lines_by_file};
+use super::line_facts::{LinesByFile, RuleLinesByFile, rule_lines_by_file};
 use super::php_module_registry::{
     build_class_name_index, collect_php_class_names, collect_php_requires, resolve_required_file,
 };
 use super::php_summary::{PhpFunctionInfo, compute_php_summary_with, prepare_php_file};
 use super::prepared::{PreparedFile, PreparedFiles};
 use super::transfer::{FunctionSummary, RuleSpecs};
+use super::visibility::{ImportVisibility, Visibility, graph_fingerprint};
 
 fn text(node: Node, source: &[u8]) -> String {
     node.utf8_text(source).unwrap_or("").to_string()
@@ -134,7 +135,7 @@ fn outgoing_edges(
     source: &[u8],
     filepath: &str,
     local_names: &BTreeSet<String>,
-    import_bindings: &BTreeMap<String, NodeKey>,
+    visibility: &dyn Visibility,
 ) -> BTreeMap<String, NodeKey> {
     let mut edges = BTreeMap::new();
     let mut calls = Vec::new();
@@ -160,8 +161,8 @@ fn outgoing_edges(
         }
         if local_names.contains(&local_name) {
             edges.insert(local_name.clone(), (filepath.to_string(), local_name));
-        } else if let Some(target) = import_bindings.get(&local_name) {
-            edges.insert(local_name.clone(), target.clone());
+        } else if let Some(target) = visibility.binding(filepath, &local_name) {
+            edges.insert(local_name.clone(), target);
         }
     }
     edges
@@ -173,10 +174,15 @@ fn outgoing_edges(
 /// function of the required file becomes callable **without a
 /// prefix**. On collision (two required files each defining a
 /// function with the same name) → neither is kept (anti-FP).
+///
+/// Test only since ticket #239: the graph no longer builds this map for
+/// every file (see [`resolve_require_targets`]); kept as the oracle its
+/// lookups are checked against.
+#[cfg(test)]
 fn resolve_require_bindings(
     filepath: &str,
     required_specifiers: &[String],
-    known_files: &[String],
+    known_files: &HashSet<String>,
     file_function_names: &BTreeMap<String, BTreeSet<String>>,
 ) -> BTreeMap<String, NodeKey> {
     let mut seen: BTreeMap<String, NodeKey> = BTreeMap::new();
@@ -207,6 +213,24 @@ fn resolve_require_bindings(
         .collect()
 }
 
+/// The files a file's literal `require`/`include` designate, in source
+/// order, the file itself excepted (ticket #239): kept as star imports of
+/// an [`ImportVisibility`] instead of the former expansion into one binding
+/// per function of each required file ([`resolve_require_bindings`], now
+/// the test oracle). A function name defined by two of them is not bound
+/// (anti-FP, as before).
+fn resolve_require_targets(
+    filepath: &str,
+    required_specifiers: &[String],
+    known_files: &HashSet<String>,
+) -> Vec<String> {
+    required_specifiers
+        .iter()
+        .filter_map(|spec| resolve_required_file(filepath, spec, known_files))
+        .filter(|target| target != filepath)
+        .collect()
+}
+
 // ============================================================================
 // PhpCallGraph
 // ============================================================================
@@ -218,7 +242,11 @@ fn resolve_require_bindings(
 pub struct PhpCallGraph<'tree> {
     pub nodes: BTreeMap<NodeKey, PhpFunctionInfo<'tree>>,
     pub edges: BTreeMap<NodeKey, BTreeMap<String, NodeKey>>,
-    pub import_bindings: BTreeMap<String, BTreeMap<String, NodeKey>>,
+    /// The `require` targets of each file and the class index of the
+    /// project, looked up on demand (ticket #239), instead of the former
+    /// per-file map, which held every method of every class of the project
+    /// for every file.
+    visibility: Arc<ImportVisibility>,
     source_by_file: BTreeMap<String, &'tree [u8]>,
     /// Every file of the graph prepared once for all the rules of the
     /// scan (ticket #192): read for the summaries and handed to the
@@ -240,12 +268,12 @@ impl<'tree> PhpCallGraph<'tree> {
     /// files.
     ///
     /// Static-scope bindings (`Klass.method`, via the global
-    /// class-name index) are computed **once for the whole corpus**
-    /// (file-independent — no scope/namespace notion is tracked, see
-    /// module doc), then merged into `import_bindings` of EACH file,
-    /// alongside the `require` bindings specific to that file — no
-    /// key collision is possible (`require` keys are bare function
-    /// names, without a `.`, class keys always contain a `.`).
+    /// class-name index) are the same for every file (no scope/namespace
+    /// notion is tracked, see module doc): the [`ImportVisibility`] keeps
+    /// the index once and looks a key up in it before the `require`
+    /// bindings of the file, as the former per-file map, which merged the
+    /// class bindings of the whole project into every file after them
+    /// (ticket #239).
     pub fn build(files: &[FileInput<'tree>]) -> Self {
         let mut graph = PhpCallGraph::default();
         let mut file_function_names: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
@@ -288,24 +316,29 @@ impl<'tree> PhpCallGraph<'tree> {
         }
 
         let known_files: Vec<String> = file_function_names.keys().cloned().collect();
-        let class_index = build_class_name_index(&class_names_by_file);
-        let empty_set: BTreeSet<String> = BTreeSet::new();
-        let mut global_class_bindings: BTreeMap<String, NodeKey> = BTreeMap::new();
-        for (cname, target) in &class_index {
-            let Some(target_fp) = target else { continue };
-            for method in file_function_names.get(target_fp).unwrap_or(&empty_set) {
-                global_class_bindings.insert(
-                    format!("{cname}.{method}"),
-                    (target_fp.clone(), method.clone()),
-                );
-            }
-        }
+        // Built once (ticket #239): the resolution used to build it again
+        // for every `require`.
+        let known_set: HashSet<String> = known_files.iter().cloned().collect();
+        let star_targets = known_files
+            .iter()
+            .map(|filepath| {
+                let requires = requires_by_file.get(filepath).cloned().unwrap_or_default();
+                (
+                    filepath.clone(),
+                    resolve_require_targets(filepath, &requires, &known_set),
+                )
+            })
+            .collect();
+        graph.visibility = Arc::new(ImportVisibility::new(
+            BTreeMap::new(),
+            star_targets,
+            build_class_name_index(&class_names_by_file),
+            file_function_names.clone(),
+            false,
+            true,
+        ));
 
         for filepath in &known_files {
-            let requires = requires_by_file.get(filepath).cloned().unwrap_or_default();
-            let mut bindings =
-                resolve_require_bindings(filepath, &requires, &known_files, &file_function_names);
-            bindings.extend(global_class_bindings.clone());
             let local_names = file_function_names
                 .get(filepath)
                 .cloned()
@@ -325,11 +358,10 @@ impl<'tree> PhpCallGraph<'tree> {
                     source,
                     filepath,
                     &local_names,
-                    &bindings,
+                    graph.visibility.as_ref(),
                 );
                 graph.edges.insert(key, edges);
             }
-            graph.import_bindings.insert(filepath.clone(), bindings);
         }
         graph
     }
@@ -443,7 +475,7 @@ impl<'tree> PhpCallGraph<'tree> {
     pub fn resolve_summaries(
         &self,
         base_specs: &RuleSpecs,
-        source_lines_by_file: Option<&BTreeMap<String, Vec<String>>>,
+        source_lines_by_file: Option<&LinesByFile>,
     ) -> (SummariesByFile, SummariesByFile) {
         let resolved = self.resolve_summaries_incremental(base_specs, source_lines_by_file, None);
         (resolved.own, resolved.extra)
@@ -456,7 +488,7 @@ impl<'tree> PhpCallGraph<'tree> {
     pub fn resolve_summaries_incremental(
         &self,
         base_specs: &RuleSpecs,
-        source_lines_by_file: Option<&BTreeMap<String, Vec<String>>>,
+        source_lines_by_file: Option<&LinesByFile>,
         reuse: Option<&super::call_graph::SummaryReuse>,
     ) -> super::call_graph::ResolvedSummaries {
         let empty_lines = BTreeMap::new();
@@ -468,7 +500,6 @@ impl<'tree> PhpCallGraph<'tree> {
         super::call_graph::resolve_incremental(
             sccs,
             &self.edges,
-            &self.import_bindings,
             reuse,
             |node, resolved, current| {
                 let seed = self.build_seed(node, resolved, current);
@@ -477,23 +508,26 @@ impl<'tree> PhpCallGraph<'tree> {
         )
     }
 
-    /// True when `file` reads a summary that changed in this scan.
-    pub fn consumes_changed(
-        &self,
-        file: &str,
-        changed: &std::collections::BTreeSet<NodeKey>,
-    ) -> bool {
-        super::call_graph::consumes_changed_in(&self.import_bindings, file, changed)
+    /// What each file of the graph sees of the others, shared with the
+    /// taint analysis of each file (ticket #239).
+    pub fn visibility(&self) -> &Arc<ImportVisibility> {
+        &self.visibility
+    }
+
+    /// The files that read a summary that changed in this scan: those
+    /// defining a changed function, those requiring one, and every file
+    /// when a changed method is bound through the class index (as the
+    /// former per-file maps, which all held it). Computed once per rule
+    /// (ticket #239), see `call_graph::CallGraph::readers`.
+    pub fn readers(&self, changed: &BTreeSet<NodeKey>) -> BTreeSet<String> {
+        let mut readers = self.visibility.readers_of(changed);
+        readers.extend(changed.iter().map(|node| node.0.clone()));
+        readers
     }
 
     /// What, besides its own text, decides the analysis of `file`.
     pub fn dependency_fingerprint(&self, file: &str) -> String {
-        super::call_graph::dependency_fingerprint_in(
-            &self.edges,
-            self.nodes.keys(),
-            &self.import_bindings,
-            file,
-        )
+        graph_fingerprint(&self.edges, &self.nodes, self.visibility.as_ref(), file)
     }
 }
 
@@ -536,6 +570,8 @@ mod tests {
             passthroughs: vec![],
             summaries: BTreeMap::new(),
             type_map: BTreeMap::new(),
+            summary_fallback: None,
+            exprs: None,
         }
     }
 
@@ -759,5 +795,118 @@ mod tests {
         let (own, _extra) = graph.resolve_summaries(&specs, None);
         assert!(own["m.php"].contains_key("f"));
         assert!(own["m.php"].contains_key("g"));
+    }
+
+    /// Ticket #239: the `require` targets and the class index looked up on
+    /// demand answer every name as the former per-file map did (the
+    /// `require` bindings, then the class bindings of the whole project
+    /// over them; the oracle below rebuilds it as `build` did), and the
+    /// files to redo for a changed function are exactly those whose former
+    /// map held it.
+    #[test]
+    fn test_lookups_match_the_materialized_import_maps() {
+        let sources: &[(&str, &str)] = &[
+            (
+                "lib/a.php",
+                "<?php\nfunction fa() {}\nclass A { function m() {} }\nclass Solo { function run() {} }\n",
+            ),
+            (
+                "lib/b.php",
+                "<?php\nfunction shared() {}\nclass B { function m() {} }\n",
+            ),
+            (
+                "lib/c.php",
+                "<?php\nfunction shared() {}\nclass A { function n() {} }\n",
+            ),
+            (
+                "main.php",
+                "<?php\nrequire 'lib/a.php';\nrequire_once './lib/b.php';\ninclude 'lib/c.php';\nrequire 'main.php';\nfunction own() {}\n",
+            ),
+            ("other.php", "<?php\nrequire 'lib/b.php';\n"),
+        ];
+        let trees: Vec<_> = sources.iter().map(|(_, src)| parse(src)).collect();
+        let files: Vec<FileInput> = sources
+            .iter()
+            .zip(&trees)
+            .map(|((path, src), tree)| FileInput {
+                filepath: path.to_string(),
+                root: tree.root_node(),
+                source: src.as_bytes(),
+            })
+            .collect();
+        let graph = PhpCallGraph::build(&files);
+        let mut names: BTreeMap<String, BTreeSet<String>> = sources
+            .iter()
+            .map(|(path, _)| (path.to_string(), BTreeSet::new()))
+            .collect();
+        for (file, name) in graph.nodes.keys() {
+            names.entry(file.clone()).or_default().insert(name.clone());
+        }
+        let known: HashSet<String> = names.keys().cloned().collect();
+        let class_names_by_file: BTreeMap<String, Vec<String>> = sources
+            .iter()
+            .zip(&trees)
+            .map(|((path, src), tree)| {
+                (
+                    path.to_string(),
+                    collect_php_class_names(tree.root_node(), src.as_bytes()),
+                )
+            })
+            .collect();
+        let mut global: BTreeMap<String, NodeKey> = BTreeMap::new();
+        for (cname, target) in &build_class_name_index(&class_names_by_file) {
+            let Some(target) = target else { continue };
+            for method in &names[target] {
+                global.insert(
+                    format!("{cname}.{method}"),
+                    (target.clone(), method.clone()),
+                );
+            }
+        }
+        let all_names: BTreeSet<String> = names.values().flatten().cloned().collect();
+        let mut probes = all_names.clone();
+        for class in ["A", "B", "Solo", "Nope"] {
+            for name in &all_names {
+                probes.insert(format!("{class}.{name}"));
+            }
+        }
+        let visibility = graph.visibility();
+        let mut maps = BTreeMap::new();
+        for ((path, src), tree) in sources.iter().zip(&trees) {
+            let requires = collect_php_requires(tree.root_node(), src.as_bytes());
+            let mut former = resolve_require_bindings(path, &requires, &known, &names);
+            former.extend(global.clone());
+            for key in &probes {
+                assert_eq!(
+                    visibility.binding(path, key).as_ref(),
+                    former.get(key),
+                    "{key} from {path}"
+                );
+            }
+            maps.insert(path.to_string(), former);
+        }
+        for node in graph.nodes.keys() {
+            let expected: BTreeSet<String> = maps
+                .iter()
+                .filter(|(_, map)| map.values().any(|target| target == node))
+                .map(|(file, _)| file.clone())
+                .collect();
+            assert_eq!(
+                visibility.readers_of(&BTreeSet::from([node.clone()])),
+                expected,
+                "readers of {node:?}"
+            );
+        }
+        // The fixture does exercise each precedence rule.
+        let at = |file: &str, name: &str| Some((file.to_string(), name.to_string()));
+        assert_eq!(visibility.binding("main.php", "fa"), at("lib/a.php", "fa"));
+        assert_eq!(visibility.binding("main.php", "shared"), None);
+        assert_eq!(visibility.binding("main.php", "own"), None);
+        assert_eq!(visibility.binding("other.php", "B.m"), at("lib/b.php", "m"));
+        assert_eq!(visibility.binding("other.php", "A.m"), None);
+        assert_eq!(
+            visibility.binding("other.php", "Solo.run"),
+            at("lib/a.php", "run")
+        );
     }
 }

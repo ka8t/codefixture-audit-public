@@ -40,7 +40,7 @@ use std::sync::Arc;
 
 use tree_sitter::Node;
 
-use super::line_facts::RuleLines;
+use super::line_facts::{RuleLines, SourceLines};
 pub use super::transfer::FunctionSummary;
 use super::transfer::RuleSpecs;
 
@@ -514,7 +514,7 @@ pub fn compute_java_file_summaries<'tree>(
     root: Node<'tree>,
     specs: &RuleSpecs,
     source: &'tree [u8],
-    source_lines: Option<&[String]>,
+    source_lines: Option<&SourceLines>,
 ) -> BTreeMap<String, Arc<FunctionSummary>> {
     // One per-line cache of the hybrid layer for every summary of this
     // rule on this file (ticket #190).
@@ -723,6 +723,8 @@ mod tests {
             passthroughs: vec![],
             summaries: BTreeMap::new(),
             type_map: BTreeMap::new(),
+            summary_fallback: None,
+            exprs: None,
         }
     }
 
@@ -832,7 +834,7 @@ mod tests {
     fn test_return_tainted_uncond() {
         let src = "class Api { String getInput(HttpServletRequest req) { return req.getParameter(\"q\"); } }";
         let tree = parse(src);
-        let lines: Vec<String> = src.lines().map(str::to_string).collect();
+        let lines: SourceLines = src.lines().collect();
         let sums = compute_java_file_summaries(
             tree.root_node(),
             &sqli_specs(),
@@ -847,7 +849,7 @@ mod tests {
     fn test_sink_param_finding() {
         let src = "class Api { void runQuery(String query, Statement db) { db.execute(query); } }";
         let tree = parse(src);
-        let lines: Vec<String> = src.lines().map(str::to_string).collect();
+        let lines: SourceLines = src.lines().collect();
         let sums = compute_java_file_summaries(
             tree.root_node(),
             &sqli_specs(),
@@ -862,7 +864,7 @@ mod tests {
     fn test_clean_function_no_taint() {
         let src = "class Api { int add(int a, int b) { return a + b; } }";
         let tree = parse(src);
-        let lines: Vec<String> = src.lines().map(str::to_string).collect();
+        let lines: SourceLines = src.lines().collect();
         let sums = compute_java_file_summaries(
             tree.root_node(),
             &sqli_specs(),
@@ -877,7 +879,7 @@ mod tests {
     fn test_bare_name_alias_for_unambiguous_method() {
         let src = "class Api { void runQuery(String query, Statement db) { db.execute(query); } }";
         let tree = parse(src);
-        let lines: Vec<String> = src.lines().map(str::to_string).collect();
+        let lines: SourceLines = src.lines().collect();
         let sums = compute_java_file_summaries(
             tree.root_node(),
             &sqli_specs(),
@@ -896,7 +898,7 @@ mod tests {
     fn test_bare_name_alias_not_created_when_ambiguous() {
         let src = "class Foo { void run(String query, Statement db) { db.execute(query); } } class Bar { void run(String query, Statement db) { } }";
         let tree = parse(src);
-        let lines: Vec<String> = src.lines().map(str::to_string).collect();
+        let lines: SourceLines = src.lines().collect();
         let sums = compute_java_file_summaries(
             tree.root_node(),
             &sqli_specs(),
@@ -911,7 +913,7 @@ mod tests {
     fn test_bare_name_alias_excludes_constructors() {
         let src = "class Foo { Foo(String x) {} }";
         let tree = parse(src);
-        let lines: Vec<String> = src.lines().map(str::to_string).collect();
+        let lines: SourceLines = src.lines().collect();
         let sums = compute_java_file_summaries(
             tree.root_node(),
             &sqli_specs(),
@@ -927,7 +929,7 @@ mod tests {
     fn test_broken_method_does_not_abort_others() {
         let src = "class Api { int ok(int x) { return x; } void other(String s, Statement db) { db.execute(s); } }";
         let tree = parse(src);
-        let lines: Vec<String> = src.lines().map(str::to_string).collect();
+        let lines: SourceLines = src.lines().collect();
         let sums = compute_java_file_summaries(
             tree.root_node(),
             &sqli_specs(),

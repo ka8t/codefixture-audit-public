@@ -13,7 +13,7 @@
 use tree_sitter::Tree;
 
 use super::lattice::{SourceInfo, Taint, empty_state, state_set};
-use super::line_facts::RuleLines;
+use super::line_facts::{RuleLines, SourceLines};
 use super::prepared::PreparedFile;
 use super::summary::{FunctionInfo, prepare_python_file, route_source_params, rule_source_kinds};
 use super::transfer::{Finding, RuleSpecs};
@@ -30,13 +30,13 @@ pub fn run_taint_rule(
     tree: &Tree,
     source: &[u8],
     specs: &RuleSpecs,
-    source_lines: Option<&[String]>,
+    source_lines: Option<&SourceLines>,
 ) -> Vec<Finding> {
     run_taint_rule_prepared(
         &prepare_python_file(tree.root_node(), source),
         source,
         specs,
-        source_lines,
+        source_lines.map(|lines| RuleLines::new(lines, specs)),
     )
 }
 
@@ -48,12 +48,8 @@ pub fn run_taint_rule_prepared(
     file: &PreparedFile<FunctionInfo>,
     source: &[u8],
     specs: &RuleSpecs,
-    source_lines: Option<&[String]>,
+    rule_lines: Option<RuleLines>,
 ) -> Vec<Finding> {
-    // One per-line cache of the hybrid layer for every analysis of this
-    // rule on this file (ticket #190).
-    let rule_lines = source_lines.map(|lines| RuleLines::new(lines, specs));
-
     let mut all_findings: Vec<Finding> = match &file.module {
         Some(module) => module.analyze(specs, None, rule_lines.as_ref()).findings,
         None => Vec::new(),
@@ -89,7 +85,7 @@ pub fn run_taint_rule_prepared(
                         SourceInfo {
                             line: fn_info.lineno,
                             expr: format!("{}({pname})", fn_info.name).into(),
-                            kind: "http".to_string(),
+                            kind: "http".into(),
                         },
                     ),
                 );
@@ -137,6 +133,8 @@ mod tests {
             passthroughs: vec![],
             summaries: Default::default(),
             type_map: Default::default(),
+            summary_fallback: None,
+            exprs: None,
         }
     }
 

@@ -142,6 +142,30 @@ mod tests {
         assert_eq!(load_asset("charts.js"), load_template("charts.min.js"));
     }
 
+    /// Ticket #243: link targets land below the stuck table-of-contents
+    /// bar. The report embeds the hand-kept `.min` copies: both versions
+    /// of the stylesheet give the page its `scroll-padding-top`, and both
+    /// scripts set the bar height it reads, whatever the bar's state.
+    #[test]
+    fn test_link_targets_offset_by_the_toc_bar_in_both_versions() {
+        for css in ["report.css", "report.min.css"] {
+            let text = load_template(css).replace(' ', "");
+            assert!(
+                text.contains("html{scroll-padding-top:var(--toc-offset,0px)"),
+                "{css}"
+            );
+        }
+        for js in ["report.js", "report.min.js"] {
+            let text = load_template(js);
+            assert!(text.contains("setProperty('--toc-offset'"), "{js}");
+            assert!(
+                !text.contains("scrollMarginTop"),
+                "{js}: the former per-target margin"
+            );
+            assert!(!text.contains("applyScrollMargins(stuck)"), "{js}");
+        }
+    }
+
     #[test]
     #[should_panic(expected = "gabarit inconnu")]
     fn test_load_template_unknown_name_panics() {

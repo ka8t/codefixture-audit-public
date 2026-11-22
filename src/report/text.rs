@@ -114,10 +114,14 @@ pub fn escape(text: &str) -> String {
 /// (before, after) joined with `\n` — port of
 /// `sca/utils.py::get_context` (`context_size=2` by default: 2 lines
 /// before, 2 after). `lines` is 0-indexed (element `i` = line `i+1`).
-pub fn context_lines(lines: &[String], line: usize, context_size: usize) -> (String, String) {
+pub fn context_lines<'a>(
+    lines: impl IntoIterator<Item = &'a str>,
+    line: usize,
+    context_size: usize,
+) -> (String, String) {
     let mut before = Vec::new();
     let mut after = Vec::new();
-    for (idx, content) in lines.iter().enumerate() {
+    for (idx, content) in lines.into_iter().enumerate() {
         let ln = idx + 1;
         if line.saturating_sub(context_size) <= ln && ln < line {
             before.push(content.trim_end());
@@ -401,7 +405,7 @@ mod tests {
     #[test]
     fn test_context_lines_middle_of_file() {
         let lines: Vec<String> = (1..=10).map(|n| format!("line{n}")).collect();
-        let (before, after) = context_lines(&lines, 5, 2);
+        let (before, after) = context_lines(lines.iter().map(String::as_str), 5, 2);
         assert_eq!(before, "line3\nline4");
         assert_eq!(after, "line6\nline7");
     }
@@ -409,7 +413,7 @@ mod tests {
     #[test]
     fn test_context_lines_at_start_of_file() {
         let lines: Vec<String> = (1..=5).map(|n| format!("line{n}")).collect();
-        let (before, after) = context_lines(&lines, 1, 2);
+        let (before, after) = context_lines(lines.iter().map(String::as_str), 1, 2);
         assert_eq!(before, "");
         assert_eq!(after, "line2\nline3");
     }
@@ -417,15 +421,15 @@ mod tests {
     #[test]
     fn test_context_lines_at_end_of_file() {
         let lines: Vec<String> = (1..=5).map(|n| format!("line{n}")).collect();
-        let (before, after) = context_lines(&lines, 5, 2);
+        let (before, after) = context_lines(lines.iter().map(String::as_str), 5, 2);
         assert_eq!(before, "line3\nline4");
         assert_eq!(after, "");
     }
 
     #[test]
     fn test_context_lines_trims_trailing_whitespace() {
-        let lines = vec!["a  ".to_string(), "b\t".to_string(), "c".to_string()];
-        let (before, _) = context_lines(&lines, 3, 2);
+        let lines = ["a  ".to_string(), "b\t".to_string(), "c".to_string()];
+        let (before, _) = context_lines(lines.iter().map(String::as_str), 3, 2);
         assert_eq!(before, "a\nb");
     }
 

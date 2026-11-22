@@ -25,18 +25,27 @@ pub struct SourceInfo {
     pub line: usize,
     /// Textual representation of the source (for reports).
     pub expr: SharedText,
-    /// Nature of the taint (http, cli, env, etc.).
-    pub kind: String,
+    /// Nature of the taint (http, cli, env, etc.). Shared like the kinds
+    /// of [`Taint::Tainted`] (ticket #241).
+    pub kind: SharedText,
 }
 
+/// The kinds of a taint, shared: see [`Taint`].
+pub type Kinds = Arc<BTreeSet<SharedText>>;
+
 /// Lattice element: `⊥` (Clean) | `Tainted(kinds, source)` | `⊤` (Top).
+///
+/// The kinds are a shared set of [`SharedText`] rather than a
+/// `BTreeSet<String>` (ticket #241): the worklist copies the state of
+/// every CFG node, and with it every taint; copying the set of kinds and
+/// the source kind as owned strings was a sixth of the allocations of a
+/// Java scan, and still about a sixth with shared texts in an owned set.
+/// A kind is compared by its text and a set by its content, so the order
+/// of the kinds and every equality stay those of `BTreeSet<String>`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Taint {
     Clean,
-    Tainted {
-        kinds: BTreeSet<String>,
-        source: SourceInfo,
-    },
+    Tainted { kinds: Kinds, source: SourceInfo },
     Top,
 }
 
@@ -44,13 +53,19 @@ impl Taint {
     /// Builds a taint — panics if `kinds` is empty (a
     /// `Tainted` without a kind makes no sense; use `Taint::Clean`).
     /// Mirrors `Tainted.__post_init__` (Python raises `ValueError`).
-    pub fn tainted(kinds: impl IntoIterator<Item = String>, source: SourceInfo) -> Self {
-        let kinds: BTreeSet<String> = kinds.into_iter().collect();
+    pub fn tainted<K: Into<SharedText>>(
+        kinds: impl IntoIterator<Item = K>,
+        source: SourceInfo,
+    ) -> Self {
+        let kinds: BTreeSet<SharedText> = kinds.into_iter().map(Into::into).collect();
         assert!(
             !kinds.is_empty(),
             "Taint::tainted: kinds ne doit pas être vide (utiliser Taint::Clean)"
         );
-        Taint::Tainted { kinds, source }
+        Taint::Tainted {
+            kinds: Arc::new(kinds),
+            source,
+        }
     }
 
     pub fn is_clean(&self) -> bool {
@@ -88,7 +103,15 @@ pub fn join(a: &Taint, b: &Taint) -> Taint {
                 source: s2,
             },
         ) => Taint::Tainted {
-            kinds: k1.union(k2).cloned().collect(),
+            // The union, sharing one side's set when it already holds the
+            // other (ticket #241): the same kinds, without a new set.
+            kinds: if k2.is_subset(k1) {
+                Arc::clone(k1)
+            } else if k1.is_subset(k2) {
+                Arc::clone(k2)
+            } else {
+                Arc::new(k1.union(k2).cloned().collect())
+            },
             source: merge_source(s1, s2),
         },
     }
@@ -112,12 +135,12 @@ pub fn meet(a: &Taint, b: &Taint) -> Taint {
             },
             Taint::Tainted { kinds: k2, .. },
         ) => {
-            let inter: BTreeSet<String> = k1.intersection(k2).cloned().collect();
+            let inter: BTreeSet<SharedText> = k1.intersection(k2).cloned().collect();
             if inter.is_empty() {
                 Taint::Clean
             } else {
                 Taint::Tainted {
-                    kinds: inter,
+                    kinds: Arc::new(inter),
                     source: s1.clone(),
                 }
             }
@@ -161,10 +184,14 @@ fn merge_source(s1: &SourceInfo, s2: &SourceInfo) -> SourceInfo {
 }
 
 /// Dataflow state: maps each LValue (canonical name) to its taint.
+/// The names are [`SharedText`] (ticket #241): a copy of the state, made
+/// for every CFG node, no longer copies the text of every name. They sort
+/// by their text, as `String` keys did, so a state iterates in the same
+/// order.
 /// Keys whose value is `Clean` are absent from the map, to
 /// stay compact — mirrors `state_set` (Python removes the key rather
 /// than explicitly storing `⊥` in it).
-pub type State = BTreeMap<String, Taint>;
+pub type State = BTreeMap<SharedText, Taint>;
 
 pub fn empty_state() -> State {
     BTreeMap::new()
@@ -185,7 +212,7 @@ pub fn state_put(state: &mut State, key: &str, taint: Taint) {
     } else if let Some(slot) = state.get_mut(key) {
         *slot = taint;
     } else {
-        state.insert(key.to_string(), taint);
+        state.insert(SharedText::from(key), taint);
     }
 }
 
@@ -201,7 +228,7 @@ pub fn state_set(state: &State, key: &str, taint: Taint) -> State {
 /// `⊔` on states: merges the taint of each key present in either state.
 pub fn state_join(s1: &State, s2: &State) -> State {
     let mut result = State::new();
-    let keys: BTreeSet<&String> = s1.keys().chain(s2.keys()).collect();
+    let keys: BTreeSet<&SharedText> = s1.keys().chain(s2.keys()).collect();
     for k in keys {
         let merged = join(&state_get(s1, k), &state_get(s2, k));
         if !merged.is_clean() {
@@ -211,6 +238,33 @@ pub fn state_join(s1: &State, s2: &State) -> State {
     result
 }
 
+/// `acc ⊔= other`, in place: what [`state_join`]`(acc, other)` returns,
+/// written into `acc` (ticket #241). The worklist merges the states of a
+/// node's predecessors one after the other; `state_join` built a new
+/// state at each step and copied every taint twice (`state_get`, then
+/// `join`), which made state copies and their release the largest share
+/// of the allocations of a Java scan. Here a taint of `other` is copied
+/// once when `acc` has none for its key, and joined in place otherwise,
+/// in the same argument order (`join(acc, other)`, which keeps the
+/// source of `acc` on equal lines). A `Clean` value is never kept, as in
+/// `state_join`.
+pub fn state_join_into(acc: &mut State, other: &State) {
+    // `acc` may hold a `Clean` value written by a direct insert: the
+    // result of `state_join` never does.
+    acc.retain(|_, taint| !taint.is_clean());
+    for (key, taint) in other {
+        if taint.is_clean() {
+            continue;
+        }
+        match acc.get_mut(key) {
+            Some(slot) => *slot = join(slot, taint),
+            None => {
+                acc.insert(key.clone(), taint.clone());
+            }
+        }
+    }
+}
+
 pub fn state_equal(s1: &State, s2: &State) -> bool {
     s1 == s2
 }
@@ -218,7 +272,7 @@ pub fn state_equal(s1: &State, s2: &State) -> bool {
 /// Element-by-element widening of a state relative to its previous iteration.
 pub fn state_widen(old: &State, new: &State, iteration: u32, max_iter: u32) -> State {
     let mut result = State::new();
-    let keys: BTreeSet<&String> = old.keys().chain(new.keys()).collect();
+    let keys: BTreeSet<&SharedText> = old.keys().chain(new.keys()).collect();
     for k in keys {
         let v = widen(&state_get(old, k), &state_get(new, k), iteration, max_iter);
         if !v.is_clean() {
@@ -247,12 +301,64 @@ mod tests {
         SourceInfo {
             line,
             expr: String::new().into(),
-            kind: "http".to_string(),
+            kind: "http".into(),
         }
     }
 
     fn tainted(line: usize, kinds: &[&str]) -> Taint {
         Taint::tainted(kinds.iter().map(|s| s.to_string()), src(line))
+    }
+
+    /// Ticket #241: merging the states of several predecessors in place
+    /// gives the state the fold of `state_join` gave, sources on equal
+    /// lines, `Top` and `Clean` values included.
+    #[test]
+    fn test_state_join_into_matches_state_join() {
+        let named = |expr: &str, line: usize, kinds: &[&str]| {
+            Taint::tainted(
+                kinds.iter().map(|s| s.to_string()),
+                SourceInfo {
+                    line,
+                    expr: expr.into(),
+                    kind: kinds[0].into(),
+                },
+            )
+        };
+        let states: Vec<State> = vec![
+            State::from([
+                ("a".into(), named("first", 3, &["http"])),
+                ("b".into(), Taint::Top),
+                ("c".into(), Taint::Clean),
+            ]),
+            State::from([
+                ("a".into(), named("second", 3, &["cli"])),
+                ("c".into(), named("c", 9, &["env"])),
+                ("d".into(), Taint::Clean),
+            ]),
+            State::new(),
+            State::from([
+                ("a".into(), named("third", 1, &["http"])),
+                ("b".into(), named("b", 2, &["file"])),
+                ("e".into(), named("e", 5, &["http", "env"])),
+            ]),
+        ];
+        // Every order and every prefix of the predecessors.
+        let orders = [[0, 1, 2, 3], [3, 2, 1, 0], [1, 0, 3, 2], [2, 3, 0, 1]];
+        for order in orders {
+            for len in 1..=order.len() {
+                let mut folded = empty_state();
+                let mut in_place = empty_state();
+                for &i in &order[..len] {
+                    folded = state_join(&folded, &states[i]);
+                    state_join_into(&mut in_place, &states[i]);
+                }
+                assert_eq!(in_place, folded, "{:?}", &order[..len]);
+            }
+        }
+        // An accumulator holding a `Clean` value.
+        let mut acc = states[0].clone();
+        state_join_into(&mut acc, &states[1]);
+        assert_eq!(acc, state_join(&states[0], &states[1]));
     }
 
     #[test]
@@ -275,10 +381,7 @@ mod tests {
         let result = join(&a, &b);
         match result {
             Taint::Tainted { kinds, source } => {
-                assert_eq!(
-                    kinds,
-                    BTreeSet::from(["http".to_string(), "cli".to_string()])
-                );
+                assert_eq!(*kinds, BTreeSet::from(["http".into(), "cli".into()]));
                 assert_eq!(source.line, 2); // the earliest
             }
             _ => panic!("attendu Tainted"),
@@ -308,7 +411,7 @@ mod tests {
         let a = tainted(1, &["http", "cli"]);
         let b = tainted(1, &["cli", "env"]);
         match meet(&a, &b) {
-            Taint::Tainted { kinds, .. } => assert_eq!(kinds, BTreeSet::from(["cli".to_string()])),
+            Taint::Tainted { kinds, .. } => assert_eq!(*kinds, BTreeSet::from(["cli".into()])),
             _ => panic!("attendu Tainted"),
         }
     }
@@ -359,7 +462,7 @@ mod tests {
     #[test]
     fn test_state_set_clean_removes_key() {
         let mut state = empty_state();
-        state.insert("x".to_string(), tainted(1, &["http"]));
+        state.insert("x".into(), tainted(1, &["http"]));
         let updated = state_set(&state, "x", Taint::Clean);
         assert!(!updated.contains_key("x"));
     }
@@ -373,9 +476,9 @@ mod tests {
     #[test]
     fn test_state_join_merges_both_keys() {
         let mut s1 = empty_state();
-        s1.insert("x".to_string(), tainted(1, &["http"]));
+        s1.insert("x".into(), tainted(1, &["http"]));
         let mut s2 = empty_state();
-        s2.insert("y".to_string(), tainted(2, &["cli"]));
+        s2.insert("y".into(), tainted(2, &["cli"]));
         let joined = state_join(&s1, &s2);
         assert_eq!(joined.len(), 2);
     }
@@ -385,7 +488,7 @@ mod tests {
         // x tainted on one side, absent (so clean) on the other → join =
         // the non-clean value, present in the result (no loss).
         let mut s1 = empty_state();
-        s1.insert("x".to_string(), tainted(1, &["http"]));
+        s1.insert("x".into(), tainted(1, &["http"]));
         let s2 = empty_state();
         let joined = state_join(&s1, &s2);
         assert!(joined.contains_key("x"));

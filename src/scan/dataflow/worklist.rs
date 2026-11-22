@@ -34,7 +34,7 @@ use super::const_eval::{
     is_truthy, join_const_states, simplify_stmt, simulate_list_mutation,
 };
 use super::ir::{IrStmt, Rhs, canon_rhs};
-use super::lattice::{State, empty_state, state_equal, state_join, state_widen};
+use super::lattice::{State, empty_state, state_equal, state_join_into, state_widen};
 use super::line_facts::RuleLines;
 use super::lowering::{lower_expr_standalone, lower_for_target_assign, lower_stmts};
 use super::transfer::{Finding, RuleSpecs, transfer_stmts};
@@ -127,17 +127,17 @@ fn simplify_and_apply_stmts(
                 ..
             } => {
                 let base_key = canon_rhs(base);
-                if !base_key.is_empty() && !base_key.starts_with('<') && cs.contains_key(&base_key)
+                if !base_key.is_empty() && !base_key.starts_with('<') && cs.contains_key(&*base_key)
                 {
                     // §9.quater — first tries to simulate the
                     // operation on a list tracked as Tuple. Otherwise,
                     // conservative invalidation.
                     match simulate_list_mutation(&cs, &base_key, attr, args) {
                         Some(list) => {
-                            cs.insert(base_key, EvalConst::Tuple(list));
+                            cs.insert(base_key.into_owned(), EvalConst::Tuple(list));
                         }
                         None => {
-                            cs.remove(&base_key);
+                            cs.remove(&*base_key);
                         }
                     }
                 }
@@ -621,9 +621,11 @@ pub fn analyze_prepared<'tree>(
                 .filter(|p| !dead_edges.contains(&(*p, n)))
                 .collect();
             if !live_preds.is_empty() {
+                // In place (ticket #241): the same state as folding
+                // `state_join` over the predecessors from an empty state.
                 let mut new_in = empty_state();
                 for p in &live_preds {
-                    new_in = state_join(&new_in, &state_out[p]);
+                    state_join_into(&mut new_in, &state_out[p]);
                 }
                 state_in.insert(n, new_in);
             }
@@ -938,6 +940,8 @@ mod tests {
             passthroughs: vec![],
             summaries: BTreeMap::new(),
             type_map: BTreeMap::new(),
+            summary_fallback: None,
+            exprs: None,
         }
     }
 
@@ -1035,7 +1039,7 @@ mod tests {
                 SourceInfo {
                     line: 0,
                     expr: "param x".to_string().into(),
-                    kind: "cli".to_string(),
+                    kind: "cli".into(),
                 },
             ),
         );

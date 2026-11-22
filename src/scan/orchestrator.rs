@@ -41,8 +41,9 @@
 //! `ast` mode and `hook` rules remain out of scope (cf. `engine::dispatch`).
 #![allow(dead_code)]
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use rayon::prelude::*;
 use tree_sitter::{Parser as TsParser, Tree};
@@ -50,6 +51,7 @@ use tree_sitter::{Parser as TsParser, Tree};
 use crate::project::suppress::Suppressions;
 use crate::report::exports::sarif::{ReportFinding, TaintFlow, TaintStep};
 use crate::scan::counters::{count_java_loc, count_js_loc, count_python_loc};
+use crate::scan::dataflow::line_facts::SourceLines;
 use crate::scan::dataflow::rule_loader::{extract_cwe, extract_message};
 use crate::scan::discovery::{FileDiscoveryConfig, SkippedDir, find_files_and_skipped};
 use crate::scan::engine::file_contains::FileLocation;
@@ -467,6 +469,14 @@ pub struct ScanConfig {
     /// service downloads each file it opens). No effect without
     /// `target_languages`.
     pub only_target_language_files: bool,
+    /// Also hands back each rule's own findings, before the findings of
+    /// different rules on one line are merged ([`ScanReport::rule_findings`],
+    /// ticket #242). `false` (default): the scan keeps the report findings
+    /// only. `rules noise` sets it to measure several rules in one scan:
+    /// in the report, a rule's finding can be merged into another rule's
+    /// finding of the same line and category, and is then counted under
+    /// that other rule.
+    pub keep_rule_findings: bool,
 }
 
 impl Default for ScanConfig {
@@ -498,6 +508,7 @@ impl Default for ScanConfig {
             on_phase_complete: None,
             script_locale: None,
             only_target_language_files: false,
+            keep_rule_findings: false,
         }
     }
 }
@@ -628,6 +639,13 @@ pub struct ScanReport {
     /// (`not_path_has_file`), sorted: recorded with the scan so that the
     /// next one can check them without loading the rules (ADR-0050).
     pub governance_names: Vec<String>,
+    /// With [`ScanConfig::keep_rule_findings`]: the findings of every
+    /// rule as that rule alone gives them, after the suppressions and
+    /// inline ignores, before the merge of different rules on one line
+    /// (`integrate_taint_finding`), in the order the passes produce them.
+    /// A rule's taint finding is here even when the report merged it into
+    /// a finding of another rule. Empty otherwise.
+    pub rule_findings: Vec<ReportFinding>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -991,10 +1009,12 @@ fn split_lines_with_terminators(content: &str) -> Vec<(usize, String)> {
         .collect()
 }
 
-fn line_text(source_lines: &[(usize, String)], line: usize) -> String {
+/// Text of line `line` (1-based; 0 reads the first line, as it always
+/// has) without its final `\n`, empty past the last line.
+fn line_text(source_lines: &SourceLines, line: usize) -> String {
     source_lines
         .get(line.saturating_sub(1))
-        .map(|(_, t)| t.trim_end_matches('\n').to_string())
+        .map(|t| t.trim_end_matches('\n').to_string())
         .unwrap_or_default()
 }
 
@@ -1071,7 +1091,7 @@ fn engine_finding_to_report(
     f: &crate::scan::engine::Finding,
     rule_json: &serde_json::Value,
     rel_path: &str,
-    source_lines: &[String],
+    source_lines: &SourceLines,
     lang: &str,
 ) -> ReportFinding {
     use crate::report::text::{clip_line, clip_lines};
@@ -1081,7 +1101,7 @@ fn engine_finding_to_report(
     let (context_before, context_after) = if f.file_scope.is_some() {
         (String::new(), String::new())
     } else {
-        crate::report::text::context_lines(source_lines, f.line, 2)
+        crate::report::text::context_lines(source_lines.iter(), f.line, 2)
     };
     ReportFinding {
         rule_key: f.rule_id.clone(),
@@ -1128,7 +1148,7 @@ fn engine_finding_to_report(
 fn build_taint_flow(
     f: &crate::scan::dataflow::transfer::Finding,
     rel_path: &str,
-    source_lines: &[String],
+    source_lines: &SourceLines,
 ) -> TaintFlow {
     use crate::report::text::{clip_line, focus_of};
     // Each step with its file and real code line: a step stamped by the
@@ -1189,12 +1209,12 @@ fn taint_finding_to_report(
     f: &crate::scan::dataflow::transfer::Finding,
     rule_json: &serde_json::Value,
     rel_path: &str,
-    source_lines: &[String],
+    source_lines: &SourceLines,
     lang: &str,
 ) -> ReportFinding {
     use crate::report::text::{clip_line, clip_lines, focus_of};
     let (context_before, context_after) =
-        crate::report::text::context_lines(source_lines, f.line, 2);
+        crate::report::text::context_lines(source_lines.iter(), f.line, 2);
     let flow = build_taint_flow(f, rel_path, source_lines);
     // Actual code line displayed in the highlighted block — mirrors
     // `self._get_line_content(flow.sink_file, flow.sink_line)` on the
@@ -1320,17 +1340,22 @@ fn attach_taint_flows(existing: &mut ReportFinding, new_finding: &ReportFinding)
 /// `sorted(rules_dir.rglob("*.sca"))` on the Python side
 /// (`rule_loader.py`), a necessary condition for this tie-break to be
 /// identical.
-fn integrate_taint_finding(all_findings: &mut Vec<ReportFinding>, new_finding: ReportFinding) {
-    let same_line: Vec<usize> = all_findings
-        .iter()
-        .enumerate()
-        .filter(|(_, f)| {
-            f.file == new_finding.file
-                && f.line == new_finding.line
-                && f.category == new_finding.category
-        })
-        .map(|(i, _)| i)
-        .collect();
+///
+/// The findings already on the line are found through `by_line`, which
+/// must index `all_findings` (ticket #239): scanning every finding for
+/// each new one cost a time growing with the square of the number of
+/// findings.
+fn integrate_taint_finding(
+    all_findings: &mut Vec<ReportFinding>,
+    by_line: &mut FindingsByLine,
+    new_finding: ReportFinding,
+) {
+    let key = (
+        new_finding.file.clone(),
+        new_finding.line,
+        new_finding.category.clone(),
+    );
+    let same_line: Vec<usize> = by_line.0.get(&key).cloned().unwrap_or_default();
 
     if same_line.is_empty() {
         // Mirrors Python: even a freshly created taint finding, with
@@ -1340,6 +1365,11 @@ fn integrate_taint_finding(all_findings: &mut Vec<ReportFinding>, new_finding: R
         let mut new_finding = new_finding;
         new_finding.confidence = new_finding.confidence.max(95);
         all_findings.push(new_finding);
+        by_line
+            .0
+            .entry(key)
+            .or_default()
+            .push(all_findings.len() - 1);
         return;
     }
 
@@ -1374,21 +1404,78 @@ fn integrate_taint_finding(all_findings: &mut Vec<ReportFinding>, new_finding: R
     attach_taint_flows(&mut all_findings[same_line[0]], &new_finding);
 }
 
+/// The findings of each (file, line, category), as their positions in the
+/// list of findings, in list order: what [`integrate_taint_finding`] merges
+/// a taint finding into, found without scanning every finding (ticket
+/// #239). A merge only adds flows to a finding, never moves it: the
+/// positions stay valid, and a new finding is added by
+/// `integrate_taint_finding` itself.
+struct FindingsByLine(HashMap<(String, usize, String), Vec<usize>>);
+
+impl FindingsByLine {
+    /// Indexes `findings` as they are.
+    fn new(findings: &[ReportFinding]) -> Self {
+        let mut index: HashMap<(String, usize, String), Vec<usize>> = HashMap::new();
+        for (position, f) in findings.iter().enumerate() {
+            index
+                .entry((f.file.clone(), f.line, f.category.clone()))
+                .or_default()
+                .push(position);
+        }
+        FindingsByLine(index)
+    }
+}
+
 /// A file already read and parsed, kept in memory for the whole scan
 /// duration — needed for Phase C (the multi-file `CallGraph` borrows
 /// the tree-sitter trees of ALL files at once, not file by file).
 struct ParsedFile {
     rel_path: String,
     filepath: PathBuf,
-    source_bytes: Vec<u8>,
-    source_text: String,
-    all_lines: Vec<(usize, String)>,
-    source_lines_plain: Vec<String>,
-    tree: Tree,
+    /// The text of the file and its lines (terminators kept), with the
+    /// per-line facts shared by every taint rule of the scan (ticket
+    /// #240): the one copy of the text the scan keeps (ticket #241). The
+    /// pattern pass, the language passes, their call graphs and the
+    /// report read it; the passes and call graphs hold the same
+    /// allocation.
+    source: Arc<SourceLines>,
+    /// The parse tree, `None` once no pass needs it (ticket #241): a
+    /// file whose language has no taint pass with a taint rule drops its
+    /// tree as soon as its lines of code are counted, the other files
+    /// when their language's pass ends. Only the taint passes read the
+    /// trees, through [`ParsedFile::tree`].
+    tree: Option<Tree>,
     language: SourceLanguage,
 }
 
 impl ParsedFile {
+    /// The bytes of the text, those the tree was parsed from: what the
+    /// analyses read a node's text from. A file that is not valid UTF-8
+    /// is read with its invalid bytes replaced (`from_utf8_lossy`), and
+    /// these are the bytes of that text, not those on disk. The scan used
+    /// to hand the analyses the bytes on disk with a tree parsed from the
+    /// replaced text: every node after an invalid byte was read two bytes
+    /// off per replaced byte, and a Java flow below a Latin-1 comment
+    /// was lost (ticket #241). The Audit reads the file the same way
+    /// (`errors="replace"`) and parses the bytes of that text.
+    fn bytes(&self) -> &[u8] {
+        self.source.text().as_bytes()
+    }
+
+    /// The parse tree, for the taint pass of the file's language. The
+    /// scan keeps the tree of every file whose pass has a taint rule
+    /// until that pass ends (`run_scan`, `taint::language_has_taint_rule`),
+    /// so a pass never finds it released; if one did, this names the
+    /// file rather than analysing it without its tree.
+    fn tree(&self) -> &Tree {
+        self.tree.as_ref().unwrap_or_else(|| {
+            panic!(
+                "the parse tree of {} was released before its taint pass",
+                self.rel_path
+            )
+        })
+    }
+
     /// Both paths of the file, as the pattern rules need them:
     /// project-relative for folder conditions, on-disk for the
     /// governance-file walk (see `FileLocation`).
@@ -1399,6 +1486,16 @@ impl ParsedFile {
         }
     }
 }
+
+/// One taint pass of phase C (`taint::run_taint_pass` for one language):
+/// it borrows the parsed files only while it runs, so that the scan can
+/// release their trees after it (ticket #241).
+type TaintPass = for<'f> fn(
+    &'f [ParsedFile],
+    &[serde_json::Value],
+    &mut PassContext<'_>,
+    &mut taint::SeenTaint,
+) -> (String, std::time::Duration);
 
 /// What the passes of phases B and C read from the scan and add to it:
 /// one value for the whole scan, handed to the pattern pass (`patterns`)
@@ -1413,6 +1510,9 @@ struct PassContext<'s> {
     findings: &'s mut Vec<ReportFinding>,
     /// One line per pass that used the cache, for the console summary.
     cache_stats: &'s mut Vec<crate::scan::scan_cache::CacheStat>,
+    /// Each rule's own findings, before any merge, when the scan keeps
+    /// them (`ScanConfig::keep_rule_findings`, ticket #242).
+    rule_findings: Option<&'s mut Vec<ReportFinding>>,
 }
 
 /// What phase A made of one discovered file.
@@ -1446,19 +1546,28 @@ impl FileOutcome {
 /// counts. A saved web page (ADR-0046) and a minified file (ADR-0045)
 /// are recognized right after reading, before any parsing. Phase A runs it on every file in parallel;
 /// the tests build their files with it, so they see a file exactly as a
-/// scan does.
-fn parse_file(root: &Path, filepath: &Path) -> FileOutcome {
-    match read_and_parse(root, filepath) {
+/// scan does. The tree is kept when the file's language is one of
+/// `tree_languages` (ticket #241); otherwise it is dropped once the lines
+/// of code are counted.
+fn parse_file(root: &Path, filepath: &Path, tree_languages: &[SourceLanguage]) -> FileOutcome {
+    match read_and_parse(root, filepath, tree_languages) {
         Some(outcome) => outcome,
         None => FileOutcome::Failed,
     }
 }
 
 /// Body of [`parse_file`]; `None` when the file cannot be read or parsed.
-fn read_and_parse(root: &Path, filepath: &Path) -> Option<FileOutcome> {
+fn read_and_parse(
+    root: &Path,
+    filepath: &Path,
+    tree_languages: &[SourceLanguage],
+) -> Option<FileOutcome> {
     let language = SourceLanguage::from_path(filepath)?; // unknown extension/name: should not happen (discovery already filtered).
-    let source_bytes = std::fs::read(filepath).ok()?;
-    let source_text = String::from_utf8_lossy(&source_bytes).into_owned();
+    // Valid UTF-8 (nearly every file) becomes the text without a copy;
+    // otherwise the invalid bytes are replaced, as Python's
+    // `errors="replace"` does.
+    let source_text = String::from_utf8(std::fs::read(filepath).ok()?)
+        .unwrap_or_else(|invalid| String::from_utf8_lossy(invalid.as_bytes()).into_owned());
     let rel_path = project_relative_path(root, filepath);
     // A saved page first: it is often minified too, and its own reason
     // tells the reader more (ADR-0046).
@@ -1469,9 +1578,6 @@ fn read_and_parse(root: &Path, filepath: &Path) -> Option<FileOutcome> {
     if crate::scan::minified::is_minified(filepath, language, &source_text) {
         return Some(FileOutcome::Minified(rel_path));
     }
-    let all_lines = split_lines_with_terminators(&source_text);
-    let source_lines_plain: Vec<String> = all_lines.iter().map(|(_, t)| t.clone()).collect();
-
     let mut parser = TsParser::new();
     let ts_lang: tree_sitter::Language = match language {
         SourceLanguage::Python => tree_sitter_python::LANGUAGE.into(),
@@ -1496,10 +1602,11 @@ fn read_and_parse(root: &Path, filepath: &Path) -> Option<FileOutcome> {
     };
     parser.set_language(&ts_lang).ok()?;
     let tree = parser.parse(&source_text, None)?;
+    let source_bytes = source_text.as_bytes();
 
     let loc = match language {
-        SourceLanguage::Python => count_python_loc(&source_bytes, &tree),
-        SourceLanguage::Java => count_java_loc(&source_bytes, &tree),
+        SourceLanguage::Python => count_python_loc(source_bytes, &tree),
+        SourceLanguage::Java => count_java_loc(source_bytes, &tree),
         // `count_js_loc` operates purely on the "comment"
         // kind-string, identical across JS/TS/PHP/C#/HTML/YAML/
         // Dockerfile (verified empirically on the 4 new
@@ -1515,18 +1622,15 @@ fn read_and_parse(root: &Path, filepath: &Path) -> Option<FileOutcome> {
         | SourceLanguage::Dockerfile
         | SourceLanguage::MavenPom
         | SourceLanguage::WebConfig
-        | SourceLanguage::PackageJson => count_js_loc(&source_bytes, &tree),
+        | SourceLanguage::PackageJson => count_js_loc(source_bytes, &tree),
     };
     Some(FileOutcome::Parsed(
         loc,
         ParsedFile {
             rel_path,
             filepath: filepath.to_path_buf(),
-            source_bytes,
-            source_text,
-            all_lines,
-            source_lines_plain,
-            tree,
+            source: Arc::new(SourceLines::from_text(source_text)),
+            tree: tree_languages.contains(&language).then_some(tree),
             language,
         },
     ))
@@ -1888,6 +1992,60 @@ pub fn run_scan(config: &ScanConfig) -> ScanReport {
         })
         .collect();
 
+    // Ticket #241: the languages whose parse trees phase C reads, those
+    // of a taint pass that has a taint rule. A tree takes about 17 times
+    // the size of its file and the trees were most of a scan's memory:
+    // the other files drop theirs once their lines of code are counted.
+    let taint_passes: [(bool, &[SourceLanguage], SourceLanguage, TaintPass); 5] = [
+        (
+            taint_python_active,
+            taint::PythonTaint::FILE_LANGUAGES,
+            taint::PythonTaint::RULE_LANGUAGE,
+            |files, rules, context, seen| {
+                taint::run_taint_pass::<taint::PythonTaint>(files, rules, context, seen)
+            },
+        ),
+        (
+            taint_java_active,
+            taint::JavaTaint::FILE_LANGUAGES,
+            taint::JavaTaint::RULE_LANGUAGE,
+            |files, rules, context, seen| {
+                taint::run_taint_pass::<taint::JavaTaint>(files, rules, context, seen)
+            },
+        ),
+        (
+            taint_js_active,
+            taint::JsTaint::FILE_LANGUAGES,
+            taint::JsTaint::RULE_LANGUAGE,
+            |files, rules, context, seen| {
+                taint::run_taint_pass::<taint::JsTaint>(files, rules, context, seen)
+            },
+        ),
+        (
+            taint_php_active,
+            taint::PhpTaint::FILE_LANGUAGES,
+            taint::PhpTaint::RULE_LANGUAGE,
+            |files, rules, context, seen| {
+                taint::run_taint_pass::<taint::PhpTaint>(files, rules, context, seen)
+            },
+        ),
+        (
+            taint_csharp_active,
+            taint::CSharpTaint::FILE_LANGUAGES,
+            taint::CSharpTaint::RULE_LANGUAGE,
+            |files, rules, context, seen| {
+                taint::run_taint_pass::<taint::CSharpTaint>(files, rules, context, seen)
+            },
+        ),
+    ];
+    let tree_languages: Vec<SourceLanguage> = taint_passes
+        .iter()
+        .filter(|(active, _, rule_language, _)| {
+            *active && taint::language_has_taint_rule(*rule_language, &rule_jsons)
+        })
+        .flat_map(|(_, file_languages, _, _)| file_languages.iter().copied())
+        .collect();
+
     let suppressions = config
         .suppress_file
         .as_ref()
@@ -1911,7 +2069,7 @@ pub fn run_scan(config: &ScanConfig) -> ScanReport {
             if saved_page_folders.contains(filepath) {
                 FileOutcome::SavedPage(project_relative_path(&config.root, filepath))
             } else {
-                parse_file(&config.root, filepath)
+                parse_file(&config.root, filepath, &tree_languages)
             }
         })
         .collect();
@@ -1962,12 +2120,14 @@ pub fn run_scan(config: &ScanConfig) -> ScanReport {
         // project is untrusted and may plant a link under its cache path).
         crate::scan::scan_cache::CacheContext::prepare(base, &config.lang, &config.root)
     });
+    let mut rule_findings: Vec<ReportFinding> = Vec::new();
     let mut passes = PassContext {
         config,
         suppressions: &suppressions,
         cache: scan_cache.as_ref(),
         findings: &mut all_findings,
         cache_stats: &mut cache_stats,
+        rule_findings: config.keep_rule_findings.then_some(&mut rule_findings),
     };
 
     // Phase B — the pattern rules, one file at a time (`patterns`).
@@ -1978,32 +2138,20 @@ pub fn run_scan(config: &ScanConfig) -> ScanReport {
     // order of the findings in the report). What each language does is in
     // its own file of `taint/`; selecting the files and rules, the cache
     // and the merge into the report are shared (`taint::run_taint_pass`).
-    // `'f`: a pass borrows the parsed files (its call graph holds their
-    // trees) for as long as it lives.
-    type TaintPass<'f> = fn(
-        &'f [ParsedFile],
-        &[serde_json::Value],
-        &mut PassContext<'_>,
-        &mut taint::SeenTaint,
-    ) -> (String, std::time::Duration);
-    let taint_passes: [(bool, TaintPass<'_>); 5] = [
-        (
-            taint_python_active,
-            taint::run_taint_pass::<taint::PythonTaint>,
-        ),
-        (taint_java_active, taint::run_taint_pass::<taint::JavaTaint>),
-        (taint_js_active, taint::run_taint_pass::<taint::JsTaint>),
-        (taint_php_active, taint::run_taint_pass::<taint::PhpTaint>),
-        (
-            taint_csharp_active,
-            taint::run_taint_pass::<taint::CSharpTaint>,
-        ),
-    ];
+    // The passes are listed above (`taint_passes`). A pass borrows the
+    // parsed files (its call graph holds their trees) while it runs; once
+    // it ends, the trees of its files are released (ticket #241), so that
+    // the next pass does not run with them.
     let mut seen_taint = taint::SeenTaint::new();
-    for (active, pass) in taint_passes {
+    for (active, file_languages, _, pass) in taint_passes {
         if active {
             let (label, elapsed) = pass(&parsed_files, &rule_jsons, &mut passes, &mut seen_taint);
             record_phase(&label, elapsed);
+            for pf in &mut parsed_files {
+                if file_languages.contains(&pf.language) {
+                    pf.tree = None;
+                }
+            }
         }
     }
 
@@ -2297,6 +2445,7 @@ pub fn run_scan(config: &ScanConfig) -> ScanReport {
         languages,
         phase_timings,
         cache_stats,
+        rule_findings,
     }
 }
 
@@ -2579,10 +2728,46 @@ mod tests {
         }
     }
 
+    /// `integrate_taint_finding` with an index of `all` as it is.
+    fn integrate(all: &mut Vec<ReportFinding>, finding: ReportFinding) {
+        let mut by_line = FindingsByLine::new(all);
+        integrate_taint_finding(all, &mut by_line, finding);
+    }
+
+    /// One index kept across several integrations (as a taint pass does):
+    /// a finding pushed by the first one is merged into by the next one.
+    #[test]
+    fn test_integrate_taint_finding_index_follows_the_pushed_findings() {
+        let mut all = vec![finding("regex_rule", "SECURITY", "a.py", 3)];
+        let mut by_line = FindingsByLine::new(&all);
+        integrate_taint_finding(
+            &mut all,
+            &mut by_line,
+            finding("taint_rce", "SECURITY", "a.py", 7),
+        );
+        integrate_taint_finding(
+            &mut all,
+            &mut by_line,
+            finding("taint_xss", "SECURITY", "a.py", 7),
+        );
+        integrate_taint_finding(
+            &mut all,
+            &mut by_line,
+            finding("taint_sqli", "SECURITY", "a.py", 3),
+        );
+        assert_eq!(
+            all.len(),
+            2,
+            "both later findings merged into an existing one"
+        );
+        assert_eq!(all[1].rule_key, "taint_rce");
+        assert_eq!(all[0].rule_key, "regex_rule");
+    }
+
     #[test]
     fn test_integrate_taint_finding_no_existing_finding_pushes_new() {
         let mut all = Vec::new();
-        integrate_taint_finding(&mut all, finding("taint_rce", "SECURITY", "a.py", 41));
+        integrate(&mut all, finding("taint_rce", "SECURITY", "a.py", 41));
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].rule_key, "taint_rce");
     }
@@ -2593,7 +2778,7 @@ mod tests {
         // line 41, a taint_rce flow arrives on the same line — merged,
         // no 2nd finding.
         let mut all = vec![finding("os_system_injection", "SECURITY", "a.py", 41)];
-        integrate_taint_finding(&mut all, finding("taint_rce", "SECURITY", "a.py", 41));
+        integrate(&mut all, finding("taint_rce", "SECURITY", "a.py", 41));
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].rule_key, "os_system_injection");
         assert_eq!(all[0].confidence, 95);
@@ -2605,7 +2790,7 @@ mod tests {
         // (render_template_string), a taint_xss flow arrives on the
         // same line (same sink listed in both rules) — merged.
         let mut all = vec![finding("taint_ssti", "SECURITY", "a.py", 18)];
-        integrate_taint_finding(&mut all, finding("taint_xss", "SECURITY", "a.py", 18));
+        integrate(&mut all, finding("taint_xss", "SECURITY", "a.py", 18));
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].rule_key, "taint_ssti");
     }
@@ -2618,7 +2803,7 @@ mod tests {
             finding("other_rule", "SECURITY", "a.py", 10),
             finding("ssrf", "SECURITY", "a.py", 10),
         ];
-        integrate_taint_finding(&mut all, finding("ssrf_python", "SECURITY", "a.py", 10));
+        integrate(&mut all, finding("ssrf_python", "SECURITY", "a.py", 10));
         assert_eq!(all.len(), 2);
         // Attached to the "ssrf" finding (same family), not to
         // "other_rule" (first found) — Pass 1 must take priority over Pass 2.
@@ -2629,21 +2814,21 @@ mod tests {
     #[test]
     fn test_integrate_taint_finding_different_category_does_not_merge() {
         let mut all = vec![finding("rule_a", "SECURITY", "a.py", 5)];
-        integrate_taint_finding(&mut all, finding("rule_b", "MAINTENANCE", "a.py", 5));
+        integrate(&mut all, finding("rule_b", "MAINTENANCE", "a.py", 5));
         assert_eq!(all.len(), 2);
     }
 
     #[test]
     fn test_integrate_taint_finding_different_line_does_not_merge() {
         let mut all = vec![finding("rule_a", "SECURITY", "a.py", 5)];
-        integrate_taint_finding(&mut all, finding("rule_b", "SECURITY", "a.py", 6));
+        integrate(&mut all, finding("rule_b", "SECURITY", "a.py", 6));
         assert_eq!(all.len(), 2);
     }
 
     #[test]
     fn test_integrate_taint_finding_different_file_does_not_merge() {
         let mut all = vec![finding("rule_a", "SECURITY", "a.py", 5)];
-        integrate_taint_finding(&mut all, finding("rule_b", "SECURITY", "b.py", 5));
+        integrate(&mut all, finding("rule_b", "SECURITY", "b.py", 5));
         assert_eq!(all.len(), 2);
     }
 
@@ -4452,6 +4637,46 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    /// Ticket #241: a file that is not valid UTF-8 is analysed as the
+    /// text the tree was parsed from (its invalid bytes replaced, as the
+    /// Audit's `errors="replace"`). The analyses used to read the nodes in
+    /// the bytes on disk: each Latin-1 `é` of the comment shifted every
+    /// node below it by two bytes, and the flow was lost.
+    #[test]
+    fn test_java_taint_flow_below_a_latin1_comment_is_found() {
+        let root = temp_dir();
+        let rules_dir = root.join("rules");
+        std::fs::create_dir_all(&rules_dir).unwrap();
+        write(
+            &rules_dir,
+            "java_cmd_injection.sca",
+            "rule java_cmd_injection\n  language  java\n  category  security\n  severity  HIGH\n  source  request\\.getParameter\\s*\\(  kind=http\n  sink    Runtime\\.getRuntime\\(\\)\\.exec\nend\n",
+        );
+        let mut source = b"class App {\n    // caf\xe9 caf\xe9 caf\xe9\n".to_vec();
+        source.extend_from_slice(
+            b"    void run(HttpServletRequest request) throws Exception {\n        String cmd = request.getParameter(\"cmd\");\n        Runtime.getRuntime().exec(cmd);\n    }\n}\n",
+        );
+        assert!(std::str::from_utf8(&source).is_err());
+        std::fs::write(root.join("App.java"), source).unwrap();
+
+        let config = ScanConfig {
+            root: root.clone(),
+            rules_path: rules_dir,
+            suppress_file: None,
+            exclude_patterns: vec![],
+            ..ScanConfig::default()
+        };
+        let report = run_scan(&config);
+        assert!(report.rule_errors.is_empty());
+        let lines: Vec<(usize, &str)> = report
+            .findings
+            .iter()
+            .map(|f| (f.line, f.code.as_str()))
+            .collect();
+        assert_eq!(lines, vec![(5, "Runtime.getRuntime().exec(cmd);")]);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     #[test]
     fn test_java_taint_rule_detects_real_flow_end_to_end() {
         // Java taint is wired up (JavaCallGraph + java_taint_scan,
@@ -4493,6 +4718,73 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Ticket #241: each language keeps its parse trees only when its
+    /// pass has a taint rule, and releases them when the pass ends. A
+    /// language read only by a pattern rule runs its pass without
+    /// building it, and the pass with a taint rule, before or after it,
+    /// still finds its flow.
+    #[test]
+    fn test_taint_pass_runs_beside_a_language_without_taint_rule() {
+        let java_taint = "rule java_cmd_injection\n  language  java\n  category  security\n  severity  HIGH\n  source  request\\.getParameter\\s*\\(  kind=http\n  sink    Runtime\\.getRuntime\\(\\)\\.exec\nend\n";
+        let python_taint = "rule cmd_injection\n  language  python\n  category  security\n  severity  HIGH\n  source  input\\s*\\(  kind=cli\n  sink    os\\.system\\s*\\(\nend\n";
+        let java_pattern = "rule java_exec_call\n  language  java\n  category  security\n  severity  LOW\n  match\n    pattern  \\.exec\\(\n    scope    line\n  end\nend\n";
+        let python_pattern = "rule py_system_call\n  language  python\n  category  security\n  severity  LOW\n  match\n    pattern  os\\.system\\(\n    scope    line\n  end\nend\n";
+        // Python runs before Java: once with the taint rule on Python,
+        // once on Java.
+        for (rules, taint_file, pattern_file) in [
+            ([python_taint, java_pattern], "app.py", "App.java"),
+            ([java_taint, python_pattern], "App.java", "app.py"),
+        ] {
+            let root = temp_dir();
+            let rules_dir = root.join("rules");
+            std::fs::create_dir_all(&rules_dir).unwrap();
+            write(&rules_dir, "taint.sca", rules[0]);
+            write(&rules_dir, "pattern.sca", rules[1]);
+            write(&root, "app.py", "import os\nx = input()\nos.system(x)\n");
+            write(
+                &root,
+                "App.java",
+                "class App {\n    void run(HttpServletRequest request) throws Exception {\n        String cmd = request.getParameter(\"cmd\");\n        Runtime.getRuntime().exec(cmd);\n    }\n}\n",
+            );
+            let config = ScanConfig {
+                root: root.clone(),
+                rules_path: rules_dir,
+                suppress_file: None,
+                exclude_patterns: vec![],
+                ..ScanConfig::default()
+            };
+            let report = run_scan(&config);
+            assert!(report.rule_errors.is_empty(), "{:?}", report.rule_errors);
+            let mut found: Vec<(&str, &str)> = report
+                .findings
+                .iter()
+                .map(|f| (f.file.as_str(), f.rule_key.as_str()))
+                .collect();
+            found.sort();
+            let taint_rule = if taint_file == "app.py" {
+                "cmd_injection"
+            } else {
+                "java_cmd_injection"
+            };
+            let pattern_rule = if pattern_file == "app.py" {
+                "py_system_call"
+            } else {
+                "java_exec_call"
+            };
+            let mut expected = vec![(taint_file, taint_rule), (pattern_file, pattern_rule)];
+            expected.sort();
+            assert_eq!(found, expected);
+            assert!(
+                report
+                    .findings
+                    .iter()
+                    .any(|f| f.file == taint_file && !f.taint_flows.is_empty()),
+                "the flow of {taint_file} carries its steps"
+            );
+            std::fs::remove_dir_all(&root).ok();
+        }
     }
 
     #[test]

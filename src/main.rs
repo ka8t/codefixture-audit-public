@@ -2021,6 +2021,8 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
         brand_prefix: effective_prefix(&brand),
         // Every file is discovered, so undeclared languages are named.
         only_target_language_files: false,
+        // The report findings are enough (`rules noise` sets it).
+        keep_rule_findings: false,
     };
 
     // ADR-0050: before any rule is loaded, has anything the scan reads

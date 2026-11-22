@@ -4,6 +4,8 @@
 //! Rust scope remains Python-only, Decision #10, but the IR
 //! itself is already designed language-neutral on the Python side).
 
+use std::borrow::Cow;
+
 /// Literal constant value (int, str, bool, None, float).
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConstValue {
@@ -137,42 +139,93 @@ pub enum IrStmt {
 /// Converts an LHS into its canonical key for the dataflow state. A
 /// sub-attribute/subscript access with a non-constant key is aggregated
 /// under `[*]`.
+///
+/// The `canon_*` functions write the whole key into one `String`
+/// (ticket #241): the analysis builds these keys at every evaluation of
+/// an expression, and the former recursive `format!` allocated one
+/// string per level of `a.b.c`, a seventh of the allocations of a Java
+/// scan. `canon_rhs` and `canon_callee` lend the name of a plain variable
+/// instead of copying it. The text is the same;
+/// `test_canon_writers_match_the_former_format` keeps the former functions
+/// as the oracle.
 pub fn canon_lhs(lhs: &Lhs) -> String {
+    let mut out = String::new();
+    write_canon_lhs(lhs, &mut out);
+    out
+}
+
+fn write_canon_lhs(lhs: &Lhs, out: &mut String) {
     match lhs {
-        Lhs::VarLhs(name) => name.clone(),
-        Lhs::AttrLhs { base, attr } => format!("{}.{attr}", canon_rhs(base)),
+        Lhs::VarLhs(name) => out.push_str(name),
+        Lhs::AttrLhs { base, attr } => {
+            write_canon_rhs(base, out);
+            out.push('.');
+            out.push_str(attr);
+        }
         Lhs::SubscriptLhs { base, key } => {
-            format!("{}[{}]", canon_rhs(base), canon_subscript_key(key))
+            write_canon_rhs(base, out);
+            write_subscript_key(key, out);
         }
         Lhs::TupleLhs(elements) => {
-            format!(
-                "({})",
-                elements
-                    .iter()
-                    .map(canon_lhs)
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
+            out.push('(');
+            for (i, element) in elements.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                write_canon_lhs(element, out);
+            }
+            out.push(')');
         }
-        Lhs::StarLhs(inner) => format!("*{}", canon_lhs(inner)),
+        Lhs::StarLhs(inner) => {
+            out.push('*');
+            write_canon_lhs(inner, out);
+        }
     }
 }
 
 /// Converts an RHS into a canonical string, used to build the
 /// state keys.
-pub fn canon_rhs(rhs: &Rhs) -> String {
+pub fn canon_rhs(rhs: &Rhs) -> Cow<'_, str> {
+    if let Rhs::VarRef(name) = rhs {
+        return Cow::Borrowed(name);
+    }
+    let mut out = String::new();
+    write_canon_rhs(rhs, &mut out);
+    Cow::Owned(out)
+}
+
+fn write_canon_rhs(rhs: &Rhs, out: &mut String) {
     match rhs {
-        Rhs::VarRef(name) => name.clone(),
-        Rhs::AttrRef { base, attr } => format!("{}.{attr}", canon_rhs(base)),
-        Rhs::SubscriptRef { base, key } => {
-            format!("{}[{}]", canon_rhs(base), canon_subscript_key(key))
+        Rhs::VarRef(name) => out.push_str(name),
+        Rhs::AttrRef { base, attr } => {
+            write_canon_rhs(base, out);
+            out.push('.');
+            out.push_str(attr);
         }
-        Rhs::Const(v) => repr_const(v),
+        Rhs::SubscriptRef { base, key } => {
+            write_canon_rhs(base, out);
+            write_subscript_key(key, out);
+        }
+        Rhs::Const(v) => out.push_str(&repr_const(v)),
         // For the other RHS types, no canonical key is possible
         // (they are not lvalues) — a readable representation is
         // returned instead.
-        other => format!("<{}>", rhs_variant_name(other)),
+        other => {
+            out.push('<');
+            out.push_str(rhs_variant_name(other));
+            out.push('>');
+        }
     }
+}
+
+/// `[<key>]` of a subscript, as [`canon_subscript_key`] writes the key.
+fn write_subscript_key(key: &Rhs, out: &mut String) {
+    out.push('[');
+    match key {
+        Rhs::Const(v) => out.push_str(&repr_const(v)),
+        _ => out.push('*'),
+    }
+    out.push(']');
 }
 
 /// `pub(super)`: reused by `transfer.rs::_key_repr` (same
@@ -186,15 +239,29 @@ pub(super) fn canon_subscript_key(key: &Rhs) -> String {
 
 /// Converts a callee expression into a dotted name, for resolving
 /// the specs (source/sink/sanitizer, §7.1).
-pub fn canon_callee(rhs: &Rhs) -> String {
+pub fn canon_callee(rhs: &Rhs) -> Cow<'_, str> {
+    if let Rhs::VarRef(name) = rhs {
+        return Cow::Borrowed(name);
+    }
+    let mut out = String::new();
+    write_canon_callee(rhs, &mut out);
+    Cow::Owned(out)
+}
+
+fn write_canon_callee(rhs: &Rhs, out: &mut String) {
     match rhs {
-        Rhs::VarRef(name) => name.clone(),
-        Rhs::AttrRef { base, attr } => format!("{}.{attr}", canon_callee(base)),
-        Rhs::CallRef { .. } => "<call>".to_string(),
-        Rhs::SubscriptRef { base, key } => {
-            format!("{}[{}]", canon_callee(base), canon_subscript_key(key))
+        Rhs::VarRef(name) => out.push_str(name),
+        Rhs::AttrRef { base, attr } => {
+            write_canon_callee(base, out);
+            out.push('.');
+            out.push_str(attr);
         }
-        _ => "<unknown>".to_string(),
+        Rhs::CallRef { .. } => out.push_str("<call>"),
+        Rhs::SubscriptRef { base, key } => {
+            write_canon_callee(base, out);
+            write_subscript_key(key, out);
+        }
+        _ => out.push_str("<unknown>"),
     }
 }
 
@@ -371,6 +438,136 @@ pub fn pretty_stmts(stmts: &[IrStmt]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Ticket #241: the canonical names as the former recursive `format!`
+    // wrote them, the oracle of the writers.
+    fn former_canon_lhs(lhs: &Lhs) -> String {
+        match lhs {
+            Lhs::VarLhs(name) => name.clone(),
+            Lhs::AttrLhs { base, attr } => format!("{}.{attr}", former_canon_rhs(base)),
+            Lhs::SubscriptLhs { base, key } => {
+                format!(
+                    "{}[{}]",
+                    former_canon_rhs(base),
+                    former_canon_subscript_key(key)
+                )
+            }
+            Lhs::TupleLhs(elements) => {
+                format!(
+                    "({})",
+                    elements
+                        .iter()
+                        .map(former_canon_lhs)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            }
+            Lhs::StarLhs(inner) => format!("*{}", former_canon_lhs(inner)),
+        }
+    }
+
+    fn former_canon_rhs(rhs: &Rhs) -> String {
+        match rhs {
+            Rhs::VarRef(name) => name.clone(),
+            Rhs::AttrRef { base, attr } => format!("{}.{attr}", former_canon_rhs(base)),
+            Rhs::SubscriptRef { base, key } => {
+                format!(
+                    "{}[{}]",
+                    former_canon_rhs(base),
+                    former_canon_subscript_key(key)
+                )
+            }
+            Rhs::Const(v) => repr_const(v),
+            // For the other RHS types, no canonical key is possible
+            // (they are not lvalues) — a readable representation is
+            // returned instead.
+            other => format!("<{}>", rhs_variant_name(other)),
+        }
+    }
+
+    fn former_canon_subscript_key(key: &Rhs) -> String {
+        match key {
+            Rhs::Const(v) => repr_const(v),
+            _ => "*".to_string(),
+        }
+    }
+
+    fn former_canon_callee(rhs: &Rhs) -> String {
+        match rhs {
+            Rhs::VarRef(name) => name.clone(),
+            Rhs::AttrRef { base, attr } => format!("{}.{attr}", former_canon_callee(base)),
+            Rhs::CallRef { .. } => "<call>".to_string(),
+            Rhs::SubscriptRef { base, key } => {
+                format!(
+                    "{}[{}]",
+                    former_canon_callee(base),
+                    former_canon_subscript_key(key)
+                )
+            }
+            _ => "<unknown>".to_string(),
+        }
+    }
+
+    #[test]
+    fn test_canon_writers_match_the_former_format() {
+        let var = |n: &str| Rhs::VarRef(n.to_string());
+        let attr = |b: Rhs, a: &str| Rhs::AttrRef {
+            base: Box::new(b),
+            attr: a.to_string(),
+        };
+        let sub = |b: Rhs, k: Rhs| Rhs::SubscriptRef {
+            base: Box::new(b),
+            key: Box::new(k),
+        };
+        let call = |c: Rhs| Rhs::CallRef {
+            callee: Box::new(c),
+            args: vec![],
+            kwargs: vec![],
+        };
+        let rhs = vec![
+            var("x"),
+            attr(attr(var("request"), "GET"), "get"),
+            sub(
+                attr(var("obj"), "items"),
+                Rhs::Const(ConstValue::Str("k".into())),
+            ),
+            sub(var("a"), Rhs::Const(ConstValue::Int(3))),
+            sub(sub(var("m"), var("i")), Rhs::Const(ConstValue::Bool(true))),
+            attr(call(attr(var("db"), "cursor")), "execute"),
+            attr(sub(var("é"), Rhs::Const(ConstValue::None)), "ü"),
+            Rhs::Const(ConstValue::Float(1.5)),
+            Rhs::TupleRef(vec![]),
+            attr(Rhs::ListRef(vec![]), "pop"),
+            call(var("f")),
+        ];
+        for r in &rhs {
+            assert_eq!(canon_rhs(r), former_canon_rhs(r), "{r:?}");
+            assert_eq!(canon_callee(r), former_canon_callee(r), "{r:?}");
+        }
+        let mut lhs = vec![
+            Lhs::VarLhs("y".into()),
+            Lhs::TupleLhs(vec![]),
+            Lhs::StarLhs(Box::new(Lhs::VarLhs("rest".into()))),
+        ];
+        for r in &rhs {
+            lhs.push(Lhs::AttrLhs {
+                base: Box::new(r.clone()),
+                attr: "z".into(),
+            });
+            lhs.push(Lhs::SubscriptLhs {
+                base: Box::new(r.clone()),
+                key: Box::new(r.clone()),
+            });
+        }
+        lhs.push(Lhs::TupleLhs(lhs.clone()));
+        lhs.push(Lhs::StarLhs(Box::new(Lhs::TupleLhs(vec![
+            Lhs::VarLhs("a".into()),
+            Lhs::VarLhs("b".into()),
+        ]))));
+        for l in &lhs {
+            assert_eq!(canon_lhs(l), former_canon_lhs(l), "{l:?}");
+        }
+    }
 
     fn var(name: &str) -> Rhs {
         Rhs::VarRef(name.to_string())

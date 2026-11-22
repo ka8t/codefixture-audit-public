@@ -40,11 +40,13 @@ use std::sync::Arc;
 use rayon::prelude::*;
 
 use super::{
-    ParsedFile, PassContext, SourceLanguage, integrate_taint_finding, line_text, phase_label,
-    taint_finding_to_report,
+    FindingsByLine, ParsedFile, PassContext, SourceLanguage, integrate_taint_finding, line_text,
+    phase_label, taint_finding_to_report,
 };
 use crate::project::suppress::is_inline_ignored;
 use crate::scan::dataflow::call_graph::{FileInput, NodeKey, ResolvedSummaries, SummaryReuse};
+use crate::scan::dataflow::expr_table::ExprTable;
+use crate::scan::dataflow::line_facts::LinesByFile;
 use crate::scan::dataflow::rule_loader::rule_json_to_specs;
 use crate::scan::dataflow::summary::FunctionSummary;
 use crate::scan::dataflow::transfer::RuleSpecs;
@@ -99,9 +101,11 @@ pub(super) trait TaintLanguage<'a>: Sync + Sized {
     /// of the previous scan that are still valid (`reuse`).
     fn resolve(&self, specs: &RuleSpecs, reuse: Option<&SummaryReuse>) -> ResolvedSummaries;
 
-    /// Whether `file` reads one of the summaries in `changed`: if so, its
-    /// cached findings are redone even though its text did not change.
-    fn consumes_changed(&self, file: &str, changed: &BTreeSet<NodeKey>) -> bool;
+    /// The files that read a summary in `changed` (a superset is allowed):
+    /// their cached findings are redone even though their text did not
+    /// change. Asked once per rule (ticket #239): asking it file by file
+    /// scanned every changed summary for every file.
+    fn readers(&self, changed: &BTreeSet<NodeKey>) -> BTreeSet<String>;
 
     /// The findings of one rule on one file. `specs` is the rule's specs,
     /// reused from file to file: the method sets its per-file parts
@@ -114,24 +118,40 @@ pub(super) trait TaintLanguage<'a>: Sync + Sized {
     ) -> TaintFindings;
 }
 
+/// Whether `rule_jsons` hold a taint rule of `rule_language`: one that
+/// gives taint specs (`rule_loader::has_taint_specs`). The scan keeps the
+/// parse trees of a pass's files only when it does, and the pass only
+/// runs then (ticket #241): both ask this function, so a pass never
+/// meets a released tree.
+pub(super) fn language_has_taint_rule(
+    rule_language: SourceLanguage,
+    rule_jsons: &[serde_json::Value],
+) -> bool {
+    rule_jsons.iter().any(|r| {
+        r.get("language").and_then(|v| v.as_str()) == Some(rule_language.rule_tag())
+            && crate::scan::dataflow::rule_loader::has_taint_specs(r)
+    })
+}
+
 /// The parsed files as a call graph takes them (path, tree, bytes).
 pub(super) fn call_graph_inputs<'a>(files: &[&'a ParsedFile]) -> Vec<FileInput<'a>> {
     files
         .iter()
         .map(|pf| FileInput {
             filepath: pf.rel_path.clone(),
-            root: pf.tree.root_node(),
-            source: pf.source_bytes.as_slice(),
+            root: pf.tree().root_node(),
+            source: pf.bytes(),
         })
         .collect()
 }
 
 /// The source lines of every file, by path: summary resolution reads the
 /// lines to evaluate multi-line conditions (sanitizers, allowlists).
-pub(super) fn source_lines_by_file(files: &[&ParsedFile]) -> BTreeMap<String, Vec<String>> {
+/// The lines are shared with the files, not copied.
+pub(super) fn source_lines_by_file(files: &[&ParsedFile]) -> LinesByFile {
     files
         .iter()
-        .map(|pf| (pf.rel_path.clone(), pf.source_lines_plain.clone()))
+        .map(|pf| (pf.rel_path.clone(), Arc::clone(&pf.source)))
         .collect()
 }
 
@@ -169,6 +189,17 @@ pub(super) fn run_taint_pass<'a, L: TaintLanguage<'a>>(
         .iter()
         .filter(|r| r.get("language").and_then(|v| v.as_str()) == Some(L::RULE_LANGUAGE.rule_tag()))
         .collect();
+    // Ticket #241: without a taint rule there is nothing to analyse, and
+    // the scan kept no tree for these files. The pass used to build its
+    // call graph and prepare every file anyway (1.9 s on 2,944 Java files
+    // scanned with one pattern rule).
+    if !language_has_taint_rule(L::RULE_LANGUAGE, rule_jsons) {
+        let (key, french_fallback) = L::PHASE_LABEL;
+        return (
+            phase_label(context.config, key, french_fallback),
+            started.elapsed(),
+        );
+    }
     let language = L::build(&files);
     let per_rule = cached_rule_runs(&language, &files, &rules, context);
     merge_taint_findings(&files, &rules, per_rule, context, seen);
@@ -208,13 +239,19 @@ fn cached_rule_runs<'a, L: TaintLanguage<'a>>(
     // Ticket #204: why the previous cache could not serve, for the line.
     let miss = loaded.as_ref().and_then(|r| r.as_ref().err().cloned());
     let previous = loaded.and_then(Result::ok);
+    // Ticket #240: without a cache, no file is hashed and no rule state
+    // is kept, since nothing would read them.
+    let caching = context.cache.is_some();
     let file_states: BTreeMap<String, FileState> = files
         .iter()
+        .filter(|_| caching)
         .map(|pf| {
             (
                 pf.rel_path.clone(),
                 FileState {
-                    hash: sha256_hex(&pf.source_bytes),
+                    // The bytes the analysis reads, see `run_file` in
+                    // `patterns.rs` (ticket #241).
+                    hash: sha256_hex(pf.bytes()),
                     deps: sha256_hex(language.dependency_fingerprint(&pf.rel_path).as_bytes()),
                 },
             )
@@ -225,14 +262,40 @@ fn cached_rule_runs<'a, L: TaintLanguage<'a>>(
         |cache| cache.dirty_files(&file_states),
     );
 
-    // Per rule: its per-file findings, id, cache entry and analyses run.
-    type RuleRun = (Vec<TaintFindings>, String, RuleState, usize);
+    // Per rule: its per-file findings, id, cache entry (only with a
+    // cache) and analyses run.
+    type RuleRun = (Vec<TaintFindings>, String, Option<RuleState>, usize);
+    // `Some` as soon as the rule has a source and a sink, whatever its
+    // `patterns` (a `regex+taint` rule goes through both phases). Loaded
+    // before the runs so that the raw regexes of all the rules are
+    // numbered in one table, whose answers each line computes once for
+    // every rule (ticket #240).
+    let mut all_specs: Vec<Option<RuleSpecs>> = rule_jsons
+        .par_iter()
+        .map(|rule_json| rule_json_to_specs(rule_json, &config.lang))
+        .collect();
+    ExprTable::attach(all_specs.iter_mut().flatten());
+    // Computed ahead for the files every rule will analyse: all of them
+    // without a previous run, else the changed ones. A clean file that a
+    // rule analyses again (it reads a changed summary) computes its lines
+    // when the rule reaches them. Computing every file ahead cost a
+    // re-scan of `owasp_java` with one changed file 1 s more (1.9 s →
+    // 2.9 s).
+    if let Some(exprs) = all_specs
+        .iter()
+        .flatten()
+        .find_map(|specs| specs.exprs.as_ref())
+    {
+        files
+            .par_iter()
+            .filter(|pf| previous.is_none() || dirty.contains(&pf.rel_path))
+            .for_each(|pf| pf.source.fill_exprs(&exprs.table));
+    }
     let runs: Vec<Option<RuleRun>> = rule_jsons
         .par_iter()
-        .map(|rule_json| {
-            // `Some` as soon as the rule has a source and a sink, whatever
-            // its `patterns` (a `regex+taint` rule goes through both phases).
-            let base_specs = rule_json_to_specs(rule_json, &config.lang)?;
+        .zip(all_specs.into_par_iter())
+        .map(|(rule_json, base_specs)| {
+            let base_specs = base_specs?;
             let rule_hash = sha256_hex(
                 serde_json::to_string(rule_json)
                     .unwrap_or_default()
@@ -248,50 +311,71 @@ fn cached_rule_runs<'a, L: TaintLanguage<'a>>(
                 dirty_files: &dirty,
             });
             let resolved = language.resolve(&base_specs, reuse.as_ref());
-            // Cloned once per rule, not per file: only the per-file parts
-            // (summaries, type map) change between files.
-            let mut node_specs = base_specs.clone();
-            let mut analysed = 0usize;
-            let mut per_file = Vec::with_capacity(files.len());
-            for pf in files {
-                if let Some(prior) = prior
-                    && !dirty.contains(&pf.rel_path)
-                    && !language.consumes_changed(&pf.rel_path, &resolved.changed)
-                    && let Some(findings) = prior.findings.get(&pf.rel_path)
-                {
-                    per_file.push(findings.clone());
-                    continue;
-                }
-                analysed += 1;
-                per_file.push(language.analyse_file(pf, &mut node_specs, &resolved));
-            }
-            let state = RuleState {
+            // The files to redo although clean: only asked when a previous
+            // run's findings can be reused.
+            let readers = prior.map(|_| language.readers(&resolved.changed));
+            // The previous findings of a file that nothing changed.
+            let reused = |pf: &ParsedFile| {
+                prior
+                    .filter(|_| {
+                        !dirty.contains(&pf.rel_path)
+                            && !readers.as_ref().is_some_and(|r| r.contains(&pf.rel_path))
+                    })
+                    .and_then(|prior| prior.findings.get(&pf.rel_path))
+            };
+            let analysed = files.iter().filter(|pf| reused(pf).is_none()).count();
+            // The files of the rule are analysed in parallel too (ticket
+            // #240): with one rule per thread only, the last rules of the
+            // pass ran alone while the other cores waited (4.9 of 8 cores
+            // used on the `Java` project). The specs are cloned once per
+            // batch of files, not per file: `analyse_file` sets every
+            // per-file part (summaries, summary fallback, type map) before
+            // reading it, so a batch's files do not depend on each other
+            // nor on their order. `collect` keeps the file order.
+            let per_file: Vec<TaintFindings> = files
+                .par_iter()
+                .with_min_len(16)
+                .map_init(
+                    || base_specs.clone(),
+                    |node_specs, pf| match reused(pf) {
+                        Some(findings) => findings.clone(),
+                        None => language.analyse_file(pf, node_specs, &resolved),
+                    },
+                )
+                .collect();
+            let state = caching.then(|| RuleState {
                 rule_hash,
                 summaries: resolved
                     .all
                     .iter()
-                    .map(|((f, n), s)| (f.clone(), n.clone(), (**s).clone()))
+                    .map(|((f, n), s)| (f.clone(), n.clone(), Arc::clone(s)))
                     .collect(),
                 findings: files
                     .iter()
                     .zip(&per_file)
                     .map(|(pf, f)| (pf.rel_path.clone(), f.clone()))
                     .collect(),
-            };
+            });
             Some((per_file, base_specs.rule_id.clone(), state, analysed))
         })
         .collect();
 
+    let mut per_rule = Vec::with_capacity(runs.len());
+    let mut states = Vec::new();
+    let (mut analysed, mut total) = (0, 0);
+    for run in runs {
+        per_rule.push(run.map(|(per_file, rule_id, state, n)| {
+            states.extend(state.map(|state| (rule_id, state)));
+            analysed += n;
+            total += files.len();
+            per_file
+        }));
+    }
     if let Some((cache_context, path)) = context.cache.zip(cache_path.as_ref()) {
         let mut cache = TaintCache::new(cache_context.key.clone());
         cache.files = file_states;
-        let mut analysed = 0;
-        let mut total = 0;
-        for (_, rule_id, state, n) in runs.iter().flatten() {
-            cache.rules.insert(rule_id.clone(), state.clone());
-            analysed += n;
-            total += files.len();
-        }
+        // Moved, not copied: the findings and summaries stay in memory once.
+        cache.rules.extend(states);
         // Nothing redone and no file changed: the cache on disk is already
         // this one, rewriting it would only cost time. A cache that cannot
         // be written only costs the next scan its speed: never an error of
@@ -308,9 +392,7 @@ fn cached_rule_runs<'a, L: TaintLanguage<'a>>(
             full: miss,
         });
     }
-    runs.into_iter()
-        .map(|run| run.map(|(per_file, _, _, _)| per_file))
-        .collect()
+    per_rule
 }
 
 /// Adds the findings of one taint pass to the report, in rule then file
@@ -323,6 +405,8 @@ fn merge_taint_findings(
     context: &mut PassContext<'_>,
     seen: &mut SeenTaint,
 ) {
+    // Indexed once per pass, then kept up to date by each integration.
+    let mut by_line = FindingsByLine::new(context.findings);
     for (rule_json, maybe_per_file) in rule_jsons.iter().zip(per_rule) {
         let Some(per_file) = maybe_per_file else {
             continue;
@@ -338,7 +422,7 @@ fn merge_taint_findings(
                 if !seen.insert(key) {
                     continue;
                 }
-                let code = line_text(&pf.all_lines, f.line);
+                let code = line_text(&pf.source, f.line);
                 // Trimmed, as the report hashes it for its 🚫 button
                 // (`ReportFinding.code`): an indented line never matched.
                 if context
@@ -350,16 +434,19 @@ fn merge_taint_findings(
                 if is_inline_ignored(&code, &f.rule_id) {
                     continue;
                 }
-                integrate_taint_finding(
-                    context.findings,
-                    taint_finding_to_report(
-                        &f,
-                        rule_json,
-                        &pf.rel_path,
-                        &pf.source_lines_plain,
-                        &context.config.lang,
-                    ),
+                let finding = taint_finding_to_report(
+                    &f,
+                    rule_json,
+                    &pf.rel_path,
+                    &pf.source,
+                    &context.config.lang,
                 );
+                // The rule's own finding, before it may be merged into a
+                // finding of another rule on the same line (ticket #242).
+                if let Some(rule_findings) = context.rule_findings.as_deref_mut() {
+                    rule_findings.push(finding.clone());
+                }
+                integrate_taint_finding(context.findings, &mut by_line, finding);
             }
         }
     }

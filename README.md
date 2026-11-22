@@ -61,7 +61,7 @@ flowchart TD
     P["Your project"] --> FILES["Pick the files<br/>skips dependencies, build output,<br/>minified files"]
     FILES --> A["Text rules:<br/>patterns in the code"]
     FILES --> B["Data-flow rules:<br/>follow outside data<br/>to a dangerous call"]
-    FILES --> C["Dependencies:<br/>pinned versions vs<br/>published vulnerabilities"]
+    FILES --> C["Dependencies:<br/>checked versions vs<br/>published vulnerabilities"]
     A --> R["HTML report<br/>your code, the fix,<br/>the path of the data"]
     B --> R
     C --> R
@@ -92,7 +92,7 @@ From the `codefixture-audit-public` folder (on Windows, `.\target\release\codefi
 | A CycloneDX SBOM of your dependencies | add `--sbom` (see [SBOM export](INSTALLATION.md#sbom-export)) |
 | Update the engine | `git pull`, then `cargo build --release` |
 
-When your project declares dependencies (`requirements.txt`, `package.json`, `pom.xml`, `composer.json`, `.csproj`…), their pinned versions are compared with the published vulnerabilities the rules carry, offline. A vulnerability that CISA lists as exploited in real attacks (KEV) makes the finding critical, and each CVE shows its EPSS score: the probability that it gets exploited in the next 30 days.
+When your project declares dependencies (`requirements.txt`, `package.json`, `pom.xml`, `composer.json`, `.csproj`…), their versions are compared with the published vulnerabilities the rules carry, offline: the version a lockfile records as installed (`package-lock.json`, `poetry.lock`, `Pipfile.lock`, `composer.lock`…), else the exact version, else the lowest version a range allows, which the finding states. The packages a lockfile installs besides the declared ones are checked too. A vulnerability that CISA lists as exploited in real attacks (KEV) makes the finding critical, and each CVE shows its EPSS score: the probability that it gets exploited in the next 30 days.
 
 The rules come compiled into one file, `rules/rules.cfpack`. The build copies it next to the engine, and the two can be moved anywhere together.
 

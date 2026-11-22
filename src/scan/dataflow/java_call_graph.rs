@@ -33,16 +33,18 @@ use tree_sitter::Node;
 
 pub use super::call_graph::{FileInput, NodeKey, SummariesByFile};
 use super::java_module_registry::{
-    JavaImportInfo, build_fqcn_index, build_static_import_bindings, collect_java_class_names,
-    collect_java_imports, collect_java_superclass, collect_package, resolve_visible_classes,
+    JavaImportInfo, build_fqcn_index, collect_java_class_names, collect_java_imports,
+    collect_java_superclass, collect_package,
 };
 use super::java_summary::{
     JavaFunctionInfo, add_bare_name_aliases, collect_java_field_types, collect_java_local_types,
     compute_java_summary_with, prepare_java_file,
 };
-use super::line_facts::rule_lines_by_file;
+use super::java_visibility::JavaVisibility;
+use super::line_facts::{LinesByFile, rule_lines_by_file};
 use super::prepared::{PreparedFile, PreparedFiles};
 use super::transfer::{FunctionSummary, RuleSpecs};
+use super::visibility::{Visibility, graph_fingerprint};
 
 fn text(node: Node, source: &[u8]) -> String {
     node.utf8_text(source).unwrap_or("").to_string()
@@ -91,15 +93,16 @@ struct FileInfo {
 /// `edges`: for each node, its resolved outgoing calls (local call
 /// key — EXACTLY the form that `transfer.rs::eval_call`
 /// computes via `canon_callee`/its fallback logic — → target node).
-/// `import_bindings`: all cross-file/same-package bindings for a
-/// file (visible classes + static imports), not restricted to
-/// a particular function — used to rebuild `extra`
-/// (the multi-hop equivalent of the 1-hop resolution).
+/// `visibility`: what each file sees of the others (classes of its
+/// package and of its imports, static imports), looked up on demand —
+/// the multi-hop equivalent of the 1-hop resolution. It replaces the
+/// former per-file `import_bindings` map (ticket #239, see
+/// `java_visibility.rs`).
 #[derive(Default)]
 pub struct JavaCallGraph<'tree> {
     pub nodes: BTreeMap<NodeKey, JavaFunctionInfo<'tree>>,
     pub edges: BTreeMap<NodeKey, BTreeMap<String, NodeKey>>,
-    pub import_bindings: BTreeMap<String, BTreeMap<String, NodeKey>>,
+    visibility: Arc<JavaVisibility>,
     source_by_file: BTreeMap<String, &'tree [u8]>,
     /// Every file of the graph prepared once for all the rules of the
     /// scan (ticket #192): read for the summaries and handed to the
@@ -134,7 +137,23 @@ impl<'tree> JavaCallGraph<'tree> {
         self.prepared.file(filepath)
     }
 
-    /// Builds the complete graph (nodes + edges + import bindings)
+    /// What each file of the graph sees of the others, shared with the
+    /// taint analysis of each file (ticket #239).
+    pub fn visibility(&self) -> &Arc<JavaVisibility> {
+        &self.visibility
+    }
+
+    /// The nodes of `filepath`, in name order. A range of `nodes`, not a
+    /// scan of every node: looked up once per file, a full scan cost a time
+    /// growing with the square of the number of files (ticket #239).
+    fn file_node_keys<'a>(&'a self, filepath: &'a str) -> impl Iterator<Item = &'a NodeKey> + 'a {
+        self.nodes
+            .range((filepath.to_string(), String::new())..)
+            .map(|(key, _)| key)
+            .take_while(move |key| key.0 == filepath)
+    }
+
+    /// Builds the complete graph (nodes + edges + what each file sees)
     /// from a set of already-parsed Java files.
     pub fn build(files: &[FileInput<'tree>]) -> Self {
         let mut graph = JavaCallGraph::default();
@@ -186,43 +205,23 @@ impl<'tree> JavaCallGraph<'tree> {
         }
 
         let fqcn_index = build_fqcn_index(&class_names_by_file);
-
-        let mut visible_by_file: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
-        let mut static_by_file: BTreeMap<String, BTreeMap<String, NodeKey>> = BTreeMap::new();
-        for f in files {
-            let info = &file_info[&f.filepath];
-            let visible = resolve_visible_classes(
-                &f.filepath,
-                &info.package,
-                &info.imports,
-                &class_names_by_file,
-                &fqcn_index,
-            );
-            let statics = build_static_import_bindings(
-                &f.filepath,
-                &info.imports,
-                &fqcn_index,
-                &file_function_names,
-            );
-            graph.import_bindings.insert(
-                f.filepath.clone(),
-                build_import_bindings(&visible, &statics, &file_function_names),
-            );
-            visible_by_file.insert(f.filepath.clone(), visible);
-            static_by_file.insert(f.filepath.clone(), statics);
-        }
+        let imports_by_file: BTreeMap<String, Vec<JavaImportInfo>> = file_info
+            .iter()
+            .map(|(file, info)| (file.clone(), info.imports.clone()))
+            .collect();
+        graph.visibility = Arc::new(JavaVisibility::new(
+            &class_names_by_file,
+            &imports_by_file,
+            &fqcn_index,
+            file_function_names,
+        ));
 
         for f in files {
             let info = &file_info[&f.filepath];
             let local_class_names: BTreeSet<String> = info.class_names.iter().cloned().collect();
-            let visible = &visible_by_file[&f.filepath];
-            let statics = &static_by_file[&f.filepath];
-            let fn_keys: Vec<NodeKey> = graph
-                .nodes
-                .keys()
-                .filter(|(fp, _)| fp == &f.filepath)
-                .cloned()
-                .collect();
+            let statics = graph.visibility.statics(&f.filepath);
+            let fn_keys: Vec<NodeKey> = graph.file_node_keys(&f.filepath).cloned().collect();
+            let mut file_edges = Vec::with_capacity(fn_keys.len());
             for key in fn_keys {
                 let enclosing_class = key.1.rsplit_once('.').map(|(c, _)| c).unwrap_or("");
                 let edges = outgoing_edges(
@@ -231,13 +230,14 @@ impl<'tree> JavaCallGraph<'tree> {
                     enclosing_class,
                     &local_class_names,
                     info,
-                    visible,
+                    &graph.visibility,
                     statics,
                     &graph.nodes,
                     f.source,
                 );
-                graph.edges.insert(key, edges);
+                file_edges.push((key, edges));
             }
+            graph.edges.extend(file_edges);
         }
 
         graph
@@ -318,7 +318,7 @@ impl<'tree> JavaCallGraph<'tree> {
     pub fn resolve_summaries(
         &self,
         base_specs: &RuleSpecs,
-        source_lines_by_file: Option<&BTreeMap<String, Vec<String>>>,
+        source_lines_by_file: Option<&LinesByFile>,
     ) -> (SummariesByFile, SummariesByFile) {
         let resolved = self.resolve_summaries_incremental(base_specs, source_lines_by_file, None);
         (resolved.own, resolved.extra)
@@ -333,7 +333,7 @@ impl<'tree> JavaCallGraph<'tree> {
     pub fn resolve_summaries_incremental(
         &self,
         base_specs: &RuleSpecs,
-        source_lines_by_file: Option<&BTreeMap<String, Vec<String>>>,
+        source_lines_by_file: Option<&LinesByFile>,
         reuse: Option<&super::call_graph::SummaryReuse>,
     ) -> super::call_graph::ResolvedSummaries {
         let mut changed: std::collections::BTreeSet<NodeKey> = std::collections::BTreeSet::new();
@@ -425,17 +425,11 @@ impl<'tree> JavaCallGraph<'tree> {
             add_bare_name_aliases(summaries);
         }
 
+        // What a file sees through its package and its imports is not
+        // copied into `extra` (ticket #239): its taint analysis looks it up
+        // on demand (`JavaFileSummaries`, after `own` and `extra`).
+        // `extra` holds only the call-site aliases below.
         let mut extra: SummariesByFile = BTreeMap::new();
-        for (filepath, bindings) in &self.import_bindings {
-            for (local_name, target) in bindings {
-                if let Some(s) = resolved.get(target) {
-                    extra
-                        .entry(filepath.clone())
-                        .or_default()
-                        .insert(local_name.clone(), s.clone());
-                }
-            }
-        }
 
         // Call-site aliases (`this.foo`, `super.foo`, `Class.method`,
         // `recv.method` via type_map): the same need as the bare aliases
@@ -468,6 +462,17 @@ impl<'tree> JavaCallGraph<'tree> {
                 let bucket = if &target.0 == caller_file {
                     &mut own
                 } else {
+                    // A key that the file's package or imports already
+                    // resolve to a summary keeps that one: the former
+                    // `extra` held those first and these aliases did not
+                    // replace them (`or_insert_with`).
+                    if self
+                        .visibility
+                        .binding(caller_file, local_key)
+                        .is_some_and(|bound| resolved.contains_key(&bound))
+                    {
+                        continue;
+                    }
                     &mut extra
                 };
                 bucket
@@ -481,57 +486,31 @@ impl<'tree> JavaCallGraph<'tree> {
         super::call_graph::ResolvedSummaries {
             own,
             extra,
-            all: resolved,
+            all: Arc::new(resolved),
             changed,
             recomputed,
         }
     }
 
-    /// True when `file` reads a summary that changed in this scan.
-    pub fn consumes_changed(
-        &self,
-        file: &str,
-        changed: &std::collections::BTreeSet<NodeKey>,
-    ) -> bool {
-        super::call_graph::consumes_changed_in(&self.import_bindings, file, changed)
+    /// The files whose cached findings no longer hold because they read a
+    /// summary in `changed`: the files defining a changed method, and those
+    /// that may call one ([`JavaVisibility`]'s `readers_of`, a superset).
+    /// Computed once per rule (ticket #239): asking it file by file scanned
+    /// every changed summary for every file.
+    pub fn readers(&self, changed: &BTreeSet<NodeKey>) -> BTreeSet<String> {
+        let mut readers = self.visibility.readers_of(changed);
+        readers.extend(changed.iter().map(|node| node.0.clone()));
+        readers
     }
 
-    /// What, besides its own text, decides the analysis of `file`.
+    /// What, besides its own text, decides the analysis of `file`: the
+    /// edges of its methods, their names, and what it sees of the other
+    /// files ([`JavaVisibility`]): one digest per package and import instead
+    /// of the former one line per method of every visible class (ticket
+    /// #239).
     pub fn dependency_fingerprint(&self, file: &str) -> String {
-        super::call_graph::dependency_fingerprint_in(
-            &self.edges,
-            self.nodes.keys(),
-            &self.import_bindings,
-            file,
-        )
+        graph_fingerprint(&self.edges, &self.nodes, self.visibility.as_ref(), file)
     }
-}
-
-/// Rebuilds, for a file, ALL cross-file/same-package
-/// bindings in the form `{local_key: NodeKey}` — the same keys that
-/// a 1-hop resolution would produce (dotted "Class.method" for a
-/// visible class, bare name for a static import), but resolved
-/// from the multi-hop graph.
-fn build_import_bindings(
-    visible_classes: &BTreeMap<String, String>,
-    static_bindings: &BTreeMap<String, NodeKey>,
-    file_function_names: &BTreeMap<String, BTreeSet<String>>,
-) -> BTreeMap<String, NodeKey> {
-    let mut out = BTreeMap::new();
-    for (cname, target_file) in visible_classes {
-        let prefix = format!("{cname}.");
-        if let Some(names) = file_function_names.get(target_file) {
-            for dotted in names {
-                if dotted.starts_with(&prefix) {
-                    out.insert(dotted.clone(), (target_file.clone(), dotted.clone()));
-                }
-            }
-        }
-    }
-    for (bare_name, target) in static_bindings {
-        out.insert(bare_name.clone(), target.clone());
-    }
-    out
 }
 
 /// Returns the file defining `class_name` as seen from `filepath` —
@@ -541,12 +520,14 @@ fn resolve_class_target(
     class_name: &str,
     filepath: &str,
     local_class_names: &BTreeSet<String>,
-    visible_classes: &BTreeMap<String, String>,
+    visibility: &JavaVisibility,
 ) -> Option<String> {
     if local_class_names.contains(class_name) {
         return Some(filepath.to_string());
     }
-    visible_classes.get(class_name).cloned()
+    visibility
+        .visible_class(filepath, class_name)
+        .map(str::to_string)
 }
 
 /// Returns the outgoing edges of a method/constructor — one call
@@ -559,7 +540,7 @@ fn outgoing_edges<'tree>(
     enclosing_class: &str,
     local_class_names: &BTreeSet<String>,
     info: &FileInfo,
-    visible_classes: &BTreeMap<String, String>,
+    visibility: &JavaVisibility,
     static_bindings: &BTreeMap<String, NodeKey>,
     all_nodes: &BTreeMap<NodeKey, JavaFunctionInfo<'tree>>,
     source: &[u8],
@@ -610,12 +591,8 @@ fn outgoing_edges<'tree>(
                     continue;
                 }
                 if let Some(Some(super_name)) = info.superclass.get(enclosing_class)
-                    && let Some(target_file) = resolve_class_target(
-                        super_name,
-                        filepath,
-                        local_class_names,
-                        visible_classes,
-                    )
+                    && let Some(target_file) =
+                        resolve_class_target(super_name, filepath, local_class_names, visibility)
                 {
                     let target = (target_file, format!("{super_name}.{name}"));
                     if all_nodes.contains_key(&target) {
@@ -634,12 +611,9 @@ fn outgoing_edges<'tree>(
                 if edges.contains_key(&local_key) {
                     continue;
                 }
-                if let Some(target_file) = resolve_class_target(
-                    &ctor_type_text,
-                    filepath,
-                    local_class_names,
-                    visible_classes,
-                ) {
+                if let Some(target_file) =
+                    resolve_class_target(&ctor_type_text, filepath, local_class_names, visibility)
+                {
                     let target = (target_file, local_key.clone());
                     if all_nodes.contains_key(&target) {
                         edges.insert(local_key, target);
@@ -655,7 +629,7 @@ fn outgoing_edges<'tree>(
                 // 1. `recv` is itself the name of a visible class
                 //    (qualified static call, e.g. `Helper.doThing()`).
                 let mut target_file =
-                    resolve_class_target(&recv, filepath, local_class_names, visible_classes);
+                    resolve_class_target(&recv, filepath, local_class_names, visibility);
                 let mut resolved_class = recv.clone();
                 if target_file.is_none() {
                     // 2. `recv` is a variable/field with a known declared type.
@@ -664,7 +638,7 @@ fn outgoing_edges<'tree>(
                             declared_type,
                             filepath,
                             local_class_names,
-                            visible_classes,
+                            visibility,
                         );
                         resolved_class = declared_type.clone();
                     }
@@ -694,6 +668,7 @@ fn outgoing_edges<'tree>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scan::dataflow::line_facts::SourceLines;
     use crate::scan::dataflow::transfer::{SinkSpec, SourceSpec};
     use tree_sitter::Parser;
 
@@ -744,6 +719,8 @@ mod tests {
             passthroughs: vec![],
             summaries: BTreeMap::new(),
             type_map: BTreeMap::new(),
+            summary_fallback: None,
+            exprs: None,
         }
     }
 
@@ -1004,15 +981,27 @@ mod tests {
                 let lines = BTreeMap::from([
                     (
                         "C.java".to_string(),
-                        c_src.lines().map(str::to_string).collect(),
+                        c_src
+                            .lines()
+                            .map(str::to_string)
+                            .collect::<SourceLines>()
+                            .into(),
                     ),
                     (
                         "B.java".to_string(),
-                        b_src.lines().map(str::to_string).collect(),
+                        b_src
+                            .lines()
+                            .map(str::to_string)
+                            .collect::<SourceLines>()
+                            .into(),
                     ),
                     (
                         "A.java".to_string(),
-                        a_src.lines().map(str::to_string).collect(),
+                        a_src
+                            .lines()
+                            .map(str::to_string)
+                            .collect::<SourceLines>()
+                            .into(),
                     ),
                 ]);
                 let (own, _extra) = graph.resolve_summaries(&sqli_specs(), Some(&lines));
@@ -1031,7 +1020,10 @@ mod tests {
         with_graph(&[("A.java", src)], |graph| {
             let lines = BTreeMap::from([(
                 "A.java".to_string(),
-                src.lines().map(str::to_string).collect(),
+                src.lines()
+                    .map(str::to_string)
+                    .collect::<SourceLines>()
+                    .into(),
             )]);
             let (own, _extra) = graph.resolve_summaries(&sqli_specs(), Some(&lines));
             assert!(own["A.java"]["A.bar"].return_tainted_uncond);
@@ -1045,7 +1037,10 @@ mod tests {
         with_graph(&[("A.java", src)], |graph| {
             let lines = BTreeMap::from([(
                 "A.java".to_string(),
-                src.lines().map(str::to_string).collect(),
+                src.lines()
+                    .map(str::to_string)
+                    .collect::<SourceLines>()
+                    .into(),
             )]);
             let (own, _extra) = graph.resolve_summaries(&sqli_specs(), Some(&lines));
             let keys: std::collections::BTreeSet<&String> = own["A.java"].keys().collect();
@@ -1061,8 +1056,202 @@ mod tests {
         });
     }
 
+    // ------------------------------------------------------------------
+    // Ticket #239: what a file sees is looked up on demand, with the same
+    // answers as the former per-file maps.
+    // ------------------------------------------------------------------
+
+    /// The former per-file `import_bindings` construction, kept as the
+    /// oracle of `test_lookups_match_the_materialized_maps`: visible
+    /// classes (`resolve_visible_classes`), then one entry per method of
+    /// each visible class, then the static imports.
+    fn oracle_import_bindings(
+        visible_classes: &BTreeMap<String, String>,
+        static_bindings: &BTreeMap<String, NodeKey>,
+        file_function_names: &BTreeMap<String, BTreeSet<String>>,
+    ) -> BTreeMap<String, NodeKey> {
+        let mut out = BTreeMap::new();
+        for (cname, target_file) in visible_classes {
+            let prefix = format!("{cname}.");
+            if let Some(names) = file_function_names.get(target_file) {
+                for dotted in names {
+                    if dotted.starts_with(&prefix) {
+                        out.insert(dotted.clone(), (target_file.clone(), dotted.clone()));
+                    }
+                }
+            }
+        }
+        for (bare_name, target) in static_bindings {
+            out.insert(bare_name.clone(), target.clone());
+        }
+        out
+    }
+
     #[test]
-    fn test_extra_summaries_cover_visible_class_bindings() {
+    fn test_lookups_match_the_materialized_maps() {
+        use crate::scan::dataflow::java_module_registry::{
+            build_static_import_bindings, resolve_visible_classes,
+        };
+        // Each case of the precedence rules (java_visibility.rs): a class
+        // defined in two files of one package, a wildcard import that
+        // overrides the package, an explicit import that overrides both,
+        // an ambiguous explicit import, an explicit import of the file
+        // itself, static imports (one member, all members), nested
+        // classes, and the default package.
+        let files: &[(&str, &str)] = &[
+            (
+                "p/A.java",
+                "package p; import q.*; import r.Util; import static s.Tools.*; import static r.Util.helper; class A { void run() { Helper.go(); Util.u(); helper(); a(); } }",
+            ),
+            (
+                "p/Helper.java",
+                "package p; class Helper { void go() {} void stop() {} }",
+            ),
+            (
+                "p/other/Helper.java",
+                "package p; class Helper { void go() {} void more() {} }",
+            ),
+            (
+                "p/B.java",
+                "package p; import p.B; class B { void m() { Helper.stop(); } static class Inner { void n() {} } }",
+            ),
+            (
+                "p/C.java",
+                "package p; import t.Amb; import q.Helper; class C { void c() { Helper.q(); Amb.z(); B.m(); } }",
+            ),
+            (
+                "q/Helper.java",
+                "package q; class Helper { void go() {} void q() {} }",
+            ),
+            ("q/Q.java", "package q; class Q { void x() {} }"),
+            (
+                "r/Util.java",
+                "package r; class Util { static void helper() {} void u() {} }",
+            ),
+            (
+                "s/Tools.java",
+                "package s; class Tools { static void a() {} static void b() {} }",
+            ),
+            ("t/Amb.java", "package t; class Amb { void z() {} }"),
+            ("t2/Amb.java", "package t; class Amb { void z() {} }"),
+            ("D1.java", "class D1 { void d() {} }"),
+            ("D2.java", "class D2 { void e() { D1.d(); } }"),
+        ];
+        with_graph(files, |graph| {
+            let trees: BTreeMap<String, tree_sitter::Tree> = files
+                .iter()
+                .map(|(path, src)| (path.to_string(), parse_java(src)))
+                .collect();
+            let sources: BTreeMap<&str, &str> = files.iter().copied().collect();
+            let mut class_names_by_file = BTreeMap::new();
+            let mut imports_by_file = BTreeMap::new();
+            for (path, tree) in &trees {
+                let source = sources[path.as_str()].as_bytes();
+                class_names_by_file.insert(
+                    path.clone(),
+                    (
+                        collect_package(tree.root_node(), source),
+                        collect_java_class_names(tree.root_node(), source),
+                    ),
+                );
+                imports_by_file
+                    .insert(path.clone(), collect_java_imports(tree.root_node(), source));
+            }
+            let mut file_function_names: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+            for (file, name) in graph.nodes.keys() {
+                file_function_names
+                    .entry(file.clone())
+                    .or_default()
+                    .insert(name.clone());
+            }
+            let fqcn_index = build_fqcn_index(&class_names_by_file);
+
+            // Every key a call could look up: each method name, dotted and
+            // bare, each class name, and names nothing defines.
+            let mut probes: BTreeSet<String> = BTreeSet::new();
+            for (_, name) in graph.nodes.keys() {
+                probes.insert(name.clone());
+                if let Some((_, bare)) = name.rsplit_once('.') {
+                    probes.insert(bare.to_string());
+                }
+            }
+            probes.extend([
+                "Nothing.go".to_string(),
+                "unknown".to_string(),
+                "Helper.none".to_string(),
+            ]);
+            let mut class_probes: BTreeSet<String> = class_names_by_file
+                .values()
+                .flat_map(|(_, names)| names.iter().cloned())
+                .collect();
+            class_probes.insert("Nowhere".to_string());
+
+            let visibility = graph.visibility();
+            let mut checked = 0;
+            for (file, (package, _)) in &class_names_by_file {
+                let imports = &imports_by_file[file];
+                let visible = resolve_visible_classes(
+                    file,
+                    package,
+                    imports,
+                    &class_names_by_file,
+                    &fqcn_index,
+                );
+                let statics =
+                    build_static_import_bindings(file, imports, &fqcn_index, &file_function_names);
+                let bindings = oracle_import_bindings(&visible, &statics, &file_function_names);
+                for cname in &class_probes {
+                    assert_eq!(
+                        visibility.visible_class(file, cname),
+                        visible.get(cname).map(String::as_str),
+                        "visible class {cname} from {file}"
+                    );
+                }
+                for key in &probes {
+                    assert_eq!(
+                        visibility.binding(file, key).as_ref(),
+                        bindings.get(key),
+                        "binding {key} from {file}"
+                    );
+                    checked += 1;
+                }
+                let targets: BTreeSet<&NodeKey> = bindings.values().collect();
+                for node in graph.nodes.keys() {
+                    assert_eq!(
+                        visibility.is_binding_target(file, node),
+                        targets.contains(node),
+                        "target {node:?} from {file}"
+                    );
+                }
+            }
+            assert!(checked > 100, "too few lookups checked: {checked}");
+            // The fixture does exercise each rule: without these, the test
+            // would compare empty maps.
+            assert_eq!(
+                visibility.visible_class("p/A.java", "Helper"),
+                Some("q/Helper.java")
+            );
+            assert_eq!(
+                visibility.visible_class("p/B.java", "Helper"),
+                Some("p/other/Helper.java")
+            );
+            assert_eq!(visibility.visible_class("p/C.java", "Amb"), None);
+            assert_eq!(
+                visibility.binding("p/A.java", "helper"),
+                Some(("r/Util.java".to_string(), "Util.helper".to_string()))
+            );
+            assert_eq!(
+                visibility.binding("D2.java", "D1.d"),
+                Some(("D1.java".to_string(), "D1.d".to_string()))
+            );
+        });
+    }
+
+    #[test]
+    fn test_visible_methods_reach_the_analysis_without_extra() {
+        // `Api` calls `Helper.run` of its package: the summary is not
+        // copied into `extra` any more (ticket #239), the analysis finds
+        // it through `JavaFileSummaries`.
         let helper_src =
             "package p; class Helper { String run(String v) { return v.getParameter(\"x\"); } }";
         let api_src = "package p; class Api { void foo() {} }";
@@ -1072,19 +1261,38 @@ mod tests {
                 let lines = BTreeMap::from([
                     (
                         "Helper.java".to_string(),
-                        helper_src.lines().map(str::to_string).collect(),
+                        helper_src
+                            .lines()
+                            .map(str::to_string)
+                            .collect::<SourceLines>()
+                            .into(),
                     ),
                     (
                         "Api.java".to_string(),
-                        api_src.lines().map(str::to_string).collect(),
+                        api_src
+                            .lines()
+                            .map(str::to_string)
+                            .collect::<SourceLines>()
+                            .into(),
                     ),
                 ]);
-                let (_own, extra) = graph.resolve_summaries(&sqli_specs(), Some(&lines));
+                let resolved =
+                    graph.resolve_summaries_incremental(&sqli_specs(), Some(&lines), None);
                 assert!(
-                    extra
+                    resolved
+                        .extra
                         .get("Api.java")
-                        .is_some_and(|m| m.contains_key("Helper.run"))
+                        .is_none_or(|m| !m.contains_key("Helper.run"))
                 );
+                let visibility: Arc<dyn Visibility> = graph.visibility().clone();
+                let lookup = crate::scan::dataflow::visibility::FileSummaries::new(
+                    visibility,
+                    "Api.java",
+                    resolved.all.clone(),
+                );
+                use crate::scan::dataflow::transfer::SummaryLookup;
+                assert!(lookup.get("Helper.run").is_some());
+                assert!(lookup.get("Helper.missing").is_none());
             },
         );
     }

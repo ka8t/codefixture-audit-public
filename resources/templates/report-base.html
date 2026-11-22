@@ -224,7 +224,7 @@
             <div class="stat-card"><div class="stat-value info">{{total_info}}</div><div class="stat-label">{{i18n_severity_info}}</div></div>
             <div class="stat-card clickable" onclick="scrollToSection('section-validations')"><div class="stat-value success">{{total_successes}}</div><div class="stat-label">{{i18n_validations}}</div></div>
             <div class="stat-card"><div class="stat-value business">{{total_business}}</div><div class="stat-label">📦 {{i18n_business_code}}</div></div>
-            <div class="stat-card clickable" onclick="scrollToSection('section-dependencies')"><div class="stat-value deps">{{total_deps}}</div><div class="stat-label">🔗 {{i18n_dependencies}}</div></div>
+            <div class="stat-card{{deps_card_link}}><div class="stat-value deps">{{total_deps}}</div><div class="stat-label">🔗 {{i18n_dependencies}}</div></div>
             <div class="stat-card"><div class="stat-value {{tests_color}}">{{tests_rate}}%</div><div class="stat-label">🧪 Tests ({{tests_total}})</div></div>
             <div class="stat-card"><div class="stat-value {{fixtures_color}}">{{fixtures_rate}}%</div><div class="stat-label">🔬 Fixtures ({{fixtures_total}})</div></div>
             <div class="stat-card"><div class="stat-value">{{audit_total_time}}s</div><div class="stat-label">⏱️ {{i18n_audit_duration}}</div></div>

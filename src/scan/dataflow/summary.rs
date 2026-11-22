@@ -23,7 +23,7 @@ use tree_sitter::Node;
 use super::cfg::build_cfg_from_block;
 use super::ir::IrStmt;
 use super::lattice::{SourceInfo, State, Taint, empty_state, join, state_set};
-use super::line_facts::RuleLines;
+use super::line_facts::{RuleLines, SourceLines};
 use super::prepared::{PreparedCfg, PreparedFile, PreparedFunction};
 pub use super::transfer::FunctionSummary;
 use super::transfer::{Finding, RuleSpecs, eval_rhs, transfer_stmt};
@@ -575,7 +575,7 @@ fn return_line_source_taint(
             expr: lines
                 .trimmed(lineno, specs)
                 .expect("the line exists: its facts were found"),
-            kind: src.kind.clone(),
+            kind: src.kind.as_str().into(),
         },
     )
 }
@@ -663,7 +663,7 @@ pub fn compute_summary_prepared(
     let mut uncond = ret_base.is_tainted();
     let mut ret_kind: Option<String> = None;
     if let Taint::Tainted { source: src, .. } = &ret_base {
-        ret_kind = Some(src.kind.clone());
+        ret_kind = Some(src.kind.to_string());
     }
     if let Some(k) = &ret_kind
         && INTERPROC_BLOCKED_RETURN_KINDS.contains(&k.as_str())
@@ -686,7 +686,7 @@ pub fn compute_summary_prepared(
                 SourceInfo {
                     line: fn_lineno,
                     expr: format!("param:{pname}").into(),
-                    kind: first_kind.clone(),
+                    kind: first_kind.as_str().into(),
                 },
             ),
         );
@@ -797,7 +797,7 @@ pub fn compute_file_summaries(
     root: Node,
     source: &[u8],
     specs: &RuleSpecs,
-    source_lines: Option<&[String]>,
+    source_lines: Option<&SourceLines>,
 ) -> BTreeMap<String, FunctionSummary> {
     let rule_lines = source_lines.map(|lines| RuleLines::new(lines, specs));
     let mut out = BTreeMap::new();
@@ -842,6 +842,8 @@ mod tests {
             passthroughs: vec![],
             summaries: BTreeMap::new(),
             type_map: BTreeMap::new(),
+            summary_fallback: None,
+            exprs: None,
         }
     }
 

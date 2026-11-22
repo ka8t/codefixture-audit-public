@@ -19,7 +19,7 @@ use tree_sitter::Node;
 
 use super::java_summary::{JavaFunctionInfo, prepare_java_file};
 use super::lattice::{SourceInfo, Taint, empty_state, state_set};
-use super::line_facts::RuleLines;
+use super::line_facts::{RuleLines, SourceLines};
 use super::prepared::PreparedFile;
 use super::transfer::{Finding, RuleSpecs};
 
@@ -37,9 +37,13 @@ pub fn run_taint_rule_java<'tree>(
     root: Node<'tree>,
     source: &'tree [u8],
     specs: &RuleSpecs,
-    source_lines: Option<&[String]>,
+    source_lines: Option<&SourceLines>,
 ) -> Vec<Finding> {
-    run_taint_rule_java_prepared(&prepare_java_file(root, source), specs, source_lines)
+    run_taint_rule_java_prepared(
+        &prepare_java_file(root, source),
+        specs,
+        source_lines.map(|lines| RuleLines::new(lines, specs)),
+    )
 }
 
 /// [`run_taint_rule_java`] on a file already prepared by
@@ -48,11 +52,8 @@ pub fn run_taint_rule_java<'tree>(
 pub fn run_taint_rule_java_prepared(
     file: &PreparedFile<JavaFunctionInfo>,
     specs: &RuleSpecs,
-    source_lines: Option<&[String]>,
+    rule_lines: Option<RuleLines>,
 ) -> Vec<Finding> {
-    // One per-line cache of the hybrid layer for every analysis of this
-    // rule on this file (ticket #190).
-    let rule_lines = source_lines.map(|lines| RuleLines::new(lines, specs));
     let mut all_findings: Vec<Finding> = Vec::new();
 
     for function in &file.functions {
@@ -72,7 +73,7 @@ pub fn run_taint_rule_java_prepared(
                     SourceInfo {
                         line: fn_info.lineno,
                         expr: format!("{}({pname})", fn_info.name).into(),
-                        kind: "http".to_string(),
+                        kind: "http".into(),
                     },
                 ),
             );
@@ -102,7 +103,7 @@ pub fn run_taint_rule_java_prepared(
                         SourceInfo {
                             line: fn_info.lineno,
                             expr: format!("{}({pname})", fn_info.name).into(),
-                            kind: src.kind.clone(),
+                            kind: src.kind.as_str().into(),
                         },
                     ),
                 );
@@ -163,12 +164,14 @@ mod tests {
             passthroughs: vec![],
             summaries: BTreeMap::new(),
             type_map: BTreeMap::new(),
+            summary_fallback: None,
+            exprs: None,
         }
     }
 
     fn run(src: &str, specs: &RuleSpecs) -> Vec<Finding> {
         let tree = parse(src);
-        let lines: Vec<String> = src.lines().map(str::to_string).collect();
+        let lines: SourceLines = src.lines().collect();
         run_taint_rule_java(tree.root_node(), src.as_bytes(), specs, Some(&lines))
     }
 

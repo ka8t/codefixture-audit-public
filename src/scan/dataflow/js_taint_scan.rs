@@ -25,7 +25,7 @@ use tree_sitter::Node;
 
 use super::js_summary::{JsFunctionInfo, prepare_js_file};
 use super::lattice::empty_state;
-use super::line_facts::RuleLines;
+use super::line_facts::{RuleLines, SourceLines};
 use super::prepared::PreparedFile;
 use super::transfer::{Finding, RuleSpecs};
 
@@ -50,9 +50,13 @@ pub fn run_taint_rule_js<'tree>(
     root: Node<'tree>,
     source: &'tree [u8],
     specs: &RuleSpecs,
-    source_lines: Option<&[String]>,
+    source_lines: Option<&SourceLines>,
 ) -> Vec<Finding> {
-    run_taint_rule_js_prepared(&prepare_js_file(root, source), specs, source_lines)
+    run_taint_rule_js_prepared(
+        &prepare_js_file(root, source),
+        specs,
+        source_lines.map(|lines| RuleLines::new(lines, specs)),
+    )
 }
 
 /// [`run_taint_rule_js`] on a file already prepared by
@@ -60,11 +64,8 @@ pub fn run_taint_rule_js<'tree>(
 pub fn run_taint_rule_js_prepared(
     file: &PreparedFile<JsFunctionInfo>,
     specs: &RuleSpecs,
-    source_lines: Option<&[String]>,
+    rule_lines: Option<RuleLines>,
 ) -> Vec<Finding> {
-    // One per-line cache of the hybrid layer for every analysis of this
-    // rule on this file (ticket #190).
-    let rule_lines = source_lines.map(|lines| RuleLines::new(lines, specs));
     let mut all_findings: Vec<Finding> = Vec::new();
 
     let bodies = file
@@ -91,8 +92,10 @@ pub fn run_taint_rule_js_prepared(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scan::dataflow::line_facts::SourceLines;
     use crate::scan::dataflow::transfer::{FunctionSummary, SanitizerSpec, SinkSpec, SourceSpec};
     use std::collections::BTreeMap;
+    use std::sync::Arc;
     use tree_sitter::Parser;
 
     fn parse(src: &str) -> tree_sitter::Tree {
@@ -119,12 +122,14 @@ mod tests {
             passthroughs: vec![],
             summaries: BTreeMap::new(),
             type_map: BTreeMap::new(),
+            summary_fallback: None,
+            exprs: None,
         }
     }
 
     fn run(src: &str, specs: &RuleSpecs) -> Vec<Finding> {
         let tree = parse(src);
-        let lines: Vec<String> = src.lines().map(str::to_string).collect();
+        let lines: SourceLines = src.lines().collect();
         run_taint_rule_js(tree.root_node(), src.as_bytes(), specs, Some(&lines))
     }
 
@@ -281,7 +286,7 @@ mod tests {
                    function handler(req, db) { const q = req.query.q; run(db, q); }\n\
                    handler(r, d);\n";
         let tree = parse(src);
-        let lines: Vec<String> = src.lines().map(str::to_string).collect();
+        let lines: SourceLines = src.lines().collect();
         let prepared_count = || IR_PREPARATIONS.with(|count| count.get());
 
         let before_build = prepared_count();
@@ -293,7 +298,8 @@ mod tests {
         assert_eq!(prepared_count() - before_build, 3);
 
         let after_build = prepared_count();
-        let by_file = BTreeMap::from([("app.js".to_string(), lines.clone())]);
+        let shared = Arc::new(lines.iter().collect::<SourceLines>());
+        let by_file = BTreeMap::from([("app.js".to_string(), Arc::clone(&shared))]);
         let file = graph
             .prepared_file("app.js")
             .expect("the graph prepared app.js");
@@ -303,7 +309,8 @@ mod tests {
                 summaries: own.get("app.js").cloned().unwrap_or_default(),
                 ..sqli_specs()
             };
-            let findings = run_taint_rule_js_prepared(file, &specs, Some(&lines));
+            let findings =
+                run_taint_rule_js_prepared(file, &specs, Some(RuleLines::shared(&shared, &specs)));
             assert_eq!(findings.len(), 1, "{findings:?}");
         }
         assert_eq!(prepared_count(), after_build);

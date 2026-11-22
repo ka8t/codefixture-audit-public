@@ -41,7 +41,7 @@
 //! calibration reveals this pattern is common in practice (would
 //! require a synthetic single-node CFG, not built here for now).
 
-use super::line_facts::RuleLines;
+use super::line_facts::{RuleLines, SourceLines};
 use super::prepared::{PreparedCfg, PreparedFile, PreparedFunction};
 use super::transfer::{FunctionSummary, RuleSpecs};
 use super::worklist::prepare_js_ir;
@@ -263,7 +263,7 @@ pub fn compute_js_file_summaries<'tree>(
     root: Node<'tree>,
     specs: &RuleSpecs,
     source: &'tree [u8],
-    source_lines: Option<&[String]>,
+    source_lines: Option<&SourceLines>,
 ) -> std::collections::BTreeMap<String, FunctionSummary> {
     // One per-line cache of the hybrid layer for every summary of this
     // rule on this file (ticket #190).
@@ -407,6 +407,8 @@ mod tests {
             passthroughs: vec![],
             summaries: Default::default(),
             type_map: Default::default(),
+            summary_fallback: None,
+            exprs: None,
         };
         let summary = compute_js_summary(&functions[0], &specs, src.as_bytes(), None);
         assert_eq!(summary.name, "safe");

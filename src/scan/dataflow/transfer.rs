@@ -29,7 +29,7 @@ use super::ir::{
     IrStmt, Lhs, Rhs, canon_callee, canon_lhs, canon_rhs, canon_subscript_key, pretty_rhs,
 };
 use super::lattice::{SharedText, SourceInfo, State, Taint, join, state_get, state_put};
-use super::line_facts::{RuleLines, call_arguments, strip_plain_string_literals};
+use super::line_facts::{RuleLines, SourceLines, call_arguments, strip_plain_string_literals};
 
 // ============================================================================
 // §10bis — Hybrid matching over the source text
@@ -51,6 +51,47 @@ fn extract_identifiers(text: &str) -> BTreeSet<String> {
     out
 }
 
+/// A character that can continue an identifier in one of the scanned
+/// languages: a letter or digit (any script), `_`, or `$` (JavaScript
+/// and PHP identifiers, PHP variable names).
+fn is_identifier_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_' || c == '$'
+}
+
+/// Whether `text` mentions the state key `name` as a whole identifier:
+/// an occurrence counts only when it is not glued to a longer word, so
+/// a tainted `id` is not seen in `width`, `uuid` or `valid`, nor a
+/// tainted `name` in `filename` (ticket #225).
+///
+/// The boundary is tested only on an edge of `name` that is itself an
+/// identifier character. A state key can be a path (`self.x`, `a[0]`,
+/// `(a, b)`, `*rest`, see `canon_lhs`): `a[0]` followed by `.x` or
+/// `*rest` preceded by a space still match, as they did before.
+///
+/// Deliberate deviation from `Audit/sca/dataflow/transfer.py`, which
+/// tests `var_name in line` (a plain substring test) in the same three
+/// places: the sinks loop and the two guard clean-ups.
+fn mentions_identifier(text: &str, name: &str) -> bool {
+    let (Some(first), Some(last)) = (name.chars().next(), name.chars().next_back()) else {
+        return false;
+    };
+    let check_before = is_identifier_char(first);
+    let check_after = is_identifier_char(last);
+    text.match_indices(name).any(|(start, _)| {
+        let before_ok = !check_before
+            || text[..start]
+                .chars()
+                .next_back()
+                .is_none_or(|c| !is_identifier_char(c));
+        let after_ok = !check_after
+            || text[start + name.len()..]
+                .chars()
+                .next()
+                .is_none_or(|c| !is_identifier_char(c));
+        before_ok && after_ok
+    })
+}
+
 /// Checks the 10 preceding lines for `<id> = ...<var_name>...` where
 /// `<id>` is a guard identifier. Covers the pattern
 /// `url = urlparse(bar); if url.netloc in [...]: return; redirect(bar)`.
@@ -70,7 +111,7 @@ fn backward_aliased_var(
     var_name: &str,
     guard_ids: &BTreeSet<String>,
     lineno: usize,
-    source_lines: &[String],
+    source_lines: &SourceLines,
 ) -> bool {
     for back in 1..=10i64 {
         let idx_back = lineno as i64 - 1 - back;
@@ -99,9 +140,14 @@ fn backward_aliased_var(
 /// mentioned on the guard line. Step 2: backward aliasing — for each
 /// identifier in the guard, scans the 10 preceding lines for an
 /// assignment `<id> = ...<var>...`.
-fn apply_guard_cleanup(state: &mut State, line_text: &str, lineno: usize, source_lines: &[String]) {
+fn apply_guard_cleanup(
+    state: &mut State,
+    line_text: &str,
+    lineno: usize,
+    source_lines: &SourceLines,
+) {
     // Every key of the state is tainted: a `Clean` taint is never stored.
-    state.retain(|var_name, _| !line_text.contains(var_name.as_str()));
+    state.retain(|var_name, _| !mentions_identifier(line_text, var_name));
     let guard_ids = extract_identifiers(line_text);
     state.retain(|var_name, _| !backward_aliased_var(var_name, &guard_ids, lineno, source_lines));
 }
@@ -212,7 +258,7 @@ fn aux_match_line(
     };
     let guard = || {
         source_lines
-            .guard(lineno, specs)
+            .guard(lineno)
             .expect("the line exists: its facts were found")
     };
     let lhs_key: Option<String> = if let IrStmt::Assign { lhs, .. } = stmt {
@@ -230,7 +276,7 @@ fn aux_match_line(
         let if_indent = guard().indent;
         for off in 0..8usize {
             // Body line `lineno + off + 1` (1-based).
-            let Some(nxt) = source_lines.guard(lineno + off + 1, specs) else {
+            let Some(nxt) = source_lines.guard(lineno + off + 1) else {
                 break;
             };
             if nxt.is_blank {
@@ -264,7 +310,7 @@ fn aux_match_line(
             if terminator_nearby {
                 break;
             }
-            let Some(nxt) = source_lines.guard(lineno + off + 1, specs) else {
+            let Some(nxt) = source_lines.guard(lineno + off + 1) else {
                 break;
             };
             if nxt.is_blank {
@@ -294,7 +340,7 @@ fn aux_match_line(
                     .expect("the line exists: its facts were found");
                 // Every key of the state is tainted: a `Clean` taint is
                 // never stored.
-                state.retain(|var_name, _| !line_text_no_lit.contains(var_name.as_str()));
+                state.retain(|var_name, _| !mentions_identifier(line_text_no_lit, var_name));
             } else if let Some(rv) = &reassign_var {
                 state_put(state, rv, Taint::Clean);
             }
@@ -330,7 +376,7 @@ fn aux_match_line(
                     SourceInfo {
                         line: lineno,
                         expr: trimmed(),
-                        kind: src.kind.clone(),
+                        kind: src.kind.as_str().into(),
                     },
                 ),
             );
@@ -384,7 +430,7 @@ fn aux_match_line(
             .unwrap_or(scan.text_without_literals.as_str());
         let mut hit = false;
         for (var_name, var_taint) in state.iter() {
-            if scan_text_no_lit.contains(var_name.as_str()) && var_taint.is_tainted() {
+            if mentions_identifier(scan_text_no_lit, var_name) && var_taint.is_tainted() {
                 if !kinds_compatible(var_taint, &sink.kinds) {
                     continue;
                 }
@@ -396,7 +442,7 @@ fn aux_match_line(
                     source_kind = if source.kind.is_empty() {
                         "unknown".to_string()
                     } else {
-                        source.kind.clone()
+                        source.kind.to_string()
                     };
                     flow.push(FlowStep {
                         line: source.line,
@@ -501,9 +547,17 @@ pub enum SpecKind {
 ///   - `**.execute` : any execute method at any depth
 ///
 /// `*` does not cross dots; `**` does.
-pub fn compile_glob_pattern(pattern: &str) -> Regex {
+///
+/// A pattern without `*` is compared by string equality, the others run
+/// on the `regex` crate: the `fancy_regex` regexes they used to be took
+/// about 6 % of the taint time of a C# scan, for patterns that never need
+/// a look-around (ticket #240). Same answers: `^<escaped>$` matches
+/// exactly the name itself, and `fancy_regex` handed these patterns to
+/// the `regex` crate. `test_glob_engines_agree` keeps the former regex
+/// as the oracle.
+pub fn compile_glob_pattern(pattern: &str) -> GlobPattern {
     if !pattern.contains('*') {
-        return Regex::new(&format!("^{}$", regex::escape(pattern))).expect("regex literal valide");
+        return GlobPattern::Exact(pattern.to_string());
     }
     let mut out = String::new();
     let chars: Vec<char> = pattern.chars().collect();
@@ -521,15 +575,31 @@ pub fn compile_glob_pattern(pattern: &str) -> Regex {
             i += 1;
         }
     }
-    Regex::new(&format!("^{out}$")).expect("regex glob valide")
+    GlobPattern::Wildcard(regex::Regex::new(&format!("^{out}$")).expect("regex glob valide"))
 }
 
-/// Matches a dotted name against a pre-compiled glob regex (§7.1).
-/// A fancy-regex error (backtracking limit exceeded) is treated as a
-/// non-match — a conservative choice, with no equivalent failure mode
-/// in Python's standard `re`.
-pub fn match_pattern(callee_name: &str, compiled: &Regex) -> bool {
-    compiled.is_match(callee_name).unwrap_or(false)
+/// A compiled SCA glob pattern ([`compile_glob_pattern`]).
+#[derive(Debug, Clone)]
+pub enum GlobPattern {
+    /// A pattern without `*`: the name itself.
+    Exact(String),
+    /// A pattern with `*` or `**`, as an anchored regex.
+    Wildcard(regex::Regex),
+}
+
+impl GlobPattern {
+    /// Whether the dotted name `name` matches the pattern.
+    pub fn is_match(&self, name: &str) -> bool {
+        match self {
+            GlobPattern::Exact(exact) => name == exact,
+            GlobPattern::Wildcard(regex) => regex.is_match(name),
+        }
+    }
+}
+
+/// Matches a dotted name against a pre-compiled glob pattern (§7.1).
+pub fn match_pattern(callee_name: &str, compiled: &GlobPattern) -> bool {
+    compiled.is_match(callee_name)
 }
 
 #[derive(Debug, Clone)]
@@ -538,7 +608,7 @@ pub struct SourceSpec {
     pub kind: String,
     /// Phase 7 — regex over the raw source line (§10bis, next component).
     pub raw_regex: Option<Regex>,
-    compiled: Regex,
+    compiled: GlobPattern,
 }
 
 impl SourceSpec {
@@ -573,7 +643,7 @@ pub struct SinkSpec {
     /// Empty = all kinds.
     pub kinds: Vec<String>,
     pub raw_regex: Option<Regex>,
-    compiled: Regex,
+    compiled: GlobPattern,
 }
 
 impl SinkSpec {
@@ -617,7 +687,7 @@ pub struct SanitizerSpec {
     pub pattern: String,
     pub args: Vec<usize>,
     pub raw_regex: Option<Regex>,
-    compiled: Regex,
+    compiled: GlobPattern,
 }
 
 impl SanitizerSpec {
@@ -653,7 +723,7 @@ pub struct PassthroughSpec {
     pub args_in: Vec<usize>,
     pub arg_out: ArgOut,
     pub raw_regex: Option<Regex>,
-    compiled: Regex,
+    compiled: GlobPattern,
 }
 
 impl PassthroughSpec {
@@ -701,6 +771,45 @@ pub struct RuleSpecs {
     /// CLASS name, never by variable name) — Round 5, cf.
     /// `Audit/sca/dataflow/transfer.py`.
     pub type_map: BTreeMap<String, String>,
+    /// Summaries looked up only when `summaries` has no entry for the
+    /// callee name ([`RuleSpecs::summary`]). Java, Python, JavaScript
+    /// and PHP put here what a file sees of the other files (its
+    /// package, its imports, its `require`s), looked up on demand
+    /// (ticket #239): copying it into `summaries` for every file cost
+    /// memory and time growing with the square of the project size
+    /// (about 127 GB on the 46,793 files of the Juliet Java suite). Same
+    /// answers as the copy: see `visibility.rs` and
+    /// `java_visibility.rs`. `None` for C#, whose files read no summary
+    /// of another file.
+    pub summary_fallback: Option<Arc<dyn SummaryLookup>>,
+    /// The numbers of this rule's raw regexes in the table of its
+    /// language pass, whose answers each line computes once for every
+    /// rule (ticket #240, `expr_table.rs`). `None` outside a pass (a
+    /// test, a rule run on its own): each regex is then tested by the
+    /// rule itself, with the same answers.
+    pub exprs: Option<Arc<super::expr_table::RuleExprs>>,
+}
+
+/// Summaries found by callee name without being copied into
+/// [`RuleSpecs::summaries`] (ticket #239): see
+/// [`RuleSpecs::summary_fallback`].
+pub trait SummaryLookup: std::fmt::Debug + Send + Sync {
+    /// The summary of the function that `callee_name` designates, if any.
+    fn get(&self, callee_name: &str) -> Option<Arc<FunctionSummary>>;
+}
+
+impl RuleSpecs {
+    /// The summary of the function that `callee_name` designates: the
+    /// entry of `summaries`, else the one of `summary_fallback`.
+    pub fn summary(&self, callee_name: &str) -> Option<Arc<FunctionSummary>> {
+        match self.summaries.get(callee_name) {
+            Some(summary) => Some(summary.clone()),
+            None => self
+                .summary_fallback
+                .as_ref()
+                .and_then(|fallback| fallback.get(callee_name)),
+        }
+    }
 }
 
 /// "Summary sheet" of a function's taint behavior — describes how
@@ -808,7 +917,7 @@ fn check_source_match(name: &str, specs: &RuleSpecs, lineno: usize) -> Option<Ta
                 SourceInfo {
                     line: lineno,
                     expr: name.to_string().into(),
-                    kind: s.kind.clone(),
+                    kind: s.kind.as_str().into(),
                 },
             ));
         }
@@ -822,7 +931,9 @@ fn kinds_compatible(t: &Taint, sink_kinds: &[String]) -> bool {
     }
     match t {
         Taint::Top => true,
-        Taint::Tainted { kinds, .. } => kinds.iter().any(|k| sink_kinds.contains(k)),
+        Taint::Tainted { kinds, .. } => kinds
+            .iter()
+            .any(|k| sink_kinds.iter().any(|sink| sink.as_str() == &**k)),
         Taint::Clean => false,
     }
 }
@@ -855,11 +966,21 @@ pub fn eval_rhs(
             // is tainted, reading `obj` as a whole must pick up that
             // taint.
             let mut base = state_get(state, name);
-            let prefix = format!("{name}[");
-            for (key, t) in state.iter() {
-                if key.starts_with(&prefix) {
-                    base = join(&base, t);
-                }
+            // The keys that start with `name` follow `name` in the sorted
+            // state: read from there instead of the whole state, and keep
+            // those that go on with `[` (ticket #241). The same entries,
+            // in the same order, as testing every key against `name[`,
+            // without building that text at every read.
+            let after_name = (
+                std::ops::Bound::Excluded(name.as_str()),
+                std::ops::Bound::Unbounded,
+            );
+            for (_, t) in state
+                .range::<str, _>(after_name)
+                .take_while(|(key, _)| key.starts_with(name.as_str()))
+                .filter(|(key, _)| key.as_bytes().get(name.len()) == Some(&b'['))
+            {
+                base = join(&base, t);
             }
             base
         }
@@ -879,7 +1000,7 @@ pub fn eval_rhs(
             let base_key = canon_rhs(base);
             let sub_taint = state_get(state, &sub_key);
             if matches!(key.as_ref(), Rhs::Const(_)) {
-                if state.contains_key(&sub_key) {
+                if state.contains_key(&*sub_key) {
                     return sub_taint;
                 }
                 let wildcard_taint = state_get(state, &format!("{base_key}[*]"));
@@ -957,7 +1078,7 @@ fn arg_regex_source(arg: &Rhs, specs: &RuleSpecs, lineno: usize) -> Option<Taint
                 SourceInfo {
                     line: lineno,
                     expr: e.clone().into(),
-                    kind: src.kind.clone(),
+                    kind: src.kind.as_str().into(),
                 },
             ));
         }
@@ -1010,7 +1131,7 @@ pub fn eval_call(
             SourceInfo {
                 line: lineno,
                 expr: callee_name.into(),
-                kind: spec.kind.clone(),
+                kind: spec.kind.as_str().into(),
             },
         ),
         ResolvedSpec::Sink(spec) => {
@@ -1036,7 +1157,7 @@ pub fn eval_call(
             // the call, and taints the return if the function has an
             // unconditional internal source.
             let mut callee_name = callee_name;
-            let mut summary = specs.summaries.get(&callee_name);
+            let mut summary = specs.summary(&callee_name);
 
             // Round 5 (Java) — `scr.method()` where `scr` is a local
             // variable/field of known type: the direct lookup by
@@ -1050,8 +1171,8 @@ pub fn eval_call(
                 && let Rhs::VarRef(var_name) = base.as_ref()
                 && let Some(declared_type) = specs.type_map.get(var_name)
             {
-                callee_name = format!("{declared_type}.{attr}");
-                summary = specs.summaries.get(&callee_name);
+                callee_name = format!("{declared_type}.{attr}").into();
+                summary = specs.summary(&callee_name);
             }
             // Round 6 (Java) — chained call `new ClassName(...).method(...)`:
             // `java_lowering.rs::lower_method_invocation` inlines the
@@ -1067,11 +1188,11 @@ pub fn eval_call(
                 } = base.as_ref()
                 && let Rhs::VarRef(ctor_type_name) = ctor_callee.as_ref()
             {
-                callee_name = format!("{ctor_type_name}.{attr}");
-                summary = specs.summaries.get(&callee_name);
+                callee_name = format!("{ctor_type_name}.{attr}").into();
+                summary = specs.summary(&callee_name);
             }
 
-            if let Some(s) = summary {
+            if let Some(s) = &summary {
                 findings.extend(apply_summary_at_call(
                     s,
                     &callee_name,
@@ -1092,7 +1213,7 @@ pub fn eval_call(
             // via `return_taint_params` (the receiver and kwargs
             // remain over-approximated — not modeled by the probe).
             let mut result = callee_taint;
-            if let Some(s) = summary {
+            if let Some(s) = &summary {
                 for (i, t) in arg_taints.iter().enumerate() {
                     if s.return_taint_params.contains(&i) {
                         result = join(&result, t);
@@ -1108,7 +1229,7 @@ pub fn eval_call(
             }
             // Part 2 — unconditional internal source: the return is
             // tainted even with no tainted argument.
-            if let Some(s) = summary
+            if let Some(s) = &summary
                 && s.return_tainted_uncond
             {
                 let kind = s.return_kind.clone().unwrap_or_else(|| "http".to_string());
@@ -1119,7 +1240,7 @@ pub fn eval_call(
                         SourceInfo {
                             line: lineno,
                             expr: format!("{callee_name}()").into(),
-                            kind,
+                            kind: kind.into(),
                         },
                     ),
                 );
@@ -1156,7 +1277,7 @@ fn apply_summary_at_call(
             source_kind = if source.kind.is_empty() {
                 "unknown".to_string()
             } else {
-                source.kind.clone()
+                source.kind.to_string()
             };
             flow.push(FlowStep {
                 line: source.line,
@@ -1245,7 +1366,7 @@ fn check_sink(
             source_kind = if source.kind.is_empty() {
                 "unknown".to_string()
             } else {
-                source.kind.clone()
+                source.kind.to_string()
             };
             flow.push(FlowStep {
                 line: source.line,
@@ -1354,7 +1475,7 @@ fn try_indexed_read(
         let k1 = key_repr(&args[1]);
         let two_level = format!("{base_key}[{k0}][{k1}]");
         let two_level_wild = format!("{base_key}[{k0}][*]");
-        if state.contains_key(&two_level) || state.contains_key(&two_level_wild) {
+        if state.contains_key(two_level.as_str()) || state.contains_key(two_level_wild.as_str()) {
             let t = join(
                 &state_get(state, &two_level),
                 &state_get(state, &two_level_wild),
@@ -1384,7 +1505,7 @@ fn try_indexed_read(
 /// are never sinks).
 fn lhs_sink_target(lhs: &Lhs) -> Option<String> {
     match lhs {
-        Lhs::SubscriptLhs { base, .. } => Some(canon_rhs(base)),
+        Lhs::SubscriptLhs { base, .. } => Some(canon_rhs(base).into_owned()),
         Lhs::AttrLhs { .. } => Some(canon_lhs(lhs)),
         _ => None,
     }
@@ -1417,7 +1538,7 @@ fn transfer_assign(
                 source_kind = if source.kind.is_empty() {
                     "unknown".to_string()
                 } else {
-                    source.kind.clone()
+                    source.kind.to_string()
                 };
                 flow.push(FlowStep {
                     line: source.line,
@@ -1754,6 +1875,8 @@ mod tests {
             passthroughs: vec![],
             summaries: BTreeMap::new(),
             type_map: BTreeMap::new(),
+            summary_fallback: None,
+            exprs: None,
         }
     }
 
@@ -1778,9 +1901,115 @@ mod tests {
             SourceInfo {
                 line,
                 expr: "x".to_string().into(),
-                kind: kind.to_string(),
+                kind: kind.into(),
             },
         )
+    }
+
+    /// Ticket #241: reading a variable joins the taints of its indexed
+    /// entries (`a[...]`) found by a range of the sorted state, the ones
+    /// and in the order a scan of the whole state found them; the
+    /// neighbours of `a[` in that order are left out.
+    #[test]
+    fn test_var_read_joins_its_indexed_entries_only() {
+        let mut state = empty_state();
+        for (key, kind, line) in [
+            ("a", "http", 9),
+            ("a.b", "cli", 1),
+            ("a[", "env", 4),
+            ("a['k']", "file", 3),
+            ("a[0]", "db", 3),
+            ("aa[1]", "cli", 1),
+            ("a\\[", "cli", 1),
+            ("A[1]", "cli", 1),
+            ("b[0]", "cli", 1),
+        ] {
+            state.insert(key.into(), tainted(kind, line));
+        }
+        let mut expected = state_get(&state, "a");
+        for (key, t) in state.iter() {
+            if key.starts_with("a[") {
+                expected = join(&expected, t);
+            }
+        }
+        let specs = specs_with(vec![], vec![]);
+        let got = eval_rhs(&Rhs::VarRef("a".into()), &state, &specs, &mut vec![], 1);
+        assert_eq!(got, expected);
+        let Taint::Tainted { kinds, source } = got else {
+            panic!("tainted")
+        };
+        let kinds: Vec<&str> = kinds.iter().map(|k| &**k).collect();
+        assert_eq!(kinds, ["db", "env", "file", "http"]);
+        assert_eq!(source.line, 3);
+    }
+
+    /// The glob compiled as before ticket #240: an anchored
+    /// `fancy_regex` regex, `^<escaped>$` for a pattern without `*`.
+    fn former_glob(pattern: &str) -> Regex {
+        match compile_glob_pattern(pattern) {
+            GlobPattern::Exact(_) => Regex::new(&format!("^{}$", regex::escape(pattern))).unwrap(),
+            GlobPattern::Wildcard(regex) => Regex::new(regex.as_str()).unwrap(),
+        }
+    }
+
+    /// Ticket #240: the string equality and the `regex` crate give the
+    /// answers of the former `fancy_regex` globs, for globs built to
+    /// probe their edges.
+    #[test]
+    fn test_glob_engines_agree() {
+        assert_glob_engines_agree(vec![
+            "os.system".to_string(),
+            "*.execute".to_string(),
+            "**.execute".to_string(),
+            "a.*.b".to_string(),
+            "**".to_string(),
+            "*".to_string(),
+            "$_GET".to_string(),
+            "x[*]".to_string(),
+            "é.*".to_string(),
+        ]);
+    }
+
+    /// Every glob of `patterns` answers as the former `fancy_regex` glob
+    /// on names built around it: the glob itself, its stars replaced by
+    /// one and by two segments, with a prefix, a suffix and a newline.
+    fn assert_glob_engines_agree(mut patterns: Vec<String>) {
+        patterns.sort();
+        patterns.dedup();
+        let mut names = vec![
+            String::new(),
+            ".".to_string(),
+            "execute".to_string(),
+            "a.b".to_string(),
+            "a..b".to_string(),
+            "x.y\n".to_string(),
+            "é.ü".to_string(),
+        ];
+        for pattern in &patterns {
+            for name in [
+                pattern.replace("**", "a.b").replace('*', "c"),
+                pattern.replace('*', ""),
+                pattern.replace('*', "c.d"),
+            ] {
+                names.push(format!("p.{name}"));
+                names.push(format!("{name}x"));
+                names.push(format!("{name}\n"));
+                names.push(name);
+            }
+            names.push(pattern.clone());
+        }
+        names.sort();
+        names.dedup();
+        for pattern in &patterns {
+            let (new, former) = (compile_glob_pattern(pattern), former_glob(pattern));
+            for name in &names {
+                assert_eq!(
+                    new.is_match(name),
+                    former.is_match(name).unwrap(),
+                    "glob {pattern:?} on {name:?}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -1992,7 +2221,7 @@ mod tests {
                 SourceInfo {
                     line: 1,
                     expr: "x".to_string().into(),
-                    kind: "cli".to_string(),
+                    kind: "cli".into(),
                 },
             ),
         );
@@ -2090,7 +2319,9 @@ mod tests {
             SinkSpec::new("**.println")
                 .with_raw_regex(Regex::new(r"(?<!System\.(?:out|err))\.println\s*\(").unwrap()),
         );
-        let source_lines = vec!["System.out.println(tainted);".to_string()];
+        let source_lines: SourceLines = ["System.out.println(tainted);".to_string()]
+            .into_iter()
+            .collect();
         let mut findings = vec![dummy_finding("System.out.println", 1)];
         discard_sinks_failing_raw_regex(
             &mut findings,
@@ -2111,7 +2342,7 @@ mod tests {
             SinkSpec::new("**.println")
                 .with_raw_regex(Regex::new(r"(?<!System\.(?:out|err))\.println\s*\(").unwrap()),
         );
-        let source_lines = vec!["foo.println(tainted);".to_string()];
+        let source_lines: SourceLines = ["foo.println(tainted);".to_string()].into_iter().collect();
         let mut findings = vec![dummy_finding("foo.println", 1)];
         discard_sinks_failing_raw_regex(
             &mut findings,
@@ -2125,7 +2356,9 @@ mod tests {
     #[test]
     fn test_discard_sinks_failing_raw_regex_no_candidate_keeps_finding() {
         let specs = specs_with(vec![], vec![SinkSpec::new("os.system")]);
-        let source_lines = vec!["cursor.execute(tainted)".to_string()];
+        let source_lines: SourceLines = ["cursor.execute(tainted)".to_string()]
+            .into_iter()
+            .collect();
         let mut findings = vec![dummy_finding("cursor.execute", 1)];
         discard_sinks_failing_raw_regex(
             &mut findings,
@@ -2146,7 +2379,10 @@ mod tests {
         specs
             .sanitizers
             .push(SanitizerSpec::new("is_safe").with_raw_regex(Regex::new(r"is_safe\(").unwrap()));
-        let source_lines = vec!["if not is_safe(bar):".to_string(), "    return".to_string()];
+        let source_lines: SourceLines =
+            ["if not is_safe(bar):".to_string(), "    return".to_string()]
+                .into_iter()
+                .collect();
         let mut state = empty_state();
         state = state_set(&state, "bar", tainted("cli", 1));
         let stmt = IrStmt::Branch {
@@ -2174,11 +2410,13 @@ mod tests {
             SanitizerSpec::new("filter_var")
                 .with_raw_regex(Regex::new(r"filter_var.*FILTER_VALIDATE_URL").unwrap()),
         );
-        let source_lines = vec![
+        let source_lines: SourceLines = [
             "if (!filter_var($next, FILTER_VALIDATE_URL)) {".to_string(),
             "    $next = '/';".to_string(),
             "}".to_string(),
-        ];
+        ]
+        .into_iter()
+        .collect();
         let mut state = empty_state();
         state = state_set(&state, "$next", tainted("http", 1));
         let stmt = IrStmt::Branch {
@@ -2200,10 +2438,12 @@ mod tests {
     #[test]
     fn test_aux_match_line_generic_guard_clears_without_sanitizer_spec() {
         let specs = specs_with(vec![], vec![]);
-        let source_lines = vec![
+        let source_lines: SourceLines = [
             "if not bar.startswith('safe'):".to_string(),
             "    return".to_string(),
-        ];
+        ]
+        .into_iter()
+        .collect();
         let mut state = empty_state();
         state = state_set(&state, "bar", tainted("cli", 1));
         let stmt = IrStmt::Branch {
@@ -2226,11 +2466,13 @@ mod tests {
     fn test_aux_match_line_backward_aliasing_via_guard() {
         // url = urlparse(bar); if url.netloc in [...]: return; redirect(bar)
         let specs = specs_with(vec![], vec![]);
-        let source_lines = vec![
+        let source_lines: SourceLines = [
             "url = urlparse(bar)".to_string(),
             "if url.netloc in allowed_hosts:".to_string(),
             "    return".to_string(),
-        ];
+        ]
+        .into_iter()
+        .collect();
         let mut state = empty_state();
         state = state_set(&state, "bar", tainted("http", 1));
         let stmt = IrStmt::Branch {
@@ -2259,7 +2501,7 @@ mod tests {
             SourceSpec::new("request.GET", "http")
                 .with_raw_regex(Regex::new(r"request\.GET").unwrap()),
         );
-        let source_lines = vec!["x = request.GET['q']".to_string()];
+        let source_lines: SourceLines = ["x = request.GET['q']".to_string()].into_iter().collect();
         let stmt = IrStmt::Assign {
             lhs: Lhs::VarLhs("x".to_string()),
             rhs: Rhs::Const(ConstValue::Int(0)),
@@ -2283,7 +2525,7 @@ mod tests {
         specs
             .sinks
             .push(SinkSpec::new("os.system").with_raw_regex(Regex::new(r"os\.system\(").unwrap()));
-        let source_lines = vec!["os.system(cmd)".to_string()];
+        let source_lines: SourceLines = ["os.system(cmd)".to_string()].into_iter().collect();
         let mut state = empty_state();
         state = state_set(&state, "cmd", tainted("cli", 1));
         let stmt = IrStmt::Call {
@@ -2310,11 +2552,13 @@ mod tests {
         specs.sinks.push(
             SinkSpec::new("cursor.execute").with_raw_regex(Regex::new(r"\.execute\s*\(").unwrap()),
         );
-        let source_lines = vec![
+        let source_lines: SourceLines = [
             "cursor.execute(".to_string(),
             "    query + tainted_var".to_string(),
             ")".to_string(),
-        ];
+        ]
+        .into_iter()
+        .collect();
         let mut state = empty_state();
         state = state_set(&state, "tainted_var", tainted("cli", 2));
         let stmt = IrStmt::Call {
@@ -2350,12 +2594,14 @@ mod tests {
         specs.sanitizers.push(
             SanitizerSpec::new("select").with_raw_regex(Regex::new(r"\bselect\s*\(").unwrap()),
         );
-        let source_lines = vec![
+        let source_lines: SourceLines = [
             "return await db.execute(".to_string(),
             "    select(Call)".to_string(),
             "    .where(Call.status == status)".to_string(),
             ")".to_string(),
-        ];
+        ]
+        .into_iter()
+        .collect();
         let mut state = empty_state();
         state = state_set(&state, "status", tainted("http", 1));
         let stmt = IrStmt::Call {
@@ -2381,7 +2627,7 @@ mod tests {
         specs
             .sinks
             .push(SinkSpec::new("os.system").with_raw_regex(Regex::new(r"os\.system\(").unwrap()));
-        let source_lines = vec!["os.system(cmd)".to_string()];
+        let source_lines: SourceLines = ["os.system(cmd)".to_string()].into_iter().collect();
         let stmt = IrStmt::Call {
             callee: Rhs::VarRef("noop".to_string()),
             args: vec![],
@@ -2399,6 +2645,111 @@ mod tests {
         assert!(findings.is_empty());
     }
 
+    /// Runs the line layer on a single `os.system(...)` call line with
+    /// `var` tainted, and returns the findings (ticket #225).
+    fn sink_findings_with_tainted(line: &str, var: &str) -> Vec<Finding> {
+        let mut specs = specs_with(vec![], vec![]);
+        specs
+            .sinks
+            .push(SinkSpec::new("os.system").with_raw_regex(Regex::new(r"os\.system\(").unwrap()));
+        let source_lines: SourceLines = [line.to_string()].into_iter().collect();
+        let state = state_set(&empty_state(), var, tainted("cli", 1));
+        let stmt = IrStmt::Call {
+            callee: Rhs::VarRef("noop".to_string()),
+            args: vec![],
+            kwargs: vec![],
+            lineno: 1,
+        };
+        let mut findings = Vec::new();
+        aux_match_line(
+            &stmt,
+            &mut state.clone(),
+            &specs,
+            &mut findings,
+            &RuleLines::new(&source_lines, &specs),
+        );
+        findings
+    }
+
+    #[test]
+    fn test_aux_match_line_sink_ignores_name_inside_longer_word() {
+        // Ticket #225: a tainted `id` is not in `width`, `uuid` or
+        // `valid`, a tainted `name` not in `filename`, `$id` not in `$idx`.
+        assert!(sink_findings_with_tainted("os.system(width + uuid + valid)", "id").is_empty());
+        assert!(sink_findings_with_tainted("os.system(filename)", "name").is_empty());
+        assert!(sink_findings_with_tainted("os.system(name_2)", "name").is_empty());
+        assert!(sink_findings_with_tainted("os.system($idx)", "$id").is_empty());
+        assert!(sink_findings_with_tainted("os.system(a$id)", "id").is_empty());
+    }
+
+    #[test]
+    fn test_aux_match_line_sink_finds_whole_identifier() {
+        // Ticket #225: the whole name, alone or next to punctuation,
+        // still reports, as do paths kept as state keys.
+        assert_eq!(sink_findings_with_tainted("os.system(id)", "id").len(), 1);
+        assert_eq!(
+            sink_findings_with_tainted("os.system('ls ' + id)", "id").len(),
+            1
+        );
+        assert_eq!(
+            sink_findings_with_tainted("os.system(width + id.strip())", "id").len(),
+            1
+        );
+        assert_eq!(
+            sink_findings_with_tainted("os.system(self.name)", "self.name").len(),
+            1
+        );
+        assert_eq!(
+            sink_findings_with_tainted("os.system(args[0].x)", "args[0]").len(),
+            1
+        );
+        assert_eq!(sink_findings_with_tainted("os.system($id)", "$id").len(), 1);
+        assert_eq!(
+            sink_findings_with_tainted("os.system(é_id + id)", "id").len(),
+            1
+        );
+    }
+
+    #[test]
+    fn test_aux_match_line_generic_guard_keeps_name_inside_longer_word() {
+        // Ticket #225: `if not valid: return` checks `valid`, not a
+        // tainted `id`, which stays tainted.
+        let specs = specs_with(vec![], vec![]);
+        let source_lines: SourceLines = ["if not valid:".to_string(), "    return".to_string()]
+            .into_iter()
+            .collect();
+        let state = state_set(&empty_state(), "id", tainted("cli", 1));
+        let stmt = IrStmt::Branch {
+            condition: Rhs::Const(ConstValue::Bool(true)),
+            lineno: 1,
+        };
+        let mut findings = Vec::new();
+        let mut new_state = state.clone();
+        aux_match_line(
+            &stmt,
+            &mut new_state,
+            &specs,
+            &mut findings,
+            &RuleLines::new(&source_lines, &specs),
+        );
+        assert!(state_get(&new_state, "id").is_tainted());
+    }
+
+    #[test]
+    fn test_mentions_identifier_edges() {
+        assert!(mentions_identifier("id", "id"));
+        assert!(mentions_identifier("x(id)", "id"));
+        assert!(mentions_identifier("valid id", "id"));
+        assert!(!mentions_identifier("valid", "id"));
+        assert!(!mentions_identifier("idx", "id"));
+        assert!(!mentions_identifier("", "id"));
+        assert!(!mentions_identifier("id", ""));
+        // A key whose edge is not an identifier character needs no
+        // boundary on that edge.
+        assert!(mentions_identifier("f(*rest)", "*rest"));
+        assert!(mentions_identifier("(a, b)x", "(a, b)"));
+    }
+
     #[test]
     fn test_transfer_stmt_applies_hybrid_layer_only_when_source_lines_given() {
         let mut specs = specs_with(vec![], vec![]);
@@ -2406,7 +2757,9 @@ mod tests {
             SourceSpec::new("os.environ", "env")
                 .with_raw_regex(Regex::new(r"os\.environ").unwrap()),
         );
-        let source_lines = vec!["x = os.environ['SECRET']".to_string()];
+        let source_lines: SourceLines = ["x = os.environ['SECRET']".to_string()]
+            .into_iter()
+            .collect();
         let stmt = IrStmt::Assign {
             lhs: Lhs::VarLhs("x".to_string()),
             rhs: Rhs::Const(ConstValue::Int(0)),
