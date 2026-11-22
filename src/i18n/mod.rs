@@ -183,6 +183,32 @@ mod tests {
         }
     }
 
+    /// Ticket #244: the French console messages call a finding a
+    /// "constat", as the French report and documentation do, and a match
+    /// a "correspondance": the English words are left in no message text
+    /// (the `{findings}` placeholders and the keys are not text).
+    #[test]
+    fn test_french_script_messages_use_no_english_finding_word() {
+        fn texts<'a>(value: &'a Value, out: &mut Vec<&'a str>) {
+            match value {
+                Value::String(s) => out.push(s),
+                Value::Object(map) => map.values().for_each(|v| texts(v, out)),
+                Value::Array(items) => items.iter().for_each(|v| texts(v, out)),
+                _ => {}
+            }
+        }
+        let locale = load_script_locale("fr");
+        let mut all = Vec::new();
+        texts(&locale, &mut all);
+        let placeholder = regex::Regex::new(r"\{[^}]*\}").unwrap();
+        let english = regex::Regex::new(r"(?i)\b(findings?|match(es)?)\b").unwrap();
+        let left: Vec<&str> = all
+            .into_iter()
+            .filter(|text| english.is_match(&placeholder.replace_all(text, "")))
+            .collect();
+        assert!(left.is_empty(), "{left:#?}");
+    }
+
     /// Completeness test (ticket #48): the keys added to translate the
     /// remaining progress of the `scan` path ("Analyzing...", final
     /// summary, phase labels) must exist, non-empty, in
