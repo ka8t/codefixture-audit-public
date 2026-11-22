@@ -1101,7 +1101,7 @@ fn engine_finding_to_report(
     let (context_before, context_after) = if f.file_scope.is_some() {
         (String::new(), String::new())
     } else {
-        crate::report::text::context_lines(source_lines.iter(), f.line, 2)
+        crate::report::text::context_lines(|i| source_lines.get(i), f.line, 2)
     };
     ReportFinding {
         rule_key: f.rule_id.clone(),
@@ -1214,7 +1214,7 @@ fn taint_finding_to_report(
 ) -> ReportFinding {
     use crate::report::text::{clip_line, clip_lines, focus_of};
     let (context_before, context_after) =
-        crate::report::text::context_lines(source_lines.iter(), f.line, 2);
+        crate::report::text::context_lines(|i| source_lines.get(i), f.line, 2);
     let flow = build_taint_flow(f, rel_path, source_lines);
     // Actual code line displayed in the highlighted block — mirrors
     // `self._get_line_content(flow.sink_file, flow.sink_line)` on the
