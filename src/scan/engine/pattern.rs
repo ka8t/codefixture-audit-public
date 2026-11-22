@@ -156,17 +156,40 @@ fn match_start(re: &Regex, text: &str) -> Option<usize> {
 }
 
 /// Executes a regex rule against a file — one finding per
-/// match. Mirrors `execute()` (regex.py).
+/// match. Mirrors `execute()` (regex.py). The comments are stripped with
+/// the rule's `language`; see [`execute_regex_rule_on`] for lines
+/// stripped once and shared by the rules of a file.
 pub fn execute_regex_rule(rule: &CompiledRegexRule, all_lines: &[(usize, String)]) -> Vec<Finding> {
     if rule.patterns.is_empty() || all_lines.is_empty() {
         return Vec::new();
     }
-
-    let clean_lines = if COMMENT_STRIP_EXEMPT_RULES.contains(&rule.id.as_str()) {
+    let clean_lines = if keeps_comments(rule) {
         all_lines.to_vec()
     } else {
         strip_comments_from_lines(all_lines, &rule.language)
     };
+    execute_regex_rule_on(rule, all_lines, &clean_lines)
+}
+
+/// Whether the `pattern-not`/`with` checks of `rule` read the lines with
+/// their comments ([`COMMENT_STRIP_EXEMPT_RULES`]).
+pub fn keeps_comments(rule: &CompiledRegexRule) -> bool {
+    COMMENT_STRIP_EXEMPT_RULES.contains(&rule.id.as_str())
+}
+
+/// [`execute_regex_rule`] with the lines its `pattern-not`/`with` checks
+/// read already given: `all_lines` without their comments, or `all_lines`
+/// themselves for a rule that [`keeps_comments`]. The pattern pass strips
+/// a file's comments once and hands them to every rule of the file
+/// (ticket #248): each rule used to strip the whole file again.
+pub fn execute_regex_rule_on(
+    rule: &CompiledRegexRule,
+    all_lines: &[(usize, String)],
+    clean_lines: &[(usize, String)],
+) -> Vec<Finding> {
+    if rule.patterns.is_empty() || all_lines.is_empty() {
+        return Vec::new();
+    }
 
     let negative_patterns: Vec<&Regex> = rule
         .patterns

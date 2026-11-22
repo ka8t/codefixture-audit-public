@@ -9,7 +9,7 @@ use super::Finding;
 use super::file_contains::{
     FileLocation, execute_file_contains_rule, matches as file_contains_matches,
 };
-use super::pattern::execute_regex_rule;
+use super::pattern::execute_regex_rule_on;
 use super::rule_loader::{compile_file_contains_rule_from_json, compile_regex_rule_from_json};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -60,60 +60,150 @@ pub fn dispatch_rule(
     content: &str,
     syntax: &str,
 ) -> DispatchOutcome {
-    let regex_findings = || {
-        compile_regex_rule_from_json(rule_json)
-            .map(|mut r| {
-                r.language = syntax.to_string();
-                execute_regex_rule(&r, all_lines)
-            })
-            .unwrap_or_default()
-    };
+    run_prepared(
+        &prepare_rule(rule_json),
+        location,
+        &FileText::new(all_lines, content, syntax),
+    )
+}
+
+/// A rule compiled for the pattern pass ([`prepare_rule`]): what
+/// [`dispatch_rule`] decides from the rule alone, with its regexes and
+/// file conditions compiled.
+///
+/// The pattern pass prepares each rule once per scan and runs it on every
+/// file of its language (ticket #248). It used to compile the rule's
+/// regexes again for every file it read: on the 46,793 files of the
+/// Juliet Java suite, most of the scan time went to recompiling the same
+/// Java rules.
+pub struct PreparedRule {
+    kind: PreparedKind,
+}
+
+enum PreparedKind {
+    Ast,
+    Taint,
+    Hook,
+    /// `match` + `requires`: the patterns run only on a file the
+    /// conditions accept. `None` for a part that does not compile: the
+    /// rule then finds nothing, as before.
+    RegexIfFile(
+        Option<super::file_contains::CompiledFileContainsRule>,
+        Option<super::pattern::CompiledRegexRule>,
+    ),
+    /// `match` alone.
+    Regex(Option<super::pattern::CompiledRegexRule>),
+    /// `requires` alone: one finding for the whole file.
+    FileContains(Option<super::file_contains::CompiledFileContainsRule>),
+    /// Neither: no finding.
+    Nothing,
+}
+
+/// Compiles `rule_json` for the pattern pass, deciding its mode in the
+/// order [`dispatch_rule`] always used.
+pub fn prepare_rule(rule_json: &Value) -> PreparedRule {
     let mode = rule_json.get("mode").and_then(|v| v.as_str()).unwrap_or("");
     let has_patterns = is_truthy(rule_json.get("patterns"));
     let has_fc = is_truthy(rule_json.get("file_contains"));
     let has_hook = is_truthy(rule_json.get("hook"));
     let has_ast = is_truthy(rule_json.get("ast_patterns"));
+    let kind = if has_ast || mode == "ast" {
+        // AST: handled separately (needs the tree, not line-by-line).
+        PreparedKind::Ast
+    } else if (mode == "taint" || mode == "regex+taint") && !has_patterns {
+        // Taint: handled separately (cross-file).
+        PreparedKind::Taint
+    } else if has_hook {
+        // Hook: direct execution on the Python side, out of scope here.
+        PreparedKind::Hook
+    } else if has_patterns && has_fc {
+        PreparedKind::RegexIfFile(
+            compile_file_contains_rule_from_json(rule_json),
+            compile_regex_rule_from_json(rule_json),
+        )
+    } else if has_patterns {
+        PreparedKind::Regex(compile_regex_rule_from_json(rule_json))
+    } else if has_fc {
+        PreparedKind::FileContains(compile_file_contains_rule_from_json(rule_json))
+    } else {
+        PreparedKind::Nothing
+    };
+    PreparedRule { kind }
+}
 
-    // AST: handled separately (needs the tree, not line-by-line).
-    if has_ast || mode == "ast" {
-        return DispatchOutcome::Ast;
-    }
-    // Taint: handled separately (cross-file).
-    if (mode == "taint" || mode == "regex+taint") && !has_patterns {
-        return DispatchOutcome::Taint;
-    }
-    // Hook: direct execution on the Python side, out of scope here.
-    if has_hook {
-        return DispatchOutcome::Hook;
-    }
-    // match + requires combo: regex filtered by file conditions.
-    if has_patterns && has_fc {
-        let Some(compiled_fc) = compile_file_contains_rule_from_json(rule_json) else {
-            return DispatchOutcome::Findings(Vec::new());
-        };
-        if !file_contains_matches(
-            &compiled_fc.file_contains,
+/// The text of one file as the pattern rules read it: its numbered lines,
+/// its content, and its lines without comments, stripped on first use and
+/// shared by every rule of the file (ticket #248).
+pub struct FileText<'a> {
+    all_lines: &'a [(usize, String)],
+    content: &'a str,
+    /// The language whose comment syntax the file is written in: see
+    /// [`dispatch_rule`].
+    syntax: &'a str,
+    without_comments: std::cell::OnceCell<Vec<(usize, String)>>,
+}
+
+impl<'a> FileText<'a> {
+    pub fn new(all_lines: &'a [(usize, String)], content: &'a str, syntax: &'a str) -> Self {
+        Self {
+            all_lines,
             content,
-            Some(location),
-            all_lines.len(),
-        ) {
-            return DispatchOutcome::Findings(Vec::new());
+            syntax,
+            without_comments: std::cell::OnceCell::new(),
         }
-        return DispatchOutcome::Findings(regex_findings());
     }
-    // Regex only.
-    if has_patterns {
-        return DispatchOutcome::Findings(regex_findings());
+
+    /// The lines the `pattern-not`/`with` checks of `rule` read.
+    fn clean_lines(&self, rule: &super::pattern::CompiledRegexRule) -> &[(usize, String)] {
+        if super::pattern::keeps_comments(rule) {
+            return self.all_lines;
+        }
+        self.without_comments
+            .get_or_init(|| super::pattern::strip_comments_from_lines(self.all_lines, self.syntax))
     }
-    // file_contains only (file-level finding).
-    if has_fc {
-        let findings = compile_file_contains_rule_from_json(rule_json)
-            .and_then(|r| execute_file_contains_rule(&r, location, content, all_lines))
-            .into_iter()
-            .collect();
-        return DispatchOutcome::Findings(findings);
+}
+
+/// Runs a prepared rule on one file: the outcome [`dispatch_rule`] gives.
+pub fn run_prepared(
+    rule: &PreparedRule,
+    location: FileLocation<'_>,
+    file: &FileText<'_>,
+) -> DispatchOutcome {
+    let regex_findings = |compiled: &Option<super::pattern::CompiledRegexRule>| {
+        compiled
+            .as_ref()
+            .map(|r| execute_regex_rule_on(r, file.all_lines, file.clean_lines(r)))
+            .unwrap_or_default()
+    };
+    match &rule.kind {
+        PreparedKind::Ast => DispatchOutcome::Ast,
+        PreparedKind::Taint => DispatchOutcome::Taint,
+        PreparedKind::Hook => DispatchOutcome::Hook,
+        PreparedKind::RegexIfFile(conditions, regex) => {
+            let accepted = conditions.as_ref().is_some_and(|fc| {
+                file_contains_matches(
+                    &fc.file_contains,
+                    file.content,
+                    Some(location),
+                    file.all_lines.len(),
+                )
+            });
+            if accepted {
+                DispatchOutcome::Findings(regex_findings(regex))
+            } else {
+                DispatchOutcome::Findings(Vec::new())
+            }
+        }
+        PreparedKind::Regex(regex) => DispatchOutcome::Findings(regex_findings(regex)),
+        PreparedKind::FileContains(conditions) => DispatchOutcome::Findings(
+            conditions
+                .as_ref()
+                .and_then(|r| execute_file_contains_rule(r, location, file.content, file.all_lines))
+                .into_iter()
+                .collect(),
+        ),
+        PreparedKind::Nothing => DispatchOutcome::Findings(Vec::new()),
     }
-    DispatchOutcome::Findings(Vec::new())
 }
 
 // ============================================================================
@@ -182,6 +272,49 @@ mod tests {
             "python",
         );
         assert!(matches!(out, DispatchOutcome::Findings(_)));
+    }
+
+    /// Ticket #248: rules prepared once and run on one file through one
+    /// `FileText` (the comments stripped once for all of them) find what
+    /// each rule finds when it strips the file itself, for the rule that
+    /// keeps the comments too, and for a file in another comment syntax.
+    #[test]
+    fn test_prepared_rules_share_the_stripped_lines() {
+        let rules = [
+            json!({"id": "eval_not_safe", "patterns": [{"pattern": r"eval\(", "match": "line", "pattern-not": "safe"}]}),
+            json!({"id": "eval_with_todo", "patterns": [{"pattern": r"eval\(", "match": "file", "with": "TODO"}]}),
+            json!({"id": "gha_version_comment_missing", "patterns": [{"pattern": r"eval\(", "match": "line", "with": "TODO"}]}),
+            json!({"id": "near", "patterns": [{"pattern": r"open\(", "match": "context-2", "with": "close"}]}),
+        ];
+        for (content, syntax) in [
+            (
+                "x = eval(y)  # safe TODO\nopen(f)  # close\n/* close */ eval(z)\nf.close()\n",
+                "python",
+            ),
+            (
+                "x = eval(y); // safe TODO\nopen(f); /* close\n close */ eval(z);\nf.close();\n",
+                "java",
+            ),
+            (
+                "<!-- TODO eval( -->\neval(a) <!-- safe -->\nopen(f)\n<!-- close -->\n",
+                "html",
+            ),
+        ] {
+            let all_lines = lines(content);
+            let file = FileText::new(&all_lines, content, syntax);
+            for rule in &rules {
+                let prepared = run_prepared(&prepare_rule(rule), f_py(), &file);
+                let mut compiled = compile_regex_rule_from_json(rule).unwrap();
+                compiled.language = syntax.to_string();
+                let alone = super::super::pattern::execute_regex_rule(&compiled, &all_lines);
+                assert_eq!(
+                    prepared,
+                    DispatchOutcome::Findings(alone),
+                    "{} on {syntax}",
+                    rule["id"]
+                );
+            }
+        }
     }
 
     #[test]

@@ -28,7 +28,9 @@ use super::{ParsedFile, PassContext, engine_finding_to_report, phase_label};
 use crate::project::suppress::{Suppressions, is_inline_ignored};
 use crate::report::exports::sarif::ReportFinding;
 use crate::scan::engine::Finding;
-use crate::scan::engine::dispatch::{DispatchOutcome, dispatch_rule};
+use crate::scan::engine::dispatch::{
+    DispatchOutcome, FileText, PreparedRule, prepare_rule, run_prepared,
+};
 use crate::scan::engine::file_contains::governance_fingerprint;
 use crate::scan::scan_cache::{CacheStat, PatternCache, PatternFileState, sha256_hex};
 
@@ -59,9 +61,12 @@ pub(super) fn run_pattern_pass(
     let miss = loaded.as_ref().and_then(|r| r.as_ref().err().cloned());
     let previous = loaded.and_then(Result::ok);
 
+    // Every rule compiled once for the whole pass (ticket #248), then run
+    // on each file of its language.
+    let prepared: Vec<PreparedRule> = rule_jsons.par_iter().map(prepare_rule).collect();
     let runs: Vec<FileRun> = parsed_files
         .par_iter()
-        .map(|pf| run_file(pf, rule_jsons, &governance, previous.as_ref()))
+        .map(|pf| run_file(pf, rule_jsons, &prepared, &governance, previous.as_ref()))
         .collect();
     let (config, suppressions) = (context.config, context.suppressions);
     let reportable: Vec<Vec<ReportFinding>> = parsed_files
@@ -138,6 +143,7 @@ struct FileRun {
 fn run_file(
     pf: &ParsedFile,
     rule_jsons: &[serde_json::Value],
+    prepared: &[PreparedRule],
     governance: &[String],
     previous: Option<&PatternCache>,
 ) -> FileRun {
@@ -160,7 +166,7 @@ fn run_file(
         state: PatternFileState {
             hash,
             governance,
-            findings: rules_on_file(pf, rule_jsons),
+            findings: rules_on_file(pf, rule_jsons, prepared),
         },
         redone: true,
     }
@@ -174,13 +180,20 @@ fn run_file(
 /// `path_contains`: a Java rule written for `.java` code has no business
 /// on a `pom.xml`. Its comments are stripped with its own syntax (XML or
 /// none), not with the rule language's.
-fn rules_on_file(pf: &ParsedFile, rule_jsons: &[serde_json::Value]) -> Vec<(usize, Finding)> {
+fn rules_on_file(
+    pf: &ParsedFile,
+    rule_jsons: &[serde_json::Value],
+    prepared: &[PreparedRule],
+) -> Vec<(usize, Finding)> {
     let mut findings = Vec::new();
     let syntax = pf.language.comment_syntax();
     // The numbered lines the pattern rules read, built when the first
     // rule of the file's language reaches it and dropped with this
-    // call: the scan keeps one copy of each text (ticket #241).
-    let mut numbered_lines = None;
+    // call: the scan keeps one copy of each text (ticket #241). With them,
+    // the lines without comments, stripped once for every rule of the
+    // file (ticket #248).
+    let numbered_lines = std::cell::OnceCell::new();
+    let mut file_text = None;
     for (index, rule_json) in rule_jsons.iter().enumerate() {
         if rule_json.get("language").and_then(|v| v.as_str()) != Some(pf.language.rule_tag()) {
             continue;
@@ -188,13 +201,15 @@ fn rules_on_file(pf: &ParsedFile, rule_jsons: &[serde_json::Value]) -> Vec<(usiz
         if pf.language.is_config_file() && !names_a_path(rule_json) {
             continue;
         }
-        let DispatchOutcome::Findings(found) = dispatch_rule(
-            rule_json,
-            pf.location(),
-            numbered_lines.get_or_insert_with(|| pf.source.numbered_lines()),
-            pf.source.text(),
-            syntax,
-        ) else {
+        let text = file_text.get_or_insert_with(|| {
+            FileText::new(
+                numbered_lines.get_or_init(|| pf.source.numbered_lines()),
+                pf.source.text(),
+                syntax,
+            )
+        });
+        let DispatchOutcome::Findings(found) = run_prepared(&prepared[index], pf.location(), text)
+        else {
             continue; // Taint/Ast/Hook: handled elsewhere (phase C) or out of scope.
         };
         findings.extend(found.into_iter().map(|f| (index, f)));
