@@ -13,6 +13,7 @@ use serde_json::Value;
 
 use super::file_contains::{CompiledFileContainsRule, FileContainsCondition};
 use super::pattern::{CompiledPattern, CompiledRegexRule};
+use super::pattern_regex::PatternRegex;
 
 fn json_str<'a>(v: &'a Value, key: &str, default: &'a str) -> &'a str {
     v.get(key).and_then(|x| x.as_str()).unwrap_or(default)
@@ -73,9 +74,9 @@ pub fn compile_regex_rule_from_json(rule_json: &Value) -> Option<CompiledRegexRu
         // inline equivalent of `re.DOTALL`; `line`/`file` keep flags = 0.
         let compile = |s: &str| {
             if match_scope.starts_with("context-") {
-                Regex::new(&format!("(?s){s}"))
+                PatternRegex::new(&format!("(?s){s}"))
             } else {
-                Regex::new(s)
+                PatternRegex::new(s)
             }
         };
         let Ok(compiled) = compile(pattern_text) else {

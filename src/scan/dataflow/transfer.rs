@@ -225,6 +225,36 @@ fn discard_sinks_failing_raw_regex(
     *findings = kept;
 }
 
+/// True when the line compares the call of one of the rule's
+/// sanitizers to the value of a failed check, `strpos($p, $base) !== 0`
+/// or `p.startsWith(base) == false` (ticket #250): the guard written
+/// without `!` or `not`. `calls` holds the `(` of the calls the line
+/// compares so (`GuardFacts::failure_compared_calls`); a sanitizer match
+/// names the call whose `(` it holds last (`\.startsWith\s*\(`), or the
+/// `(` that follows it (`re\.match`).
+fn sanitizer_compared_to_failure(line: &str, specs: &RuleSpecs, calls: &[usize]) -> bool {
+    if calls.is_empty() {
+        return false;
+    }
+    specs
+        .sanitizers
+        .iter()
+        .filter_map(|san| san.raw_regex.as_ref())
+        .any(|rx| {
+            rx.find_iter(line).flatten().any(|m| {
+                let paren = match m.as_str().rfind('(') {
+                    Some(offset) => Some(m.start() + offset),
+                    None => {
+                        let after = &line[m.end()..];
+                        let gap = after.len() - after.trim_start().len();
+                        after[gap..].starts_with('(').then_some(m.end() + gap)
+                    }
+                };
+                paren.is_some_and(|paren| calls.contains(&paren))
+            })
+        })
+}
+
 /// Auxiliary regex matching against the raw source line (§10bis).
 /// For each sink/sanitizer/source spec carrying a `raw_regex`, tests
 /// against the statement's source line; on a match, triggers the
@@ -329,10 +359,17 @@ fn aux_match_line(
         }
         let has_negation = line_guard.has_not_or_in || line_guard.negation_bang;
         // `if `/`elif ` or `if(`: `starts_brace_if` adds `if(`, its
-        // `if (` is already an `if `.
+        // `if (` is already an `if `. A check compared to its failure
+        // value (`strpos($p, $base) !== 0`) is a negation too, read last
+        // because it searches the sanitizers again (ticket #250).
         let is_guard = (line_guard.starts_python_if || line_guard.starts_brace_if)
-            && has_negation
-            && (terminator_nearby || reassign_var.is_some());
+            && (terminator_nearby || reassign_var.is_some())
+            && (has_negation
+                || sanitizer_compared_to_failure(
+                    line_text,
+                    specs,
+                    &line_guard.failure_compared_calls,
+                ));
         if is_guard {
             if terminator_nearby {
                 let line_text_no_lit = source_lines
@@ -2488,6 +2525,47 @@ mod tests {
             &RuleLines::new(&source_lines, &specs),
         );
         assert!(!state_get(&new_state, "bar").is_tainted());
+    }
+
+    /// Ticket #250: a check compared to its failure value is a guard,
+    /// whatever side the comparison is written on; compared to the value
+    /// of a success, it is not, and the variable stays tainted.
+    #[test]
+    fn test_aux_match_line_guard_compared_to_failure_value() {
+        let mut specs = specs_with(vec![], vec![]);
+        specs.sanitizers.push(
+            SanitizerSpec::new("starts").with_raw_regex(Regex::new(r"\.startsWith\s*\(").unwrap()),
+        );
+        specs.sanitizers.push(
+            SanitizerSpec::new("strpos")
+                .with_raw_regex(Regex::new(r"\bif\s*\(.*\bstrpos\s*\(").unwrap()),
+        );
+        // The guard clears the tainted variables its line names.
+        let cleared = |condition: &str, variable: &str| {
+            let source_lines: SourceLines = [condition.to_string(), "    return;".to_string()]
+                .into_iter()
+                .collect();
+            let mut state = state_set(&empty_state(), variable, tainted("http", 1));
+            let stmt = IrStmt::Branch {
+                condition: Rhs::Const(ConstValue::Bool(true)),
+                lineno: 1,
+            };
+            aux_match_line(
+                &stmt,
+                &mut state,
+                &specs,
+                &mut Vec::new(),
+                &RuleLines::new(&source_lines, &specs),
+            );
+            !state_get(&state, variable).is_tainted()
+        };
+        assert!(cleared("if (p.startsWith(base) == false) {", "p"));
+        assert!(cleared("if (strpos($p, $base) !== 0) {", "$p"));
+        assert!(cleared("if (0 !== strpos($p, $base)) {", "$p"));
+        assert!(!cleared("if (p.startsWith(base) == true) {", "p"));
+        assert!(!cleared("if (strpos($p, $base) === 0) {", "$p"));
+        // The comparison is on another call than the sanitizer's.
+        assert!(!cleared("if (size(p) != 0 && p.startsWith(base)) {", "p"));
     }
 
     /// Ticket #157: a PHP guard that reassigns the variable to a literal

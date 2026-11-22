@@ -82,6 +82,168 @@ fn has_negation_bang(text: &str) -> bool {
         .any(|(i, &b)| b == b'!' && bytes.get(i + 1) != Some(&b'='))
 }
 
+/// How a call result is compared in a condition (ticket #250).
+#[derive(Clone, Copy)]
+enum Comparison {
+    /// `==`, `===`, Python `is`.
+    Equal,
+    /// `!=`, `!==`, Python `is not`.
+    NotEqual,
+}
+
+/// The values a failed check returns: `false` for a boolean test,
+/// `None`/`null` for a match that found nothing (`re.match(...) is
+/// None`). Compared case-insensitively (`False`, `NULL`).
+fn is_failure_value(operand: &str) -> bool {
+    ["false", "none", "null"]
+        .iter()
+        .any(|value| operand.eq_ignore_ascii_case(value))
+}
+
+/// A byte that belongs to a comparison operand (`0`, `false`, `$base`,
+/// `self.base`, `'/var'`, `-1`).
+fn is_operand_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || matches!(b, b'_' | b'$' | b'.' | b'\'' | b'"' | b'-')
+}
+
+/// True when a comparison of a check's result with `operand` holds when
+/// the check failed: equal to a failure value (`=== false`, `is None`),
+/// or different from anything else (`!== 0`, `!= base`, `!= true`).
+fn compares_to_failure(comparison: Comparison, operand: &str) -> bool {
+    match comparison {
+        Comparison::Equal => is_failure_value(operand),
+        Comparison::NotEqual => !operand.is_empty() && !is_failure_value(operand),
+    }
+}
+
+/// The comparison written right after a call's `)`, `rest` being the
+/// text that follows it: `!== 0`, `=== false`, `is not None`,
+/// `!= base`. The operand is the token that follows the operator.
+fn compared_after(rest: &str) -> bool {
+    let rest = rest.trim_start();
+    // Longest operator first: `===` before `==`, `is not` before `is`.
+    let operators = [
+        ("!==", Comparison::NotEqual),
+        ("===", Comparison::Equal),
+        ("!=", Comparison::NotEqual),
+        ("==", Comparison::Equal),
+        ("is not ", Comparison::NotEqual),
+        ("is ", Comparison::Equal),
+    ];
+    let Some((operator, comparison)) = operators.iter().find(|(op, _)| rest.starts_with(op)) else {
+        return false;
+    };
+    let operand = rest[operator.len()..].trim_start();
+    let end = operand
+        .bytes()
+        .position(|b| !is_operand_byte(b))
+        .unwrap_or(operand.len());
+    compares_to_failure(*comparison, &operand[..end])
+}
+
+/// The comparison written before a call (the "Yoda" order PHP code
+/// favors), `before` being the text up to the callee name: `0 !==
+/// strpos(...)`, `false === str_starts_with(...)`.
+fn compared_before(before: &str) -> bool {
+    let before = before.trim_end();
+    let operators = [
+        ("!==", Comparison::NotEqual),
+        ("===", Comparison::Equal),
+        ("!=", Comparison::NotEqual),
+        ("==", Comparison::Equal),
+    ];
+    let Some((operator, comparison)) = operators.iter().find(|(op, _)| before.ends_with(op)) else {
+        return false;
+    };
+    let operand = before[..before.len() - operator.len()].trim_end();
+    let start = operand
+        .bytes()
+        .rposition(|b| !is_operand_byte(b))
+        .map_or(0, |i| i + 1);
+    compares_to_failure(*comparison, &operand[start..])
+}
+
+/// Start of the callee written before the `(` at `open`: the name and
+/// its receiver (`$this->path.startsWith`, `os.path.commonpath`,
+/// `\strpos`), so that what comes before it is the comparison of a Yoda
+/// condition.
+fn callee_start(bytes: &[u8], open: usize) -> usize {
+    let mut start = open;
+    while start > 0 && bytes[start - 1].is_ascii_whitespace() {
+        start -= 1;
+    }
+    loop {
+        match bytes[..start] {
+            [.., b'-', b'>'] => start -= 2,
+            [.., b]
+                if b.is_ascii_alphanumeric() || matches!(b, b'_' | b'$' | b'.' | b':' | b'\\') =>
+            {
+                start -= 1
+            }
+            _ => return start,
+        }
+    }
+}
+
+/// Byte offsets of the `(` of every call whose result the line compares
+/// to the value of a failed check (ticket #250): `strpos($p, $base) !==
+/// 0`, `p.startsWith(base) == false`, `os.path.commonpath([base, p]) !=
+/// base`, `re.match(...) is None`, `false === str_starts_with(...)`.
+///
+/// Such a comparison is the negation of the check written without `!`
+/// or `not`: a guard whose body leaves the function when the check fails.
+/// The engine reads it on the call of a sanitizer only
+/// (`transfer::sanitizer_compared_to_failure`), not anywhere on the line
+/// as the `!` negation is: `if (p != null && p.startsWith(base))` holds
+/// when the check succeeded, and its `!=` is not a negation of it.
+///
+/// Calls are found by pairing the parentheses of the line, string
+/// literals skipped (a `)` inside quotes closes nothing). A `(` is a call
+/// when a name ends right before it; the `(` of the `if` itself is never
+/// followed by a comparison. Deliberate deviation from the Audit, whose
+/// dataflow engine only took `not`/`in` and a `!` not followed by `=` as
+/// the negation of a guard.
+fn failure_compared_calls(text: &str) -> Vec<usize> {
+    let bytes = text.as_bytes();
+    let mut open_parens: Vec<usize> = Vec::new();
+    let mut calls = Vec::new();
+    let mut quote: Option<u8> = None;
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if let Some(q) = quote {
+            if b == b'\\' {
+                // The escaped byte is skipped with the backslash.
+                i += 2;
+                continue;
+            }
+            if b == q {
+                quote = None;
+            }
+        } else {
+            match b {
+                b'"' | b'\'' | b'`' => quote = Some(b),
+                b'(' => open_parens.push(i),
+                b')' => {
+                    if let Some(open) = open_parens.pop() {
+                        let start = callee_start(bytes, open);
+                        // A name between the callee start and the `(`.
+                        let is_call = bytes[start..open].iter().any(|b| !b.is_ascii_whitespace());
+                        if is_call
+                            && (compared_after(&text[i + 1..]) || compared_before(&text[..start]))
+                        {
+                            calls.push(open);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        i += 1;
+    }
+    calls
+}
+
 /// Reassignment to a literal inside a guard
 /// `if (!check(x)) x = "literal";` (same physical line as the if).
 /// The PHP `$` is part of the captured name: the PHP engine keeps it in
@@ -624,6 +786,10 @@ pub struct GuardFacts {
     pub reassign_same_line: Option<String>,
     /// Variable reset to a literal by the whole line.
     pub reassign_next_line: Option<String>,
+    /// Byte offsets of the `(` of the calls an `if` line compares to the
+    /// value of a failed check (`strpos($p, $base) !== 0`), see
+    /// [`failure_compared_calls`]; empty on any other line. Ticket #250.
+    pub failure_compared_calls: Vec<usize>,
 }
 
 #[cfg(test)]
@@ -642,17 +808,25 @@ impl GuardFacts {
             rx.captures(text)
                 .and_then(|caps| caps.get(1).map(|m| m.as_str().to_string()))
         };
+        let starts_python_if = stripped.starts_with("if ") || stripped.starts_with("elif ");
+        let starts_brace_if = stripped.starts_with("if (") || stripped.starts_with("if(");
         Self {
             indent: text.len() - stripped.len(),
             is_blank: text.trim().is_empty(),
-            starts_python_if: stripped.starts_with("if ") || stripped.starts_with("elif "),
-            starts_brace_if: stripped.starts_with("if (") || stripped.starts_with("if("),
+            starts_python_if,
+            starts_brace_if,
             has_not_or_in: text.contains(" not ") || text.contains(" in "),
             negation_bang: has_negation_bang(text),
             terminator: GUARD_TERMINATOR_RE.is_match(text),
             terminator_same_line: GUARD_TERMINATOR_SAMELINE_RE.is_match(text),
             reassign_same_line: capture(&GUARD_REASSIGN_SAMELINE_RE),
             reassign_next_line: capture(&GUARD_REASSIGN_NEXTLINE_RE),
+            // Only a condition is read for its comparisons.
+            failure_compared_calls: if starts_python_if || starts_brace_if {
+                failure_compared_calls(text)
+            } else {
+                Vec::new()
+            },
         }
     }
 }
@@ -1134,6 +1308,16 @@ mod tests {
             terminator_same_line: matches(&former.terminator_same_line, text),
             reassign_same_line: capture(&former.reassign_same_line),
             reassign_next_line: capture(&former.reassign_next_line),
+            // No former engine: the comparisons are new (ticket #250),
+            // computed as `compute` does.
+            failure_compared_calls: if stripped.starts_with("if ")
+                || stripped.starts_with("elif ")
+                || stripped.starts_with("if(")
+            {
+                failure_compared_calls(text)
+            } else {
+                Vec::new()
+            },
         };
         let literals = &former.literals;
         let mut without = String::new();
@@ -1164,6 +1348,74 @@ mod tests {
             without,
             "literals of {text:?}"
         );
+    }
+
+    /// Ticket #250: the calls an `if` line compares to the value of a
+    /// failed check, by the offset of their `(`; a comparison that holds
+    /// when the check succeeded names no call.
+    #[test]
+    fn test_failure_compared_calls() {
+        fn compared(text: &str) -> Vec<&str> {
+            GuardFacts::compute(text)
+                .failure_compared_calls
+                .iter()
+                .map(|&open| {
+                    let start = callee_start(text.as_bytes(), open);
+                    &text[start..open]
+                })
+                .collect()
+        }
+        // Compared to a failure value, after or before the call.
+        assert_eq!(
+            compared("if (strpos($path, $base) !== 0) { exit; }"),
+            ["strpos"]
+        );
+        assert_eq!(
+            compared("if (strpos($path, $base) === false) exit;"),
+            ["strpos"]
+        );
+        assert_eq!(
+            compared("if (0 !== strpos($path, $base)) exit;"),
+            ["strpos"]
+        );
+        assert_eq!(
+            compared("if (false === \\str_starts_with($p, $b)) exit;"),
+            ["\\str_starts_with"]
+        );
+        assert_eq!(
+            compared("if os.path.commonpath([base, path]) != base:"),
+            ["os.path.commonpath"]
+        );
+        assert_eq!(
+            compared("if (path.startsWith(base) == false) throw new X();"),
+            ["path.startsWith"]
+        );
+        assert_eq!(
+            compared("if re.match(r'^[a-z]+$', name) is None:"),
+            ["re.match"]
+        );
+        assert_eq!(compared("if f(x) is not True: return"), ["f"]);
+        assert_eq!(
+            compared("if ($this->p->starts($b) == FALSE) exit;"),
+            ["$this->p->starts"]
+        );
+        // Nested call: only the compared one.
+        assert_eq!(
+            compared("if (strpos(realpath($p), $base) !== 0) exit;"),
+            ["strpos"]
+        );
+        // Compared to the value of a check that succeeded.
+        assert!(compared("if (strpos($p, $base) === 0) { include $p; }").is_empty());
+        assert!(compared("if (strpos($p, '..') !== false) exit;").is_empty());
+        assert!(compared("if (p.startsWith(base) == true) return;").is_empty());
+        assert!(compared("if m(x) is not None: return").is_empty());
+        // A comparison that is not on a call result.
+        assert!(compared("if (p != null && p.startsWith(base)) return;").is_empty());
+        assert!(compared("if (a !== b) { $next = '/'; }").is_empty());
+        // A `)` inside a literal closes nothing.
+        assert_eq!(compared("if (f(\")\") != 'x') return;"), ["f"]);
+        // Only a condition is read.
+        assert!(compared("ok = f(x) != 0").is_empty());
     }
 
     /// Ticket #240: the `regex` crate and the byte search give the

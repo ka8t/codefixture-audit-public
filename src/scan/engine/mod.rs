@@ -11,6 +11,7 @@ pub mod ast_matcher;
 pub mod dispatch;
 pub mod file_contains;
 pub mod pattern;
+pub mod pattern_regex;
 pub mod rule_loader;
 pub mod taint;
 

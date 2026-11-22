@@ -9,7 +9,7 @@
 //! line numbers.
 
 use super::Finding;
-use fancy_regex::Regex;
+use super::pattern_regex::PatternRegex;
 use std::collections::BTreeMap;
 
 /// A rule whose pattern (as well as `with`/`pattern-not`) is already
@@ -26,11 +26,13 @@ pub struct CompiledRegexRule {
     pub patterns: Vec<CompiledPattern>,
 }
 
+/// One pattern of a rule, its `with` and `pattern-not` compiled with
+/// their prefilter ([`PatternRegex`], ticket #251).
 pub struct CompiledPattern {
     pub match_scope: String,
-    pub compiled: Regex,
-    pub compiled_with: Option<Regex>,
-    pub compiled_pattern_not: Option<Regex>,
+    pub compiled: PatternRegex,
+    pub compiled_with: Option<PatternRegex>,
+    pub compiled_pattern_not: Option<PatternRegex>,
 }
 
 /// Rules whose `pattern-not`/`with` legitimately depends on the comment
@@ -145,13 +147,13 @@ fn strip_line_comment(text: &str, marker: &str) -> String {
     }
 }
 
-fn is_match(re: &Regex, text: &str) -> bool {
+fn is_match(re: &PatternRegex, text: &str) -> bool {
     re.is_match(text).unwrap_or(false)
 }
 
 /// Byte offset where `re` first matches in `text`, `None` when it does
 /// not match (or fails, like [`is_match`]): the column of a finding.
-fn match_start(re: &Regex, text: &str) -> Option<usize> {
+fn match_start(re: &PatternRegex, text: &str) -> Option<usize> {
     re.find(text).ok().flatten().map(|m| m.start())
 }
 
@@ -191,7 +193,7 @@ pub fn execute_regex_rule_on(
         return Vec::new();
     }
 
-    let negative_patterns: Vec<&Regex> = rule
+    let negative_patterns: Vec<&PatternRegex> = rule
         .patterns
         .iter()
         .filter_map(|p| p.compiled_pattern_not.as_ref())
@@ -352,7 +354,7 @@ mod tests {
             language: "python".to_string(),
             patterns: vec![CompiledPattern {
                 match_scope: scope.to_string(),
-                compiled: Regex::new(pattern).unwrap(),
+                compiled: PatternRegex::new(pattern).unwrap(),
                 compiled_with: None,
                 compiled_pattern_not: None,
             }],
@@ -371,7 +373,7 @@ mod tests {
     #[test]
     fn test_line_scope_with_condition_filters() {
         let mut rule = simple_rule(r"password\s*=", "line");
-        rule.patterns[0].compiled_with = Some(Regex::new(r#""[^"]{8,}""#).unwrap());
+        rule.patterns[0].compiled_with = Some(PatternRegex::new(r#""[^"]{8,}""#).unwrap());
         let all_lines = lines(&["password = short", r#"password = "longenoughvalue""#]);
         let findings = execute_regex_rule(&rule, &all_lines);
         assert_eq!(findings.len(), 1);
@@ -384,7 +386,7 @@ mod tests {
         // would be stripped before the pattern-not check — cf.
         // test_comment_stripped_before_pattern_not_check).
         let mut rule = simple_rule(r"\.execute\(", "line");
-        rule.patterns[0].compiled_pattern_not = Some(Regex::new(r"parameterized").unwrap());
+        rule.patterns[0].compiled_pattern_not = Some(PatternRegex::new(r"parameterized").unwrap());
         let all_lines = lines(&["cursor.execute(parameterized_query)"]);
         let findings = execute_regex_rule(&rule, &all_lines);
         assert!(findings.is_empty());
@@ -396,7 +398,7 @@ mod tests {
         // must NOT suppress the finding (comment stripping
         // applies to pattern-not, so the word disappears there).
         let mut rule = simple_rule(r"eval\(", "line");
-        rule.patterns[0].compiled_pattern_not = Some(Regex::new(r"safe_context").unwrap());
+        rule.patterns[0].compiled_pattern_not = Some(PatternRegex::new(r"safe_context").unwrap());
         let all_lines = lines(&["eval(x)  # safe_context supposedly"]);
         let findings = execute_regex_rule(&rule, &all_lines);
         assert_eq!(findings.len(), 1);
@@ -407,7 +409,7 @@ mod tests {
         // "ALLOW_TODO" in real code, not inside a Python "#" comment
         // (which would be stripped before the pattern-not check).
         let mut rule = simple_rule(r"TODO", "file");
-        rule.patterns[0].compiled_pattern_not = Some(Regex::new(r"ALLOW_TODO").unwrap());
+        rule.patterns[0].compiled_pattern_not = Some(PatternRegex::new(r"ALLOW_TODO").unwrap());
         let all_lines = lines(&["ALLOW_TODO = True", "x = 1  # TODO fix this"]);
         let findings = execute_regex_rule(&rule, &all_lines);
         assert!(findings.is_empty());
@@ -454,7 +456,7 @@ mod tests {
     fn test_exempt_rule_skips_comment_stripping() {
         let mut rule = simple_rule(r"v4", "line");
         rule.id = "gha_version_comment_missing".to_string();
-        rule.patterns[0].compiled_pattern_not = Some(Regex::new(r"pinned").unwrap());
+        rule.patterns[0].compiled_pattern_not = Some(PatternRegex::new(r"pinned").unwrap());
         rule.language = "yaml".to_string();
         // The "pinned" keyword is inside a YAML comment (#) — without
         // the exemption, it would be stripped by the cleanup and
