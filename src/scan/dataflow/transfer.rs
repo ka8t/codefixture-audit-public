@@ -537,7 +537,7 @@ pub enum SpecKind {
     Unknown,
 }
 
-/// Compiles an SCA glob pattern into an anchored regex (§7.1).
+/// Compiles an SCA glob pattern (§7.1).
 ///
 /// Supported syntax:
 ///   - `foo`        : exact match
@@ -548,34 +548,52 @@ pub enum SpecKind {
 ///
 /// `*` does not cross dots; `**` does.
 ///
-/// A pattern without `*` is compared by string equality, the others run
-/// on the `regex` crate: the `fancy_regex` regexes they used to be took
-/// about 6 % of the taint time of a C# scan, for patterns that never need
-/// a look-around (ticket #240). Same answers: `^<escaped>$` matches
-/// exactly the name itself, and `fancy_regex` handed these patterns to
-/// the `regex` crate. `test_glob_engines_agree` keeps the former regex
-/// as the oracle.
+/// A pattern without `*` is compared by string equality (ticket #240).
+/// The others are matched by [`GlobPattern::is_match`] directly, without
+/// a regex (ticket #246): their regex (`^.*\.execute$`) ran for every call
+/// name, every spec and every fixpoint iteration, about a tenth of the CPU
+/// of a Java scan in the regex engine, for names of a few dozen bytes.
+/// Same answers as the anchored regex `compile_glob_pattern` built (`**`
+/// as `.*`, `*` as `[^.]*`, the rest literal): `test_glob_engines_agree`
+/// keeps the former `fancy_regex` glob as the oracle.
 pub fn compile_glob_pattern(pattern: &str) -> GlobPattern {
     if !pattern.contains('*') {
         return GlobPattern::Exact(pattern.to_string());
     }
-    let mut out = String::new();
-    let chars: Vec<char> = pattern.chars().collect();
-    let mut i = 0;
-    while i < chars.len() {
-        let c = chars[i];
-        if c == '*' && i + 1 < chars.len() && chars[i + 1] == '*' {
-            out.push_str(".*");
-            i += 2;
-        } else if c == '*' {
-            out.push_str("[^.]*");
-            i += 1;
+    let mut tokens = Vec::new();
+    let mut literal = String::new();
+    let mut chars = pattern.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '*' {
+            literal.push(c);
+            continue;
+        }
+        if !literal.is_empty() {
+            tokens.push(GlobToken::Literal(std::mem::take(&mut literal)));
+        }
+        if chars.peek() == Some(&'*') {
+            chars.next();
+            tokens.push(GlobToken::AnyDepth);
         } else {
-            out.push_str(&regex::escape(&c.to_string()));
-            i += 1;
+            tokens.push(GlobToken::OneSegment);
         }
     }
-    GlobPattern::Wildcard(regex::Regex::new(&format!("^{out}$")).expect("regex glob valide"))
+    if !literal.is_empty() {
+        tokens.push(GlobToken::Literal(literal));
+    }
+    GlobPattern::Wildcard(tokens)
+}
+
+/// One piece of a wildcard pattern ([`GlobPattern::Wildcard`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GlobToken {
+    /// Text that must appear as written.
+    Literal(String),
+    /// `*`: any text without a dot (the regex `[^.]*`, which also takes
+    /// a line break).
+    OneSegment,
+    /// `**`: any text without a line break (the regex `.*`).
+    AnyDepth,
 }
 
 /// A compiled SCA glob pattern ([`compile_glob_pattern`]).
@@ -583,8 +601,8 @@ pub fn compile_glob_pattern(pattern: &str) -> GlobPattern {
 pub enum GlobPattern {
     /// A pattern without `*`: the name itself.
     Exact(String),
-    /// A pattern with `*` or `**`, as an anchored regex.
-    Wildcard(regex::Regex),
+    /// A pattern with `*` or `**`, as its pieces in order.
+    Wildcard(Vec<GlobToken>),
 }
 
 impl GlobPattern {
@@ -592,7 +610,55 @@ impl GlobPattern {
     pub fn is_match(&self, name: &str) -> bool {
         match self {
             GlobPattern::Exact(exact) => name == exact,
-            GlobPattern::Wildcard(regex) => regex.is_match(name),
+            GlobPattern::Wildcard(tokens) => glob_match(tokens, name),
+        }
+    }
+}
+
+/// Whether `tokens` cover the whole of `text`. A star tries every length
+/// its class allows, shortest first: the patterns of the rules hold one to
+/// three stars and the names a few dozen bytes, so the search stays
+/// small.
+fn glob_match(tokens: &[GlobToken], text: &str) -> bool {
+    let Some((first, rest)) = tokens.split_first() else {
+        return text.is_empty();
+    };
+    match first {
+        GlobToken::Literal(literal) => text
+            .strip_prefix(literal.as_str())
+            .is_some_and(|after| glob_match(rest, after)),
+        GlobToken::OneSegment | GlobToken::AnyDepth => {
+            let stop = if *first == GlobToken::OneSegment {
+                '.'
+            } else {
+                '\n'
+            };
+            // The shapes of nearly every rule pattern, answered without
+            // trying every length: a star at the end takes the rest of the
+            // text, a star before a last literal takes the text before
+            // that suffix (`**.execute`, `*.GET`).
+            match rest {
+                [] => return !text.contains(stop),
+                [GlobToken::Literal(suffix)] => {
+                    return text
+                        .strip_suffix(suffix.as_str())
+                        .is_some_and(|before| !before.contains(stop));
+                }
+                _ => {}
+            }
+            // Every end of the star's text: before each character it may
+            // take, and after the last one it takes.
+            let ends = text
+                .char_indices()
+                .take_while(|&(_, c)| c != stop)
+                .map(|(at, _)| at)
+                .chain(std::iter::once(text.find(stop).unwrap_or(text.len())));
+            for end in ends {
+                if glob_match(rest, &text[end..]) {
+                    return true;
+                }
+            }
+            false
         }
     }
 }
@@ -1944,12 +2010,25 @@ mod tests {
     }
 
     /// The glob compiled as before ticket #240: an anchored
-    /// `fancy_regex` regex, `^<escaped>$` for a pattern without `*`.
+    /// `fancy_regex` regex, `**` as `.*`, `*` as `[^.]*`, every other
+    /// character escaped.
     fn former_glob(pattern: &str) -> Regex {
-        match compile_glob_pattern(pattern) {
-            GlobPattern::Exact(_) => Regex::new(&format!("^{}$", regex::escape(pattern))).unwrap(),
-            GlobPattern::Wildcard(regex) => Regex::new(regex.as_str()).unwrap(),
+        let mut out = String::new();
+        let chars: Vec<char> = pattern.chars().collect();
+        let mut i = 0;
+        while i < chars.len() {
+            if chars[i] == '*' && chars.get(i + 1) == Some(&'*') {
+                out.push_str(".*");
+                i += 2;
+            } else if chars[i] == '*' {
+                out.push_str("[^.]*");
+                i += 1;
+            } else {
+                out.push_str(&regex::escape(&chars[i].to_string()));
+                i += 1;
+            }
         }
+        Regex::new(&format!("^{out}$")).unwrap()
     }
 
     /// Ticket #240: the string equality and the `regex` crate give the
@@ -1967,6 +2046,12 @@ mod tests {
             "$_GET".to_string(),
             "x[*]".to_string(),
             "é.*".to_string(),
+            "***.x".to_string(),
+            "*.*".to_string(),
+            "**.**".to_string(),
+            "a*b".to_string(),
+            "*\n*".to_string(),
+            "x.*".to_string(),
         ]);
     }
 
@@ -1984,6 +2069,10 @@ mod tests {
             "a..b".to_string(),
             "x.y\n".to_string(),
             "é.ü".to_string(),
+            "a\nb.x".to_string(),
+            "\n.x".to_string(),
+            "ab".to_string(),
+            "a.b.c.d.e".to_string(),
         ];
         for pattern in &patterns {
             for name in [
