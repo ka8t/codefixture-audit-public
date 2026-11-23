@@ -233,28 +233,47 @@ fn discard_sinks_failing_raw_regex(
 /// written as a comparison (ticket #250) and the check passed on the
 /// TRUE edge of a branch (`passed_check.rs`, ticket #252).
 ///
-/// A match covers the text once: a pattern that spans several calls
-/// (`\bif\s*\(.*\bstrpos\s*\(` on `if (strpos($a, $b) === 0 &&
-/// strpos($c, $d) === 0)`) names only the last one, its greedy `.*`
-/// running to the last `strpos(`.
+/// The patterns are read twice (ticket #254):
+///
+/// - on the whole line: a pattern that goes on after the `(` of its call
+///   (`filter_var\s*\([^)]*FILTER_SANITIZE`) only matches there;
+/// - on the line up to `paren`, its `(` included: a match covers the text
+///   once, so on the whole line a pattern that spans several calls
+///   (`\bif\s*\(.*\bstrpos\s*\(` on `if (strpos($a, $b) === 0 &&
+///   strpos($c, $d) === 0)`) names only the last one, its greedy `.*`
+///   running to the last `strpos(`. Cut at the first call, it names that
+///   one.
+///
+/// The cut text gives the same answer as the whole line for a pattern
+/// that reads nothing after the end of its match: no look-ahead, no `$`,
+/// no trailing `\b` (a sanitizer of the catalog never has one, checked by
+/// `test_sanitizers_read_nothing_after_their_match`).
 pub(crate) fn sanitizer_names_call(line: &str, specs: &RuleSpecs, paren: usize) -> bool {
+    let up_to_paren = line.get(..=paren);
     specs
         .sanitizers
         .iter()
         .filter_map(|san| san.raw_regex.as_ref())
         .any(|rx| {
-            rx.find_iter(line).flatten().any(|m| {
-                let named = match m.as_str().rfind('(') {
-                    Some(offset) => Some(m.start() + offset),
-                    None => {
-                        let after = &line[m.end()..];
-                        let gap = after.len() - after.trim_start().len();
-                        after[gap..].starts_with('(').then_some(m.end() + gap)
-                    }
-                };
-                named == Some(paren)
-            })
+            names_paren(rx, line, paren)
+                || up_to_paren.is_some_and(|text| names_paren(rx, text, paren))
         })
+}
+
+/// True when a match of `rx` in `text` names the call whose `(` is at
+/// byte `paren` (see [`sanitizer_names_call`]).
+fn names_paren(rx: &Regex, text: &str, paren: usize) -> bool {
+    rx.find_iter(text).flatten().any(|m| {
+        let named = match m.as_str().rfind('(') {
+            Some(offset) => Some(m.start() + offset),
+            None => {
+                let after = &text[m.end()..];
+                let gap = after.len() - after.trim_start().len();
+                after[gap..].starts_with('(').then_some(m.end() + gap)
+            }
+        };
+        named == Some(paren)
+    })
 }
 
 /// True when the line compares the call of one of the rule's
@@ -2583,6 +2602,35 @@ mod tests {
         assert!(!cleared("if (strpos($p, $base) === 0) {", "$p"));
         // The comparison is on another call than the sanitizer's.
         assert!(!cleared("if (size(p) != 0 && p.startsWith(base)) {", "p"));
+    }
+
+    /// Ticket #254: a pattern that spans the line names every call it
+    /// can end on, not only the last one; a pattern that goes on after
+    /// the `(` of its call still names it.
+    #[test]
+    fn test_sanitizer_names_call_on_a_line_with_several_calls() {
+        let mut specs = specs_with(vec![], vec![]);
+        specs.sanitizers.push(
+            SanitizerSpec::new("strpos")
+                .with_raw_regex(Regex::new(r"\bif\s*\(.*\bstrpos\s*\(").unwrap()),
+        );
+        specs.sanitizers.push(
+            SanitizerSpec::new("filter_var")
+                .with_raw_regex(Regex::new(r"filter_var\s*\([^)]*FILTER_SANITIZE").unwrap()),
+        );
+        let line = "if (strpos($a, $b) === 0 && strpos($c, $d) === 0) {";
+        let parens: Vec<usize> = line
+            .match_indices("strpos(")
+            .map(|(at, _)| at + 6)
+            .collect();
+        assert_eq!(parens.len(), 2);
+        for paren in parens {
+            assert!(sanitizer_names_call(line, &specs, paren), "{paren}");
+        }
+        // The `(` of the `if` is no call of a sanitizer.
+        assert!(!sanitizer_names_call(line, &specs, 3));
+        let line = "$x = filter_var($v, FILTER_SANITIZE_STRING);";
+        assert!(sanitizer_names_call(line, &specs, line.find('(').unwrap()));
     }
 
     /// Ticket #157: a PHP guard that reassigns the variable to a literal
