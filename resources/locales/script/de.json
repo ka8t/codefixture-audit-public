@@ -442,5 +442,16 @@
     "unknown_rule_keyword": "Unbekanntes Schlüsselwort in einer Regel: '{keyword}'",
     "unknown_sink_option": "Unbekannte Option an einem Sink: '{option}' (nur 'arg_index' existiert)",
     "value_missing": "Fehlender Wert nach '{keyword}'"
-  }
+  },
+  "scan_memory_estimate": "Speicher: etwa {estimate} GB erwartet.",
+  "scan_memory_unknown": "Dieses System nennt seinen verfügbaren Speicher nicht: Die Analyse kann nicht angehalten werden, bevor er ausgeht (mit --max-memory begrenzen).",
+  "scan_memory_stop": "Vor dem Lesen der Dateien angehalten: Diese Analyse braucht voraussichtlich etwa {estimate} GB Speicher, mehr als der Rechner verfügbar hat. Darüber lagert das System auf die Festplatte aus und kann einfrieren.",
+  "scan_memory_sources": "Analysierte Quellen: {sources}.",
+  "scan_memory_source_followed": "{language} {size} MB (Datenfluss)",
+  "scan_memory_source": "{language} {size} MB",
+  "scan_memory_stop_hint": "Zum Analysieren: Module einzeln analysieren, Ordner ausschließen (`paths.exclude` in audit.config.json), andere Programme schließen oder trotzdem mit --skip-memory-check starten.",
+  "scan_memory_limit": "Mit --max-memory gesetzte Grenze: {limit} GB.",
+  "decimal_separator": ",",
+  "scan_memory_machine": "Dieser Rechner hat {available} GB von {total} GB verfügbar.",
+  "scan_memory_stop_limit": "Vor dem Lesen der Dateien angehalten: Diese Analyse braucht voraussichtlich etwa {estimate} GB Speicher, mehr als die mit --max-memory erlaubten {limit} GB."
 }

@@ -51,6 +51,7 @@ These are the cases where the engine may not behave as you expect, with what to 
 - **The demo pack knows few published vulnerabilities.** Your dependencies are compared with the published vulnerabilities the rule pack carries: 21 well-known ones in this repository's pack (Log4Shell, Spring4Shell, lodash, lxml…). A dependency the report does not name may still be affected by another one. The full catalog (step 6) checks them against every published vulnerability of the five ecosystems, as of the day its data was last downloaded.
 - **Some findings have no automatic fix.** When the engine cannot rewrite your line safely, the report says so and gives the solution in words, with a generic example. Fixing the line is then up to you.
 - **A finding can be a false positive.** If a finding is wrong (the value is already checked, or cannot come from a user), hide it with 🚫 (step 10) and report it: it helps improve the rules.
+- **A large project takes a lot of memory.** Following data from file to file keeps the whole project in memory: about 50 times the size of its Python, Java, JavaScript, PHP and C# sources (10 GB for 250 MB of Java). The analysis estimates it before reading the files, prints it, and stops when the machine does not have it available, so that the system does not swap and freeze. See [Memory of a large project](#memory-of-a-large-project).
 - **First installation takes time.** Installing Rust and the first build take about 10 to 15 minutes (steps 2 and 4). Later builds and analyses are much faster; a re-run on an unchanged project takes less than a second and writes no new report.
 
 ## Step 1: check what you need
@@ -391,6 +392,19 @@ You can add rules of your own, for an in-house API or a convention of your code:
 - A rule of yours with the language and name of a delivered rule replaces it, and the analysis says so.
 - A rule that does not compile is named in a warning, with the error, and left out; the others still run.
 
+### Memory of a large project
+
+Every analysis prints the memory it expects, for example `Memory: about 10.3 GB expected.`, then what the machine has available. The estimate is made before any file is read, from the size of the files: about 50 times the sources of the languages whose data is followed (Python, Java, JavaScript, PHP, C#), 6 times the others.
+
+When the estimate is above the memory available, the analysis stops at once, with exit code 2 and no report, and says why, which sources it would have read, and what to do:
+
+- analyse the project one module at a time (each sub-folder on its own);
+- leave folders out with `paths.exclude` in `audit.config.json` (generated code, tests, copies of libraries);
+- close other programs, then run it again;
+- run it anyway with `--skip-memory-check`, knowing that the system may swap and freeze.
+
+`--max-memory <GB>` sets the most memory the analysis may take, below what the machine has: for example `--max-memory 8` on a 16 GB laptop leaves room for a browser. On a system that does not tell its available memory (Windows, for now), it is the only bound.
+
 ### Moving the engine
 
 The engine and `rules.cfpack` are all an analysis needs: copy them together to another folder and run the engine from anywhere. Without the pack beside it, the engine stops and names the file it looked for.
@@ -408,6 +422,7 @@ flowchart TD
     P -- "dependencies never checked" --> A5["No --quick, the project must<br/>declare them (pom.xml, package.json…)"]
     P -- "a language never checked" --> A6["Add it to languages<br/>in audit.config.json"]
     P -- "git pull refuses" --> A7["See the end of step 11"]
+    P -- "Stopped before reading the files" --> A8["See Memory of a large project"]
 ```
 
 | Message or symptom | What to do |
@@ -420,5 +435,6 @@ flowchart TD
 | dependencies are never checked | the project declares none in a file the engine reads (`requirements.txt`, `package.json`, `pom.xml`, `composer.json`, `.csproj`…), or `--quick` was given |
 | a language of your project is never checked | add it to `languages` in `audit.config.json` (step 7) |
 | `git pull` refuses | see the end of step 11 |
+| `Stopped before reading the files` | the project needs more memory than the machine has available: see [Memory of a large project](#memory-of-a-large-project) |
 
 Versions before November 2026 wrote their reports to `docs/audit-reports/`. The first analysis after the upgrade still compares with the last results found there, then writes only to `audit-reports/`; you can delete the old folder afterwards.

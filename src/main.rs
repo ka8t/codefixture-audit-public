@@ -1329,6 +1329,19 @@ enum Command {
         /// touches. Ignored with `--rules`.
         #[arg(long)]
         custom_rules_dir: Option<PathBuf>,
+        // Ticket #281. The `///` text below is the `--help` line.
+        /// Runs the analysis even when it is expected to take more memory
+        /// than the machine has available (by default it stops before
+        /// reading the files, so that the system does not swap and
+        /// freeze).
+        #[arg(long)]
+        skip_memory_check: bool,
+        /// The most memory, in GB, the analysis may take: it stops before
+        /// reading the files when it is expected to take more (it also
+        /// stops when the machine has less available). Leaves room for
+        /// other programs.
+        #[arg(long, value_name = "GB")]
+        max_memory: Option<f64>,
     },
     /// Lists the builtin rules by category (mirrors `--list-rules`).
     ListRules {
@@ -1439,6 +1452,8 @@ fn dispatch(command: Command) -> ExitCode {
             sbom,
             baseline,
             custom_rules_dir,
+            skip_memory_check,
+            max_memory,
         } => run_scan_command(ScanArgs {
             path,
             rules,
@@ -1451,9 +1466,76 @@ fn dispatch(command: Command) -> ExitCode {
             sbom,
             baseline,
             custom_rules_dir,
+            skip_memory_check,
+            max_memory,
         }),
         Command::ListRules { lang, rules } => run_list_rules_command(&lang, rules),
     }
+}
+
+/// The console lines about a scan's memory (ticket #281): the estimate and
+/// what bounds it (the machine's available memory, the `--max-memory`
+/// limit), or, for a scan stopped before reading its files, which bound it
+/// passed, what it would have read, and what to do. Sizes in GB with the
+/// console language's decimal separator.
+fn memory_lines(
+    memory: &codefixture_audit::scan::memory::MemoryEstimate,
+    stopped: bool,
+    script_locale: &serde_json::Value,
+) -> Vec<String> {
+    let say = |key: &str| codefixture_audit::i18n::t(script_locale, key);
+    let separator = say("decimal_separator");
+    let decimal = |value: f64, digits: usize| format!("{value:.digits$}").replace('.', &separator);
+    let gb = |bytes: u64| decimal(bytes as f64 / 1_073_741_824.0, 1);
+    let estimate = gb(memory.bytes);
+    let machine = memory.system.map(|system| {
+        say("scan_memory_machine")
+            .replace("{available}", &gb(system.available))
+            .replace("{total}", &gb(system.total))
+    });
+    let limit = memory
+        .limit
+        .map(|limit| say("scan_memory_limit").replace("{limit}", &gb(limit)));
+    // The limit stops the scan when it is the smaller bound.
+    let by_limit = memory
+        .limit
+        .is_some_and(|limit| memory.system.is_none_or(|system| limit < system.available));
+    let mut lines = Vec::new();
+    if stopped {
+        lines.push(if by_limit {
+            say("scan_memory_stop_limit")
+                .replace("{estimate}", &estimate)
+                .replace("{limit}", &gb(memory.limit.unwrap_or_default()))
+        } else {
+            say("scan_memory_stop").replace("{estimate}", &estimate)
+        });
+        lines.extend(machine);
+        let sources: Vec<String> = memory
+            .sources
+            .iter()
+            .map(|source| {
+                let key = if source.followed {
+                    "scan_memory_source_followed"
+                } else {
+                    "scan_memory_source"
+                };
+                say(key)
+                    .replace("{language}", &source.language)
+                    .replace("{size}", &decimal(source.bytes as f64 / 1_048_576.0, 0))
+            })
+            .collect();
+        lines.push(say("scan_memory_sources").replace("{sources}", &sources.join(", ")));
+        lines.push(say("scan_memory_stop_hint"));
+        return lines;
+    }
+    lines.push(say("scan_memory_estimate").replace("{estimate}", &estimate));
+    match machine {
+        Some(machine) => lines.push(machine),
+        None if limit.is_none() => lines.push(say("scan_memory_unknown")),
+        None => {}
+    }
+    lines.extend(limit);
+    lines
 }
 
 /// Display order, icon and default activation of the listed categories
@@ -1633,6 +1715,8 @@ struct ScanArgs {
     sbom: bool,
     baseline: Option<PathBuf>,
     custom_rules_dir: Option<PathBuf>,
+    skip_memory_check: bool,
+    max_memory: Option<f64>,
 }
 
 fn run_scan_command(args: ScanArgs) -> ExitCode {
@@ -1648,6 +1732,8 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
         sbom,
         baseline,
         custom_rules_dir,
+        skip_memory_check,
+        max_memory,
     } = args;
     // The shared binary has none of these options: their defaults.
     let extra = ScanExtraArgs::default();
@@ -2033,6 +2119,10 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
             Some(print_phase_progress)
         },
         custom_rules_dir,
+        memory_check: !skip_memory_check,
+        memory_limit: max_memory
+            .filter(|gb| *gb > 0.0)
+            .map(|gb| (gb * 1_073_741_824.0) as u64),
         script_locale: Some(script_locale.clone()),
         brand_prefix: effective_prefix(&brand),
         // Every file is discovered, so undeclared languages are named.
@@ -2081,6 +2171,21 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
     );
     let t_scan_start = std::time::Instant::now();
     let report = run_scan(&config);
+
+    // Ticket #281: the memory the scan was expected to take, on every
+    // scan; a scan that did not fit stopped before reading the files.
+    if let Some(memory) = &report.memory {
+        let lines = memory_lines(memory, report.stopped_for_memory, &script_locale);
+        if report.stopped_for_memory {
+            for line in &lines {
+                emit_error(line);
+            }
+            return ExitCode::from(2);
+        }
+        for line in &lines {
+            emit_progress(quiet, &format!("[codefixture-audit] {line}"));
+        }
+    }
 
     for (rule_path, err) in &report.rule_errors {
         emit_warning(

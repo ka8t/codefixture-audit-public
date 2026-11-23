@@ -333,6 +333,13 @@ pub struct ScanConfig {
     /// home, outside every build output, so no build or `cargo clean`
     /// ever deletes it (ADR-0039).
     pub custom_rules_dir: Option<PathBuf>,
+    /// Stop before reading the files when the scan is expected to take
+    /// more memory than the machine has available (ticket #281, `scan::
+    /// memory`). On by default; `--skip-memory-check` turns it off.
+    pub memory_check: bool,
+    /// The most memory the scan may take, in bytes (`--max-memory`),
+    /// compared with the estimate as well as the available memory.
+    pub memory_limit: Option<u64>,
     /// Path to `.sca-suppress.json`, if it exists.
     pub suppress_file: Option<PathBuf>,
     /// Folder of the taint cache between scans (`scan_cache`); `None`
@@ -487,6 +494,8 @@ impl Default for ScanConfig {
             rules_path: PathBuf::new(),
             target_languages: None,
             custom_rules_dir: None,
+            memory_check: true,
+            memory_limit: None,
             suppress_file: None,
             cache_dir: None,
             exclude_patterns: Vec::new(),
@@ -543,8 +552,17 @@ fn phase_label(config: &ScanConfig, key: &str, french_fallback: &str) -> String 
     }
 }
 
-/// Result of a scan.
+/// Result of a scan. `Default` is the report of a scan stopped before
+/// reading any file ([`ScanReport::stopped_for_memory`]).
+#[derive(Default)]
 pub struct ScanReport {
+    /// The memory the scan was expected to take and what the machine had
+    /// (ticket #281), printed by the CLI. Always set by `run_scan`.
+    pub memory: Option<crate::scan::memory::MemoryEstimate>,
+    /// The scan stopped before reading the files: `memory` does not fit
+    /// in the available memory and [`ScanConfig::memory_check`] is on.
+    /// Every other field is then empty.
+    pub stopped_for_memory: bool,
     pub findings: Vec<ReportFinding>,
     pub files_scanned: usize,
     pub total_loc: usize,
@@ -2046,6 +2064,21 @@ pub fn run_scan(config: &ScanConfig) -> ScanReport {
         .flat_map(|(_, file_languages, _, _)| file_languages.iter().copied())
         .collect();
 
+    // Ticket #281: the memory the scan will take, from the size of its
+    // files, before any of them is read. A scan expected to exceed the
+    // available memory stops here: past it the system swaps, and a
+    // Linux laptop froze on a 2.3 GB Java project (16 GB, 12 available).
+    let memory = estimate_scan_memory(&files, &tree_languages, config.memory_limit);
+    if config.memory_check && memory.fits() == Some(false) {
+        return ScanReport {
+            memory: Some(memory),
+            stopped_for_memory: true,
+            skipped_dirs,
+            rule_languages,
+            ..ScanReport::default()
+        };
+    }
+
     let suppressions = config
         .suppress_file
         .as_ref()
@@ -2419,6 +2452,8 @@ pub fn run_scan(config: &ScanConfig) -> ScanReport {
     let governance_names = patterns::governance_names(&rule_jsons);
 
     ScanReport {
+        memory: Some(memory),
+        stopped_for_memory: false,
         governance_names,
         findings: all_findings,
         files_scanned: parsed_files.len(),
@@ -2446,6 +2481,47 @@ pub fn run_scan(config: &ScanConfig) -> ScanReport {
         phase_timings,
         cache_stats,
         rule_findings,
+    }
+}
+
+/// The memory a scan of `files` is expected to take (ticket #281): the
+/// size of the files of each rule language, those of `tree_languages`
+/// (whose data flow is followed) apart, and the machine's memory. A file
+/// whose size cannot be read counts for nothing; the scan reads it later
+/// and says so if it cannot.
+fn estimate_scan_memory(
+    files: &[PathBuf],
+    tree_languages: &[SourceLanguage],
+    limit: Option<u64>,
+) -> crate::scan::memory::MemoryEstimate {
+    use crate::scan::memory::{LanguageSources, MemoryEstimate, estimate_bytes, system_memory};
+    let mut by_language: BTreeMap<(String, bool), u64> = BTreeMap::new();
+    for file in files {
+        let Some(language) = SourceLanguage::from_path(file) else {
+            continue;
+        };
+        let bytes = std::fs::metadata(file).map(|m| m.len()).unwrap_or(0);
+        let followed = tree_languages.contains(&language);
+        *by_language
+            .entry((language.rule_tag().to_string(), followed))
+            .or_default() += bytes;
+    }
+    let mut sources: Vec<LanguageSources> = by_language
+        .into_iter()
+        .map(|((language, followed), bytes)| LanguageSources {
+            language,
+            bytes,
+            followed,
+        })
+        .collect();
+    sources.sort_by(|a, b| b.bytes.cmp(&a.bytes).then(a.language.cmp(&b.language)));
+    let rules_at_once = taint::rule_lanes();
+    MemoryEstimate {
+        bytes: estimate_bytes(&sources, rules_at_once),
+        sources,
+        rules_at_once,
+        system: system_memory(),
+        limit,
     }
 }
 

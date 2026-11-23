@@ -126,7 +126,7 @@ pub(super) trait TaintLanguage<'a>: Sync + Sized {
 /// against 7.98 GB), but one rule at a time doubled the time (76 → 144 s),
 /// a rule's summary resolution being sequential. The files of a rule are
 /// still analysed by every thread of the pool.
-fn rule_lanes() -> usize {
+pub(in crate::scan) fn rule_lanes() -> usize {
     (rayon::current_num_threads() / 2).max(1)
 }
 

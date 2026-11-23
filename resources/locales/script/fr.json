@@ -442,5 +442,16 @@
     "unknown_rule_keyword": "Mot-clé inconnu dans une règle : '{keyword}'",
     "unknown_sink_option": "Option inconnue sur un sink : '{option}' (seule 'arg_index' existe)",
     "value_missing": "Valeur manquante après '{keyword}'"
-  }
+  },
+  "scan_memory_estimate": "Mémoire : environ {estimate} Go prévus.",
+  "scan_memory_unknown": "Ce système n'indique pas sa mémoire disponible : l'analyse ne peut pas être arrêtée avant de la dépasser (bornez-la avec --max-memory).",
+  "scan_memory_stop": "Arrêt avant la lecture des fichiers : cette analyse devrait prendre environ {estimate} Go de mémoire, plus que la machine n'en a de disponible. Au-delà, le système échange sur le disque et peut se figer.",
+  "scan_memory_sources": "Sources analysées : {sources}.",
+  "scan_memory_source_followed": "{language} {size} Mo (suivi de données)",
+  "scan_memory_source": "{language} {size} Mo",
+  "scan_memory_stop_hint": "Pour l'analyser : analysez ses modules un par un, écartez des dossiers (`paths.exclude` dans audit.config.json), fermez d'autres programmes, ou lancez quand même avec --skip-memory-check.",
+  "scan_memory_limit": "Plafond fixé par --max-memory : {limit} Go.",
+  "decimal_separator": ",",
+  "scan_memory_machine": "Cette machine a {available} Go disponibles sur {total} Go.",
+  "scan_memory_stop_limit": "Arrêt avant la lecture des fichiers : cette analyse devrait prendre environ {estimate} Go de mémoire, plus que les {limit} Go autorisés par --max-memory."
 }

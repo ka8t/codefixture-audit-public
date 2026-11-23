@@ -51,6 +51,7 @@ Voici les cas où le moteur peut ne pas se comporter comme vous l'attendez, avec
 - **Le pack de démonstration connaît peu de vulnérabilités publiées.** Vos dépendances sont comparées aux vulnérabilités publiées que porte le pack de règles : 21 vulnérabilités bien connues dans le pack de ce dépôt (Log4Shell, Spring4Shell, lodash, lxml…). Une dépendance que le rapport ne nomme pas peut quand même être touchée par une autre. Le catalogue complet (étape 6) les compare à toutes les vulnérabilités publiées des cinq écosystèmes, à la date du dernier téléchargement de ses données.
 - **Certains constats n'ont pas de correction automatique.** Quand le moteur ne peut pas réécrire votre ligne sans risque, le rapport le dit et donne la solution en mots, avec un exemple générique. La correction de la ligne vous revient alors.
 - **Un constat peut être une fausse alerte.** Si un constat est faux (la valeur est déjà vérifiée, ou ne peut pas venir d'un utilisateur), masquez-le avec 🚫 (étape 10) et signalez-le : cela aide à améliorer les règles.
+- **Un gros projet demande beaucoup de mémoire.** Suivre une donnée d'un fichier à l'autre garde tout le projet en mémoire : environ 50 fois la taille de ses sources Python, Java, JavaScript, PHP et C# (10 Go pour 250 Mo de Java). L'analyse l'estime avant de lire les fichiers, l'affiche, et s'arrête quand la machine ne l'a pas de disponible, pour que le système n'échange pas sur le disque et ne se fige pas. Voir [Mémoire d'un gros projet](#mémoire-dun-gros-projet).
 - **La première installation prend du temps.** L'installation de Rust et la première compilation prennent environ 10 à 15 minutes (étapes 2 et 4). Les compilations et analyses suivantes sont bien plus rapides ; une nouvelle analyse d'un projet inchangé prend moins d'une seconde et n'écrit pas de nouveau rapport.
 
 ## Étape 1 : vérifier les prérequis
@@ -391,6 +392,19 @@ Vous pouvez ajouter vos propres règles, pour une API interne ou une convention 
 - Une de vos règles qui porte le langage et le nom d'une règle livrée la remplace, et l'analyse le dit.
 - Une règle qui ne compile pas est nommée dans un avertissement, avec l'erreur, et laissée de côté ; les autres s'exécutent.
 
+### Mémoire d'un gros projet
+
+Chaque analyse affiche la mémoire qu'elle prévoit, par exemple `Mémoire : environ 10,3 Go prévus.`, puis ce que la machine a de disponible. L'estimation est faite avant de lire le moindre fichier, d'après la taille des fichiers : environ 50 fois les sources des langages dont les données sont suivies (Python, Java, JavaScript, PHP, C#), 6 fois les autres.
+
+Quand l'estimation dépasse la mémoire disponible, l'analyse s'arrête aussitôt, avec le code de sortie 2 et sans rapport, et dit pourquoi, quelles sources elle aurait lues, et quoi faire :
+
+- analyser le projet module par module (chaque sous-dossier à part) ;
+- écarter des dossiers avec `paths.exclude` dans `audit.config.json` (code généré, tests, copies de bibliothèques) ;
+- fermer d'autres programmes, puis relancer ;
+- lancer quand même avec `--skip-memory-check`, en sachant que le système peut échanger sur le disque et se figer.
+
+`--max-memory <Go>` fixe la mémoire la plus haute que l'analyse peut prendre, en dessous de celle de la machine : par exemple `--max-memory 8` sur un portable de 16 Go laisse de la place au navigateur. Sur un système qui n'indique pas sa mémoire disponible (Windows, pour l'instant), c'est la seule borne.
+
 ### Déplacer le moteur
 
 Le moteur et `rules.cfpack` sont tout ce dont une analyse a besoin : copiez-les ensemble dans un autre dossier et lancez le moteur depuis n'importe où. Sans le pack à côté de lui, le moteur s'arrête et nomme le fichier qu'il a cherché.
@@ -408,6 +422,7 @@ flowchart TD
     P -- "dépendances jamais vérifiées" --> A5["Pas de --quick, et le projet doit<br/>les déclarer (pom.xml, package.json…)"]
     P -- "un langage jamais vérifié" --> A6["Ajoutez-le à languages<br/>dans audit.config.json"]
     P -- "git pull refuse" --> A7["Voir la fin de l'étape 11"]
+    P -- "Arrêt avant la lecture des fichiers" --> A8["Voir Mémoire d'un gros projet"]
 ```
 
 | Message ou symptôme | Que faire |
@@ -420,5 +435,6 @@ flowchart TD
 | les dépendances ne sont jamais vérifiées | le projet n'en déclare aucune dans un fichier que lit le moteur (`requirements.txt`, `package.json`, `pom.xml`, `composer.json`, `.csproj`…), ou `--quick` a été donné |
 | un langage de votre projet n'est jamais vérifié | ajoutez-le à `languages` dans `audit.config.json` (étape 7) |
 | `git pull` refuse | voir la fin de l'étape 11 |
+| `Arrêt avant la lecture des fichiers` | le projet demande plus de mémoire que la machine n'en a de disponible : voir [Mémoire d'un gros projet](#mémoire-dun-gros-projet) |
 
 Les versions antérieures à novembre 2026 écrivaient leurs rapports dans `docs/audit-reports/`. La première analyse après la mise à jour compare encore avec les derniers résultats trouvés là, puis n'écrit plus que dans `audit-reports/` ; vous pouvez ensuite supprimer l'ancien dossier.

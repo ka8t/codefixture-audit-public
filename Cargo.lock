@@ -294,6 +294,7 @@ dependencies = [
  "crc32fast",
  "fancy-regex",
  "flate2",
+ "libc",
  "postgres",
  "rayon",
  "regex",

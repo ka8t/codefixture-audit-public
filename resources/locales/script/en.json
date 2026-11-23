@@ -442,5 +442,16 @@
     "unknown_rule_keyword": "Unknown keyword in a rule: '{keyword}'",
     "unknown_sink_option": "Unknown option on a sink: '{option}' (only 'arg_index' exists)",
     "value_missing": "Missing value after '{keyword}'"
-  }
+  },
+  "scan_memory_estimate": "Memory: about {estimate} GB expected.",
+  "scan_memory_unknown": "This system does not tell its available memory: the analysis cannot be stopped before it runs out (bound it with --max-memory).",
+  "scan_memory_stop": "Stopped before reading the files: this analysis is expected to take about {estimate} GB of memory, more than the machine has available. Past that, the system swaps and can freeze.",
+  "scan_memory_sources": "Sources analysed: {sources}.",
+  "scan_memory_source_followed": "{language} {size} MB (data flow followed)",
+  "scan_memory_source": "{language} {size} MB",
+  "scan_memory_stop_hint": "To analyse it: analyse its modules one at a time, leave folders out (`paths.exclude` in audit.config.json), close other programs, or run anyway with --skip-memory-check.",
+  "scan_memory_limit": "Limit set with --max-memory: {limit} GB.",
+  "decimal_separator": ".",
+  "scan_memory_machine": "This machine has {available} GB available of {total} GB.",
+  "scan_memory_stop_limit": "Stopped before reading the files: this analysis is expected to take about {estimate} GB of memory, more than the {limit} GB allowed with --max-memory."
 }

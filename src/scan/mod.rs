@@ -6,6 +6,7 @@ pub mod counters;
 pub mod dataflow;
 pub mod discovery;
 pub mod engine;
+pub mod memory;
 pub mod minified;
 pub mod orchestrator;
 pub mod parser;
