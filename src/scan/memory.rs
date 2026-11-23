@@ -8,8 +8,11 @@
 //! - macOS: the installed memory (`hw.memsize`) and the pages a process can
 //!   get without the system compressing or swapping: free, inactive,
 //!   speculative and purgeable (`host_statistics64`).
-//! - Other systems (Windows): not read yet. The caller says so; it never
-//!   takes an unknown amount for a large one.
+//! - Windows: `ullTotalPhys` and `ullAvailPhys` of `GlobalMemoryStatusEx`
+//!   (ticket #283), the physical memory installed and what can be used
+//!   without writing to the page file (free, standby and zeroed pages).
+//! - Other systems: not read. The caller says so; it never takes an
+//!   unknown amount for a large one.
 
 /// The memory of the machine, in bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,7 +102,61 @@ fn read_system_memory() -> Option<SystemMemory> {
     })
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+/// The Win32 call that tells the memory of a Windows machine (ticket #283).
+///
+/// Declared here rather than through the `windows-sys` crate: its sources
+/// are not in the offline registry of the development machine, and one
+/// function and one plain-data structure do not justify a dependency.
+/// `kernel32.dll` is linked by the standard library on every Windows
+/// target (MSVC and GNU) anyway.
+#[cfg(target_os = "windows")]
+mod win32 {
+    /// `MEMORYSTATUSEX` of `sysinfoapi.h`: two 32-bit fields then seven
+    /// 64-bit ones, 64 bytes, with the C layout. `dwLength` must hold its
+    /// size before the call.
+    #[repr(C)]
+    #[allow(non_snake_case)]
+    pub struct MemoryStatusEx {
+        pub dwLength: u32,
+        pub dwMemoryLoad: u32,
+        pub ullTotalPhys: u64,
+        pub ullAvailPhys: u64,
+        pub ullTotalPageFile: u64,
+        pub ullAvailPageFile: u64,
+        pub ullTotalVirtual: u64,
+        pub ullAvailVirtual: u64,
+        pub ullAvailExtendedVirtual: u64,
+    }
+
+    // The structure must match the C one byte for byte.
+    const _: () = assert!(std::mem::size_of::<MemoryStatusEx>() == 64);
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        /// `BOOL GlobalMemoryStatusEx(LPMEMORYSTATUSEX)`: non-zero on
+        /// success.
+        pub fn GlobalMemoryStatusEx(buffer: *mut MemoryStatusEx) -> i32;
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn read_system_memory() -> Option<SystemMemory> {
+    // SAFETY: `MemoryStatusEx` is plain data; zeroed is a valid value.
+    let mut status: win32::MemoryStatusEx = unsafe { std::mem::zeroed() };
+    status.dwLength = std::mem::size_of::<win32::MemoryStatusEx>() as u32;
+    // SAFETY: `status` is a `MEMORYSTATUSEX` whose `dwLength` holds its
+    // size, as `GlobalMemoryStatusEx` requires; it only writes into it.
+    let ok = unsafe { win32::GlobalMemoryStatusEx(&mut status) };
+    if ok == 0 || status.ullTotalPhys == 0 {
+        return None;
+    }
+    Some(SystemMemory {
+        total: status.ullTotalPhys,
+        available: status.ullAvailPhys,
+    })
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 fn read_system_memory() -> Option<SystemMemory> {
     None
 }
@@ -370,12 +427,12 @@ mod tests {
         );
     }
 
-    /// The machine running the tests tells its memory (Linux and macOS),
-    /// and what is available never exceeds what is installed.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    /// The machine running the tests tells its memory (Linux, macOS and
+    /// Windows), and what is available never exceeds what is installed.
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     #[test]
     fn test_this_machine_tells_its_memory() {
-        let memory = system_memory().expect("Linux and macOS tell their memory");
+        let memory = system_memory().expect("Linux, macOS and Windows tell their memory");
         assert!(memory.total > 0);
         assert!(memory.available <= memory.total, "{memory:?}");
     }

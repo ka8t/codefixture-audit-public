@@ -403,7 +403,7 @@ Quand la mémoire est juste, l'analyse fait d'abord tourner moins de règles de 
 - fermer d'autres programmes, puis relancer ;
 - lancer quand même avec `--skip-memory-check`, en sachant que le système peut échanger sur le disque et se figer.
 
-`--max-memory <Go>` fixe la mémoire la plus haute que l'analyse peut prendre, en dessous de celle de la machine : par exemple `--max-memory 8` sur un portable de 16 Go laisse de la place au navigateur. Sur un système qui n'indique pas sa mémoire disponible (Windows, pour l'instant), c'est la seule borne.
+`--max-memory <Go>` fixe la mémoire la plus haute que l'analyse peut prendre, en dessous de celle de la machine : par exemple `--max-memory 8` sur un portable de 16 Go laisse de la place au navigateur. La mémoire disponible est lue sous Linux, macOS et Windows ; sur un système qui ne l'indique pas, `--max-memory` est la seule borne.
 
 ### Déplacer le moteur
 

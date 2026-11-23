@@ -403,7 +403,7 @@ When memory is short, the analysis first runs fewer data flow rules at a time: i
 - close other programs, then run it again;
 - run it anyway with `--skip-memory-check`, knowing that the system may swap and freeze.
 
-`--max-memory <GB>` sets the most memory the analysis may take, below what the machine has: for example `--max-memory 8` on a 16 GB laptop leaves room for a browser. On a system that does not tell its available memory (Windows, for now), it is the only bound.
+`--max-memory <GB>` sets the most memory the analysis may take, below what the machine has: for example `--max-memory 8` on a 16 GB laptop leaves room for a browser. The available memory is read on Linux, macOS and Windows; on a system that does not tell it, `--max-memory` is the only bound.
 
 ### Moving the engine
 
