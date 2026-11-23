@@ -45,6 +45,16 @@ static DOT_WILDCARD_RE: LazyLock<Regex> =
 static MULTI_STAR_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\*+").expect("regex statique valide"));
 
+/// Stand-in for a literal dot (`\.`, `->`, `::`) while the regex is
+/// rewritten into a dotted pattern, turned back into `.` by
+/// [`finalize_dotted`] once the regex wildcards are gone. Deliberate
+/// deviation from the Audit (ticket #236): `dataflow_taint.py` turns
+/// `\.` into `.` first, so the wildcard pass then reads a literal dot
+/// followed by `\w+` (already `*`) as the regex `.*` and merges both:
+/// `event\.\w+` gave `event*` (any name starting with `event`) instead
+/// of `event.*`. A control character never appears in a rule regex.
+const LITERAL_DOT: char = '\u{1}';
+
 /// Entirely strips lookaround groups `(?=...)`, `(?!...)`,
 /// `(?<=...)`, `(?<!...)` (including balanced parentheses), not just
 /// the opening marker — a lookaround carries a constraint with no
@@ -146,13 +156,34 @@ fn expand_alternations(pattern: &str) -> Vec<String> {
     out
 }
 
-/// Final cleanup pass on a "dotted" pattern.
+/// Final cleanup pass on a "dotted" pattern: the regex wildcards
+/// (`\w+`, `.*`, `.+`) become `*`, then the literal dots
+/// ([`LITERAL_DOT`]) become `.`.
+///
+/// A literal dot that ends the pattern means "a member of": the regex
+/// `req\.query\.` is found in `req.query.id`, and the pattern becomes
+/// `req.query.*`. Deliberate deviation from the Audit (ticket #236),
+/// which keeps `req.query.`: a dotted pattern is matched against a whole
+/// name, no name ends with a dot, and the dataflow path never matched
+/// such a source, sink or sanitizer. One segment suffices: the base of an
+/// attribute is evaluated too, so `req.query.id.trim` meets the pattern
+/// through `req.query.id`.
+///
+/// An unescaped dot without a quantifier (the regex "any character")
+/// stays a dot, as in the Audit: the catalog writes it where a literal
+/// dot is meant (`Builders<.*>.Filter.Eq`), and `*`, which does not cross
+/// dots, would no longer match `Builders<T>.Filter.Eq`.
 fn finalize_dotted(pattern: &str) -> String {
     let p = WORD_WILDCARD_RE.replace_all(pattern, "*").into_owned();
     let p = DOT_WILDCARD_RE.replace_all(&p, "*").into_owned();
     let p = p.replace('?', "");
     let p = MULTI_STAR_RE.replace_all(&p, "*").into_owned();
-    let p = p.trim().to_string();
+    let p = p.trim();
+    let p = match p.strip_suffix(LITERAL_DOT) {
+        Some(member_of) => format!("{member_of}{LITERAL_DOT}*"),
+        None => p.to_string(),
+    };
+    let p = p.replace(LITERAL_DOT, ".");
     if p.is_empty() || p.chars().all(|c| c == '.' || c == '*') {
         return String::new();
     }
@@ -171,7 +202,9 @@ pub fn regex_to_dotted_patterns(regex_str: &str) -> Vec<String> {
     }
     let stripped = strip_lookaround_groups(regex_str);
     let clean = REGEX_NOISE_RE.replace_all(&stripped, "").into_owned();
-    let clean = clean.replace(r"\.", ".");
+    // A literal dot is kept apart from the regex `.` until the wildcards
+    // are converted (see `LITERAL_DOT`).
+    let clean = clean.replace(r"\.", &LITERAL_DOT.to_string());
     // PHP (`->method`/`\->method`) and the static double-colon
     // (`::method`) are normalized to `.` — same semantic role as dot
     // access in Python/Java/JS (member resolution), but absent from
@@ -184,8 +217,9 @@ pub fn regex_to_dotted_patterns(regex_str: &str) -> Vec<String> {
     // `raw_regex` confirmation filter, built from the SAME
     // unmodified `regex_str`, still validates against the real
     // `->`/`::` syntax of the source file).
-    let clean = clean.replace(r"\->", ".").replace("->", ".");
-    let clean = clean.replace(r"\::", ".").replace("::", ".");
+    let dot = LITERAL_DOT.to_string();
+    let clean = clean.replace(r"\->", &dot).replace("->", &dot);
+    let clean = clean.replace(r"\::", &dot).replace("::", &dot);
     let clean = clean.trim_start_matches('^').trim_end_matches('$');
     let clean = clean.split('=').next().unwrap_or("").trim().to_string();
     expand_alternations(&clean)
@@ -707,5 +741,53 @@ mod tests {
             specs.sinks[0].raw_regex.is_none(),
             "regex invalide -> raw_regex None, pas de panique"
         );
+    }
+
+    #[test]
+    fn test_trailing_escaped_dot_means_a_member_of() {
+        // Ticket #236: `x\.` is found in `x.a`; kept as `x.` it matched
+        // no name, a dotted pattern being matched against the whole name.
+        assert_eq!(
+            regex_to_dotted_patterns(r"req\.(params|query|body)\."),
+            vec!["req.params.*", "req.query.*", "req.body.*"]
+        );
+        assert_eq!(
+            regex_to_dotted_patterns(r"process\.env\."),
+            vec!["process.env.*"]
+        );
+        let member = compile_glob(&regex_to_dotted_patterns(r"req\.(query)\.")[0]);
+        assert!(member.is_match("req.query.id"));
+        assert!(!member.is_match("req.query"));
+    }
+
+    #[test]
+    fn test_escaped_dot_before_a_word_wildcard_stays_a_dot() {
+        // Ticket #236: `\.\w+` gave `*` merged with the name before it
+        // (`event*`, which matches `event` and `events`).
+        assert_eq!(regex_to_dotted_patterns(r"event\.\w+"), vec!["event.*"]);
+        assert_eq!(
+            regex_to_dotted_patterns(r"httpx\.AsyncClient\(\)\.\w+\s*\("),
+            vec!["httpx.AsyncClient.*"]
+        );
+        let field = compile_glob(&regex_to_dotted_patterns(r"event\.\w+")[0]);
+        assert!(field.is_match("event.id"));
+        assert!(!field.is_match("event"));
+        assert!(!field.is_match("eventType"));
+    }
+
+    #[test]
+    fn test_unescaped_dot_keeps_its_former_reading() {
+        // A regex wildcard `.*` is still `*`, and a bare unescaped dot
+        // stays a dot (the catalog writes it for a literal dot).
+        assert_eq!(regex_to_dotted_patterns(r"foo.*bar"), vec!["foo*bar"]);
+        assert_eq!(
+            regex_to_dotted_patterns(r"Builders<.*>.Filter.Eq"),
+            vec!["Builders<*>.Filter.Eq"]
+        );
+        assert_eq!(regex_to_dotted_patterns(r"\->query\("), vec!["**.query"]);
+    }
+
+    fn compile_glob(pattern: &str) -> super::super::transfer::GlobPattern {
+        super::super::transfer::compile_glob_pattern(pattern)
     }
 }

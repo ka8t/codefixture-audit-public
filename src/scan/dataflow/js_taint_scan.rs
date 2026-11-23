@@ -12,19 +12,19 @@
 //! by hand, exactly as before — same split as
 //! `taint_scan.rs`/`java_taint_scan.rs`.
 //!
-//! **Difference from Java**: no initial-state seed (`init_state`) —
-//! Java seeds Spring route parameters (`@RequestParam`/..., or the
-//! implicit binding of a mapped handler) right at method entry via
-//! `JavaFunctionInfo::route_param_names`. JS v1 has no framework-aware
-//! equivalent (implicit Express/Fastify binding, Phase 3 deferred) —
-//! each function is analyzed with an empty entry state, taint only
-//! comes from `source` rules explicitly matched in the function body
-//! (e.g. `req.query.q`, `req.body.x`).
+//! **Entry state**: Java seeds Spring route parameters
+//! (`@RequestParam`/..., or the implicit binding of a mapped handler)
+//! right at method entry via `JavaFunctionInfo::route_param_names`. JS
+//! seeds one parameter only, the event of an AWS Lambda handler
+//! (`JsFunctionInfo::lambda_event`, ticket #236). Other functions start
+//! with an empty state (implicit Express/Fastify binding, Phase 3
+//! deferred): their taint only comes from `source` rules explicitly
+//! matched in the function body (e.g. `req.query.q`, `req.body.x`).
 
 use tree_sitter::Node;
 
 use super::js_summary::{JsFunctionInfo, prepare_js_file};
-use super::lattice::empty_state;
+use super::lattice::{SourceInfo, State, Taint, empty_state, state_set};
 use super::line_facts::{RuleLines, SourceLines};
 use super::prepared::PreparedFile;
 use super::transfer::{Finding, RuleSpecs};
@@ -68,12 +68,16 @@ pub fn run_taint_rule_js_prepared(
 ) -> Vec<Finding> {
     let mut all_findings: Vec<Finding> = Vec::new();
 
-    let bodies = file
-        .module
-        .iter()
-        .chain(file.functions.iter().filter_map(|f| f.body.as_ref()));
-    for prepared in bodies {
-        let result = prepared.analyze(specs, Some(&empty_state()), rule_lines.as_ref());
+    if let Some(module) = &file.module {
+        let result = module.analyze(specs, Some(&empty_state()), rule_lines.as_ref());
+        all_findings.extend(result.findings);
+    }
+    for function in &file.functions {
+        let Some(prepared) = function.body.as_ref() else {
+            continue;
+        };
+        let entry = entry_state(&function.info);
+        let result = prepared.analyze(specs, Some(&entry), rule_lines.as_ref());
         all_findings.extend(result.findings);
     }
 
@@ -81,6 +85,30 @@ pub fn run_taint_rule_js_prepared(
         std::collections::HashSet::new();
     all_findings.retain(|f| seen.insert((f.rule_id.clone(), f.line, f.source_line)));
     all_findings
+}
+
+/// The state at the entry of `function`: empty, except for the event
+/// parameter of an AWS Lambda handler, tainted as an `http` source
+/// (ticket #236). The Lambda runtime passes the event it received, the
+/// caller's data, as first argument (`js_summary::is_lambda_handler`);
+/// the whole object is tainted, so that `JSON.stringify(event)` written
+/// into an SQL text is an injection as much as `event.id`.
+fn entry_state(function: &JsFunctionInfo) -> State {
+    let Some(event) = &function.lambda_event else {
+        return empty_state();
+    };
+    state_set(
+        &empty_state(),
+        event,
+        Taint::tainted(
+            ["http".to_string()],
+            SourceInfo {
+                line: function.lineno,
+                expr: format!("{}({event})", function.name).into(),
+                kind: "http".into(),
+            },
+        ),
+    )
 }
 
 // ============================================================================

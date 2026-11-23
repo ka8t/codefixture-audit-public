@@ -65,6 +65,12 @@ pub struct JsFunctionInfo<'tree> {
     pub body_node: Node<'tree>,
     pub param_names: Vec<String>,
     pub lineno: usize,
+    /// The first parameter of an AWS Lambda handler ([`is_lambda_handler`]),
+    /// `None` for any other function. The event a Lambda receives is the
+    /// caller's data: the scan seeds this parameter as an `http` source at
+    /// the entry of the function (`js_taint_scan.rs`), as Java seeds the
+    /// parameters of a Spring route.
+    pub lambda_event: Option<String>,
 }
 
 const FUNCTION_LIKE_KINDS: [&str; 6] = [
@@ -144,14 +150,17 @@ fn inferred_name_from_context<'tree>(node: Node<'tree>, source: &[u8]) -> Option
 /// (expression-bodied arrow) is skipped (accepted v1 limitation, see
 /// module doc).
 pub fn collect_js_functions<'tree>(root: Node<'tree>, source: &[u8]) -> Vec<JsFunctionInfo<'tree>> {
+    let mut handler_names = Vec::new();
+    collect_exported_handler_names(root, source, &mut handler_names);
     let mut functions = Vec::new();
-    collect_functions_rec(root, source, &mut functions);
+    collect_functions_rec(root, source, &handler_names, &mut functions);
     functions
 }
 
 fn collect_functions_rec<'tree>(
     node: Node<'tree>,
     source: &[u8],
+    handler_names: &[String],
     out: &mut Vec<JsFunctionInfo<'tree>>,
 ) {
     if FUNCTION_LIKE_KINDS.contains(&node.kind())
@@ -159,16 +168,141 @@ fn collect_functions_rec<'tree>(
         && body.kind() == "statement_block"
     {
         let name = function_name(node, source);
+        let param_names = param_names(node.child_by_field_name("parameters"), source);
+        let lambda_event = is_lambda_handler(node, source, handler_names)
+            .then(|| param_names.first().cloned())
+            .flatten();
         out.push(JsFunctionInfo {
             name,
             body_node: body,
-            param_names: param_names(node.child_by_field_name("parameters"), source),
+            param_names,
             lineno: node.start_position().row + 1,
+            lambda_event,
         });
     }
     let mut w = node.walk();
     for child in node.named_children(&mut w) {
-        collect_functions_rec(child, source, out);
+        collect_functions_rec(child, source, handler_names, out);
+    }
+}
+
+// ============================================================================
+// AWS Lambda handlers (ticket #236)
+// ============================================================================
+
+/// Whether `node`, the left side of an assignment, names the exported
+/// handler of a CommonJS module: `exports.handler` or
+/// `module.exports.handler` (spaces ignored).
+fn is_handler_export_target(node: Node, source: &[u8]) -> bool {
+    let target: String = text(node, source).split_whitespace().collect();
+    target == "exports.handler" || target == "module.exports.handler"
+}
+
+/// Whether `node` is the left side `module.exports` of an assignment.
+fn is_module_exports(node: Node, source: &[u8]) -> bool {
+    let target: String = text(node, source).split_whitespace().collect();
+    target == "module.exports"
+}
+
+/// The `handler` entry of the object assigned to `module.exports`, when
+/// `pair_or_shorthand` is one: `module.exports = { handler: f }` or
+/// `module.exports = { handler }`.
+fn is_handler_entry_of_module_exports(pair_or_shorthand: Node, source: &[u8]) -> bool {
+    let key = match pair_or_shorthand.kind() {
+        "pair" => pair_or_shorthand.child_by_field_name("key"),
+        "shorthand_property_identifier" => Some(pair_or_shorthand),
+        _ => None,
+    };
+    key.is_some_and(|key| text(key, source) == "handler")
+        && pair_or_shorthand
+            .parent()
+            .filter(|object| object.kind() == "object")
+            .and_then(|object| object.parent())
+            .filter(|assign| assign.kind() == "assignment_expression")
+            .and_then(|assign| assign.child_by_field_name("left"))
+            .is_some_and(|left| is_module_exports(left, source))
+}
+
+/// The names exported as the Lambda handler by an identifier rather than
+/// by a function written in place: `exports.handler = f`,
+/// `module.exports.handler = f`, `module.exports = { handler: f }`,
+/// `module.exports = { handler }` (the name `handler`). The function of
+/// that name in the file is the handler — semgrep's
+/// `function $FUNC ($EVENT, ...) {...} ... exports.handler = $FUNC`.
+fn collect_exported_handler_names(node: Node, source: &[u8], out: &mut Vec<String>) {
+    match node.kind() {
+        "assignment_expression" => {
+            if let (Some(left), Some(right)) = (
+                node.child_by_field_name("left"),
+                node.child_by_field_name("right"),
+            ) && right.kind() == "identifier"
+                && is_handler_export_target(left, source)
+            {
+                out.push(text(right, source));
+            }
+        }
+        "pair" => {
+            if let Some(value) = node.child_by_field_name("value")
+                && value.kind() == "identifier"
+                && is_handler_entry_of_module_exports(node, source)
+            {
+                out.push(text(value, source));
+            }
+        }
+        "shorthand_property_identifier" if is_handler_entry_of_module_exports(node, source) => {
+            out.push("handler".to_string());
+        }
+        _ => {}
+    }
+    let mut w = node.walk();
+    for child in node.named_children(&mut w) {
+        collect_exported_handler_names(child, source, out);
+    }
+}
+
+/// Whether the function `node` is the handler of an AWS Lambda, the
+/// function the Lambda runtime calls with the event it received as
+/// first argument. The forms of semgrep's `aws-lambda` rules (their
+/// `pattern-sources`), plus those of ES modules and of an exported
+/// object, which the Lambda runtime of Node.js reads the same way:
+///
+/// - the function written in place: `exports.handler = function (event)
+///   {...}`, `module.exports.handler = async (event) => {...}`,
+///   `module.exports = { handler: async (event) => {...} }`;
+/// - a function of the file exported by its name
+///   ([`collect_exported_handler_names`]): `function f(event) {...}` or
+///   `const f = (event) => {...}` or `f = function (event) {...}`, then
+///   `exports.handler = f`;
+/// - an ES module export named `handler`: `export async function
+///   handler(event) {...}`, `export const handler = async (event) =>
+///   {...}`.
+///
+/// A handler exported under another name (the runtime reads the name
+/// from the function's configuration, `index.main`) is not recognized:
+/// the file does not say it. An expression-bodied arrow is not collected
+/// at all (module doc).
+fn is_lambda_handler(node: Node, source: &[u8], handler_names: &[String]) -> bool {
+    let Some(parent) = node.parent() else {
+        return false;
+    };
+    let declared_name = node.child_by_field_name("name").map(|n| text(n, source));
+    match parent.kind() {
+        "assignment_expression" => parent.child_by_field_name("left").is_some_and(|left| {
+            is_handler_export_target(left, source)
+                || (left.kind() == "identifier" && handler_names.contains(&text(left, source)))
+        }),
+        "pair" => is_handler_entry_of_module_exports(parent, source),
+        "variable_declarator" => parent.child_by_field_name("name").is_some_and(|name| {
+            let name = text(name, source);
+            handler_names.contains(&name)
+                || (name == "handler"
+                    && parent
+                        .parent()
+                        .and_then(|declaration| declaration.parent())
+                        .is_some_and(|p| p.kind() == "export_statement"))
+        }),
+        "export_statement" => declared_name.as_deref() == Some("handler"),
+        _ => declared_name.is_some_and(|name| handler_names.contains(&name)),
     }
 }
 
@@ -413,5 +547,92 @@ mod tests {
         let summary = compute_js_summary(&functions[0], &specs, src.as_bytes(), None);
         assert_eq!(summary.name, "safe");
         assert_eq!(summary.param_names, vec!["a"]);
+    }
+
+    /// The `lambda_event` of every collected function of `src`, by name.
+    fn lambda_events(src: &str) -> Vec<(String, Option<String>)> {
+        let tree = parse_js(src);
+        collect_js_functions(tree.root_node(), src.as_bytes())
+            .into_iter()
+            .map(|f| (f.name, f.lambda_event))
+            .collect()
+    }
+
+    #[test]
+    fn test_lambda_handler_written_in_place() {
+        // Ticket #236: the forms written in place, CommonJS and object.
+        for src in [
+            "exports.handler = function (event, context) { f(event); };",
+            "module.exports.handler = async (event) => { f(event); };",
+            "module.exports = { handler: async (event) => { f(event); } };",
+        ] {
+            let events: Vec<Option<String>> = lambda_events(src)
+                .into_iter()
+                .map(|(_, event)| event)
+                .collect();
+            assert_eq!(events, vec![Some("event".to_string())], "{src}");
+        }
+    }
+
+    #[test]
+    fn test_lambda_handler_exported_by_name() {
+        // Ticket #236: a function of the file exported by its name, as in
+        // semgrep's `exports.handler = $FUNC` patterns.
+        for src in [
+            "function main(e) { f(e); }\nexports.handler = main;",
+            "const main = async (e) => { f(e); };\nmodule.exports.handler = main;",
+            "var main;\nmain = function (e) { f(e); };\nexports.handler = main;",
+            "const main = async (e) => { f(e); };\nmodule.exports = { handler: main };",
+            "const handler = async (e) => { f(e); };\nmodule.exports = { handler };",
+        ] {
+            let events = lambda_events(src);
+            assert_eq!(events.len(), 1, "{src}");
+            assert_eq!(events[0].1.as_deref(), Some("e"), "{src}");
+        }
+    }
+
+    #[test]
+    fn test_lambda_handler_of_an_es_module() {
+        for src in [
+            "export async function handler(event) { f(event); }",
+            "export const handler = async (event) => { f(event); };",
+        ] {
+            let events: Vec<Option<String>> = lambda_events(src)
+                .into_iter()
+                .map(|(_, event)| event)
+                .collect();
+            assert_eq!(events, vec![Some("event".to_string())], "{src}");
+        }
+    }
+
+    #[test]
+    fn test_other_functions_are_not_lambda_handlers() {
+        // Another exported name, a local `handler` that is not exported,
+        // a function nested in a handler, an Express callback.
+        for src in [
+            "exports.report = function (event) { f(event); };",
+            "const handler = (event) => { f(event); };",
+            "function handler(event) { f(event); }",
+            "app.get('/x', function (req, res) { f(req); });",
+            "module.exports = { report: async (event) => { f(event); } };",
+            "other.exports.handler = function (event) { f(event); };",
+        ] {
+            assert!(
+                lambda_events(src).iter().all(|(_, event)| event.is_none()),
+                "{src}"
+            );
+        }
+        let nested = lambda_events(
+            "exports.handler = async (event) => { event.Records.forEach(function (r) { f(r); }); };",
+        );
+        assert_eq!(nested[0].1.as_deref(), Some("event"));
+        assert_eq!(nested[1].1, None);
+    }
+
+    #[test]
+    fn test_lambda_handler_without_parameter_seeds_nothing() {
+        let events = lambda_events("exports.handler = async () => { f(); };");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].1, None);
     }
 }
