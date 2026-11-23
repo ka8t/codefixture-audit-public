@@ -50,7 +50,7 @@
 //! for an arrow function's implicit lexical capture).
 
 use super::cfg::{Cfg, NodeKind};
-use super::ir::{ConstValue, IrStmt, Lhs, Rhs};
+use super::ir::{ConstValue, IrStmt, Lhs, Rhs, named_children};
 use std::collections::BTreeMap;
 use tree_sitter::Node;
 
@@ -164,14 +164,13 @@ impl<'src> PhpLowerer<'src> {
         }
 
         if t == "parenthesized_expression" {
-            let inner = expr.named_children(&mut expr.walk()).next();
+            let inner = named_children(expr).next();
             return self.lower_expr(inner);
         }
 
         // `$arr[$i]` — positional, no named field (verified empirically).
         if t == "subscript_expression" {
-            let mut w = expr.walk();
-            let mut children = expr.named_children(&mut w);
+            let mut children = named_children(expr);
             let base = self.lower_expr(children.next());
             let key = self.lower_expr(children.next());
             return Rhs::SubscriptRef {
@@ -204,14 +203,13 @@ impl<'src> PhpLowerer<'src> {
         }
 
         if let Some(callee_name) = include_like_callee_name(t) {
-            let arg = self.lower_expr(expr.named_children(&mut expr.walk()).next());
+            let arg = self.lower_expr(named_children(expr).next());
             return self.emit_call(Rhs::VarRef(callee_name.to_string()), vec![arg], expr);
         }
 
         // `new Foo($x)` — positional, no named field.
         if t == "object_creation_expression" {
-            let mut w = expr.walk();
-            let mut children = expr.named_children(&mut w);
+            let mut children = named_children(expr);
             let class_node = children.next();
             let callee = match class_node {
                 Some(c) if c.kind() == "name" => Rhs::VarRef(self.text(c)),
@@ -224,8 +222,7 @@ impl<'src> PhpLowerer<'src> {
         }
 
         if t == "array_creation_expression" {
-            let elements: Vec<Rhs> = expr
-                .named_children(&mut expr.walk())
+            let elements: Vec<Rhs> = named_children(expr)
                 .map(|e| self.lower_array_element(e))
                 .collect();
             return Rhs::ListRef(elements);
@@ -311,6 +308,74 @@ impl<'src> PhpLowerer<'src> {
             return self.lower_assignment_expression(expr, "=");
         }
 
+        // Ticket #255: the forms below used to fall to the fallback and
+        // lose the taint of their operands (inventory of the corpus, see
+        // the ticket). `$a = &$b` assigns a reference: for the taint, the
+        // value of `$b`.
+        if t == "reference_assignment_expression" {
+            return self.lower_assignment_expression(expr, "=");
+        }
+
+        // `Foo::bar($x)`, `self::bar($x)`, `static::bar($x)`: a call whose
+        // receiver is a class.
+        if t == "scoped_call_expression" {
+            let scope = self.lower_scope(expr.child_by_field_name("scope"));
+            let name = expr
+                .child_by_field_name("name")
+                .map(|n| self.text(n))
+                .unwrap_or_else(|| "?".to_string());
+            let callee = Rhs::AttrRef {
+                base: Box::new(scope),
+                attr: name,
+            };
+            let args = self.lower_arg_list(expr.child_by_field_name("arguments"));
+            return self.emit_call(callee, args, expr);
+        }
+
+        // `Foo::$cache`: a static property, which can hold tainted data
+        // like an instance property.
+        if t == "scoped_property_access_expression" {
+            let scope = self.lower_scope(expr.child_by_field_name("scope"));
+            let attr = expr
+                .child_by_field_name("name")
+                .map(|n| self.text(n))
+                .unwrap_or_else(|| "?".to_string());
+            return Rhs::AttrRef {
+                base: Box::new(scope),
+                attr,
+            };
+        }
+
+        // `@f($x)`: the value of `f($x)`, its warnings silenced.
+        if t == "error_suppression_expression" {
+            return self.lower_expr(named_children(expr).next());
+        }
+
+        // `(string)$x` keeps the data of `$x`; `(int)$x`, `(float)$x`,
+        // `(bool)$x` turn it into a number or a boolean, which carries no
+        // injection: no taint, no known value. The value is still lowered
+        // for its own side effects (`(int)f($x)` calls `f`).
+        if t == "cast_expression" {
+            let value = self.lower_expr(expr.child_by_field_name("value"));
+            let cast = expr
+                .child_by_field_name("type")
+                .map(|n| self.text(n).to_ascii_lowercase())
+                .unwrap_or_default();
+            let scalar = matches!(
+                cast.trim(),
+                "int" | "integer" | "float" | "double" | "real" | "bool" | "boolean"
+            );
+            return if scalar { Rhs::Opaque } else { value };
+        }
+
+        // `\strlen`, `\App\run`: a function name written with its namespace.
+        // The leading `\` (global namespace) is dropped, so that `\exec($x)`
+        // is named `exec` as the rules write it.
+        if t == "qualified_name" {
+            let text = self.text(expr);
+            return Rhs::VarRef(text.trim_start_matches('\\').to_string());
+        }
+
         if t == "augmented_assignment_expression" {
             let op = self.operator_text(expr);
             let base_op = op.strip_suffix('=').unwrap_or(&op).to_string();
@@ -339,6 +404,18 @@ impl<'src> PhpLowerer<'src> {
         Rhs::VarRef(tmp)
     }
 
+    /// The class of a scoped access (`Foo::bar()`, `self::$x`): a name
+    /// (`Foo`, `\App\Foo`, `self`, `static`, `parent`) as a variable of
+    /// that name, any other expression (`$class::bar()`) lowered.
+    fn lower_scope(&mut self, scope: Option<Node<'src>>) -> Rhs {
+        match scope {
+            Some(node) if matches!(node.kind(), "name" | "relative_scope" | "qualified_name") => {
+                Rhs::VarRef(self.text(node).trim_start_matches('\\').to_string())
+            }
+            other => self.lower_expr(other),
+        }
+    }
+
     fn lower_member_call(&mut self, expr: Node<'src>) -> Rhs {
         let base = self.lower_expr(expr.child_by_field_name("object"));
         let name = expr
@@ -360,11 +437,13 @@ impl<'src> PhpLowerer<'src> {
         let Some(arg_list) = arg_list else {
             return Vec::new();
         };
-        arg_list
-            .named_children(&mut arg_list.walk())
+        named_children(arg_list)
             .map(|a| {
+                // The value is the last named child: a named argument
+                // `f(path: $x)` or a by-reference `f(&$x)` holds the name or
+                // the `&` first (ticket #255: they were read as the value).
                 let inner = if a.kind() == "argument" {
-                    a.named_children(&mut a.walk()).next()
+                    named_children(a).last()
                 } else {
                     Some(a)
                 };
@@ -383,8 +462,7 @@ impl<'src> PhpLowerer<'src> {
             // Last named child = the value (the `key => value` form
             // has 2 children, the plain form has 1 — the value is
             // always in last position).
-            let mut w = node.walk();
-            node.named_children(&mut w).last()
+            named_children(node).last()
         } else {
             Some(node)
         };
@@ -400,6 +478,21 @@ impl<'src> PhpLowerer<'src> {
                     parts.push(Rhs::Const(ConstValue::Str(self.text(child))))
                 }
                 "\"" | "'" | "<<<" | ">>>" => {}
+                // Heredoc: `<<<SQL` and `SQL` frame the body, whose
+                // interpolated variables are read like those of a
+                // double-quoted string (ticket #255: the body used to fall
+                // to the fallback, and its variables lost their taint).
+                "heredoc_start" | "heredoc_end" => {}
+                "heredoc_body" => {
+                    for part in named_children(child) {
+                        parts.push(match part.kind() {
+                            "string_content" | "escape_sequence" => {
+                                Rhs::Const(ConstValue::Str(self.text(part)))
+                            }
+                            _ => self.lower_expr(Some(part)),
+                        });
+                    }
+                }
                 _ if child.is_named() => parts.push(self.lower_expr(Some(child))),
                 _ => {}
             }
@@ -430,8 +523,7 @@ impl<'src> PhpLowerer<'src> {
             return Vec::new();
         };
         let mut names = Vec::new();
-        let mut w = params.walk();
-        for p in params.named_children(&mut w) {
+        for p in named_children(params) {
             match p.kind() {
                 "simple_parameter" | "variadic_parameter" | "property_promotion_parameter" => {
                     if let Some(name_node) = p.child_by_field_name("name") {
@@ -521,8 +613,7 @@ impl<'src> PhpLowerer<'src> {
                 }
             }
             "subscript_expression" => {
-                let mut w = target.walk();
-                let mut children = target.named_children(&mut w);
+                let mut children = named_children(target);
                 let base = self.lower_expr(children.next());
                 let key = self.lower_expr(children.next());
                 Lhs::SubscriptLhs {
@@ -578,7 +669,7 @@ impl<'src> PhpLowerer<'src> {
     /// (throw_expression ...))` — both dispatched here, not in
     /// `lower_stmt`.
     fn lower_expression_statement(&mut self, stmt: Node<'src>) {
-        let inner = stmt.named_children(&mut stmt.walk()).next();
+        let inner = named_children(stmt).next();
         let Some(inner) = inner else {
             self.emit(IrStmt::Noop {
                 lineno: self.line(stmt),
@@ -644,7 +735,7 @@ impl<'src> PhpLowerer<'src> {
         let Some(callee_name) = include_like_callee_name(stmt.kind()) else {
             return;
         };
-        let arg = self.lower_expr(stmt.named_children(&mut stmt.walk()).next());
+        let arg = self.lower_expr(named_children(stmt).next());
         self.emit(IrStmt::Call {
             callee: Rhs::VarRef(callee_name.to_string()),
             args: vec![arg],
@@ -678,12 +769,10 @@ impl<'src> PhpLowerer<'src> {
     }
 
     fn lower_echo_print_args(&mut self, stmt: Node<'src>) -> Vec<Rhs> {
-        let mut w = stmt.walk();
-        let named: Vec<Node<'src>> = stmt.named_children(&mut w).collect();
+        let named: Vec<Node<'src>> = named_children(stmt).collect();
         if named.len() == 1 && named[0].kind() == "sequence_expression" {
             let seq = named[0];
-            return seq
-                .named_children(&mut seq.walk())
+            return named_children(seq)
                 .map(|e| self.lower_expr(Some(e)))
                 .collect();
         }
@@ -694,7 +783,7 @@ impl<'src> PhpLowerer<'src> {
     }
 
     fn lower_return_statement(&mut self, stmt: Node<'src>) {
-        let value_node = stmt.named_children(&mut stmt.walk()).next();
+        let value_node = named_children(stmt).next();
         let value = value_node.map(|v| self.lower_expr(Some(v)));
         self.emit(IrStmt::Return {
             value,
@@ -703,7 +792,7 @@ impl<'src> PhpLowerer<'src> {
     }
 
     fn lower_throw_expression(&mut self, expr: Node<'src>) {
-        let value_node = expr.named_children(&mut expr.walk()).next();
+        let value_node = named_children(expr).next();
         let value = value_node.map(|v| self.lower_expr(Some(v)));
         self.emit(IrStmt::Raise {
             value,
@@ -767,7 +856,7 @@ pub fn lower_condition<'src>(source: &'src [u8], expr: Node<'src>) -> Vec<IrStmt
         if unwrapped.kind() != "parenthesized_expression" {
             break;
         }
-        let Some(inner) = unwrapped.named_children(&mut unwrapped.walk()).next() else {
+        let Some(inner) = named_children(unwrapped).next() else {
             break;
         };
         unwrapped = inner;

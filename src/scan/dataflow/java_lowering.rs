@@ -36,7 +36,7 @@
 //!     a call with no receiver, e.g. `doIt()` in a lambda body).
 
 use super::cfg::{Cfg, NodeKind};
-use super::ir::{ConstValue, IrStmt, Lhs, Rhs};
+use super::ir::{ConstValue, IrStmt, Lhs, Rhs, named_children, one_of};
 use std::collections::BTreeMap;
 use tree_sitter::Node;
 
@@ -151,7 +151,7 @@ impl<'src> JavaLowerer<'src> {
         }
 
         if t == "parenthesized_expression" {
-            let inner = expr.named_children(&mut expr.walk()).next();
+            let inner = named_children(expr).next();
             return self.lower_expr(inner);
         }
 
@@ -206,9 +206,7 @@ impl<'src> JavaLowerer<'src> {
         }
 
         if t == "array_creation_expression" {
-            let init = expr
-                .named_children(&mut expr.walk())
-                .find(|c| c.kind() == "array_initializer");
+            let init = named_children(expr).find(|c| c.kind() == "array_initializer");
             return match init {
                 Some(i) => self.lower_expr(Some(i)),
                 None => Rhs::ListRef(Vec::new()),
@@ -216,8 +214,7 @@ impl<'src> JavaLowerer<'src> {
         }
 
         if t == "array_initializer" {
-            let elements: Vec<Rhs> = expr
-                .named_children(&mut expr.walk())
+            let elements: Vec<Rhs> = named_children(expr)
                 .map(|e| self.lower_expr(Some(e)))
                 .collect();
             return Rhs::ListRef(elements);
@@ -332,6 +329,25 @@ impl<'src> JavaLowerer<'src> {
             return self.lower_assignment_expression(expr);
         }
 
+        // Ticket #255: `switch (mode) { case "a" -> x; default -> { yield
+        // y; } }` used as a value is one of its arm values (it used to fall
+        // to the fallback, and lose their taint). The subject is lowered
+        // for its own effects.
+        if t == "switch_expression" {
+            self.lower_expr(expr.child_by_field_name("condition"));
+            let mut arms = Vec::new();
+            if let Some(body) = expr.child_by_field_name("body") {
+                self.collect_switch_values(body, &mut arms);
+            }
+            return one_of(arms);
+        }
+
+        // `Foo.class`: a class named as written, the receiver of
+        // `Foo.class.getResource(...)`.
+        if t == "class_literal" {
+            return Rhs::VarRef(self.text(expr));
+        }
+
         // Fallback: unknown expression → `Opaque`, no taint and no known
         // value. Ticket #253, deliberate deviation from the Audit, which
         // returns `Const(None)` here: the constant pass (§9) read a
@@ -411,8 +427,7 @@ impl<'src> JavaLowerer<'src> {
         let Some(arg_list) = arg_list else {
             return Vec::new();
         };
-        arg_list
-            .named_children(&mut arg_list.walk())
+        named_children(arg_list)
             .map(|a| self.lower_expr(Some(a)))
             .collect()
     }
@@ -426,8 +441,7 @@ impl<'src> JavaLowerer<'src> {
             return vec![self.text(params)];
         }
         let mut names = Vec::new();
-        let mut w = params.walk();
-        for p in params.named_children(&mut w) {
+        for p in named_children(params) {
             if p.kind() == "formal_parameter" || p.kind() == "inferred_parameters" {
                 if let Some(name_node) = p.child_by_field_name("name") {
                     names.push(self.text(name_node));
@@ -477,10 +491,29 @@ impl<'src> JavaLowerer<'src> {
         LIST_CONSTRUCTOR_NAMES.contains(&simple_name)
     }
 
+    /// The values of the arms of a `switch` expression, lowered: the
+    /// expression of a `case ... -> value;` rule, and of every `yield
+    /// value;` of its blocks and statement groups. A nested `switch`
+    /// expression, lambda or class keeps its own `yield`.
+    fn collect_switch_values(&mut self, node: Node<'src>, values: &mut Vec<Rhs>) {
+        for child in named_children(node) {
+            match child.kind() {
+                "yield_statement" => {
+                    values.push(self.lower_expr(named_children(child).next()));
+                }
+                "expression_statement" if node.kind() == "switch_rule" => {
+                    values.push(self.lower_expr(named_children(child).next()));
+                }
+                "switch_expression" | "lambda_expression" | "class_body" => {}
+                _ => self.collect_switch_values(child, values),
+            }
+        }
+    }
+
     /// Lowers `i++`/`--i` into an emitted `+1`/`-1` assignment,
     /// returning the pre-increment value of the operand.
     fn lower_update_expression(&mut self, expr: Node<'src>) -> Rhs {
-        let operand_node = expr.named_children(&mut expr.walk()).next();
+        let operand_node = named_children(expr).next();
         let Some(operand_node) = operand_node else {
             return Rhs::Opaque;
         };
@@ -610,9 +643,7 @@ impl<'src> JavaLowerer<'src> {
     }
 
     fn lower_local_variable_declaration(&mut self, stmt: Node<'src>) {
-        let mut w = stmt.walk();
-        let decls: Vec<Node<'src>> = stmt
-            .named_children(&mut w)
+        let decls: Vec<Node<'src>> = named_children(stmt)
             .filter(|c| c.kind() == "variable_declarator")
             .collect();
         for decl in decls {
@@ -638,7 +669,7 @@ impl<'src> JavaLowerer<'src> {
     }
 
     fn lower_expression_statement(&mut self, stmt: Node<'src>) {
-        let inner = stmt.named_children(&mut stmt.walk()).next();
+        let inner = named_children(stmt).next();
         let Some(inner) = inner else {
             self.emit(IrStmt::Noop {
                 lineno: self.line(stmt),
@@ -686,7 +717,7 @@ impl<'src> JavaLowerer<'src> {
     }
 
     fn lower_return_statement(&mut self, stmt: Node<'src>) {
-        let value_node = stmt.named_children(&mut stmt.walk()).next();
+        let value_node = named_children(stmt).next();
         let value = value_node.map(|v| self.lower_expr(Some(v)));
         self.emit(IrStmt::Return {
             value,
@@ -695,7 +726,7 @@ impl<'src> JavaLowerer<'src> {
     }
 
     fn lower_throw_statement(&mut self, stmt: Node<'src>) {
-        let value_node = stmt.named_children(&mut stmt.walk()).next();
+        let value_node = named_children(stmt).next();
         let value = value_node.map(|v| self.lower_expr(Some(v)));
         self.emit(IrStmt::Raise {
             value,
@@ -704,9 +735,7 @@ impl<'src> JavaLowerer<'src> {
     }
 
     fn lower_resource_specification(&mut self, stmt: Node<'src>) {
-        let mut w = stmt.walk();
-        let resources: Vec<Node<'src>> = stmt
-            .named_children(&mut w)
+        let resources: Vec<Node<'src>> = named_children(stmt)
             .filter(|c| c.kind() == "resource")
             .collect();
         for res in resources {
@@ -857,7 +886,7 @@ pub fn lower_condition<'src>(source: &'src [u8], expr: Node<'src>) -> Vec<IrStmt
         if unwrapped.kind() != "parenthesized_expression" {
             break;
         }
-        let Some(inner) = unwrapped.named_children(&mut unwrapped.walk()).next() else {
+        let Some(inner) = named_children(unwrapped).next() else {
             break;
         };
         unwrapped = inner;

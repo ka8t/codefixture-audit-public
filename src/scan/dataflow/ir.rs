@@ -445,8 +445,107 @@ pub fn pretty_stmts(stmts: &[IrStmt]) -> String {
     stmts.iter().map(pretty_stmt).collect::<Vec<_>>().join("\n")
 }
 
+/// One of `values`, without knowing which: a chain of `IfExp` whose
+/// conditions are [`Rhs::Opaque`]. It carries the taint of every value
+/// (an `IfExp` joins its branches) and has no known value, so the
+/// constant pass cannot read it as one of them (a tuple would be read as
+/// always true). For a Java `switch` expression (ticket #255).
+pub fn one_of(mut values: Vec<Rhs>) -> Rhs {
+    let Some(mut acc) = values.pop() else {
+        return Rhs::Opaque;
+    };
+    while let Some(value) = values.pop() {
+        acc = Rhs::IfExp {
+            cond: Box::new(Rhs::Opaque),
+            then: Box::new(value),
+            orelse: Box::new(acc),
+        };
+    }
+    acc
+}
+
+/// The named children of a syntax node, without the comments.
+///
+/// Tree-sitter can attach a comment (an "extra" node) between any two
+/// tokens: `f(a /* note */, b)` or `( /* note */ $x)`. Read by position,
+/// such a comment became an argument of its own, shifting the arguments
+/// after it, or replaced the only operand of a parenthesis, and the
+/// lowering turned it into an expression it does not model. Every
+/// lowering reads the children of a node through this function (ticket
+/// #255).
+pub fn named_children<'tree>(
+    node: tree_sitter::Node<'tree>,
+) -> std::vec::IntoIter<tree_sitter::Node<'tree>> {
+    let mut cursor = node.walk();
+    node.named_children(&mut cursor)
+        .filter(|child| !child.is_extra())
+        .collect::<Vec<_>>()
+        .into_iter()
+}
+
 #[cfg(test)]
 mod tests {
+
+    /// Ticket #255: a comment is never a child of an expression, in any
+    /// grammar; the children keep their order.
+    #[test]
+    fn test_named_children_skip_comments() {
+        let read = |language: tree_sitter::Language, source: &str, kind: &str| -> Vec<String> {
+            let mut parser = tree_sitter::Parser::new();
+            parser.set_language(&language).expect("valid grammar");
+            let tree = parser.parse(source, None).expect("parsed");
+            let mut stack = vec![tree.root_node()];
+            while let Some(node) = stack.pop() {
+                if node.kind() == kind {
+                    return named_children(node)
+                        .map(|child| source[child.byte_range()].to_string())
+                        .collect();
+                }
+                let mut cursor = node.walk();
+                stack.extend(node.children(&mut cursor).collect::<Vec<_>>());
+            }
+            panic!("no {kind} in {source}");
+        };
+        let java: tree_sitter::Language = tree_sitter_java::LANGUAGE.into();
+        let source = "class A { void m() { f(a /* note */, b); } }";
+        assert_eq!(read(java, source, "argument_list"), ["a", "b"]);
+        let php: tree_sitter::Language = tree_sitter_php::LANGUAGE_PHP.into();
+        assert_eq!(
+            read(
+                php,
+                "<?php $x = ( /* note */ $y);",
+                "parenthesized_expression"
+            ),
+            ["$y"]
+        );
+        let python: tree_sitter::Language = tree_sitter_python::LANGUAGE.into();
+        let source = "x = (  # note\n    y\n)\n";
+        assert_eq!(read(python, source, "parenthesized_expression"), ["y"]);
+    }
+
+    /// Ticket #255: one of several values joins their taint through `IfExp`
+    /// branches whose condition has no known value.
+    #[test]
+    fn test_one_of() {
+        assert_eq!(one_of(Vec::new()), Rhs::Opaque);
+        let a = Rhs::VarRef("a".to_string());
+        assert_eq!(one_of(vec![a.clone()]), a);
+        let b = Rhs::VarRef("b".to_string());
+        let c = Rhs::VarRef("c".to_string());
+        assert_eq!(
+            one_of(vec![a.clone(), b.clone(), c.clone()]),
+            Rhs::IfExp {
+                cond: Box::new(Rhs::Opaque),
+                then: Box::new(a),
+                orelse: Box::new(Rhs::IfExp {
+                    cond: Box::new(Rhs::Opaque),
+                    then: Box::new(b),
+                    orelse: Box::new(c),
+                }),
+            }
+        );
+    }
+
     use super::*;
 
     // Ticket #241: the canonical names as the former recursive `format!`

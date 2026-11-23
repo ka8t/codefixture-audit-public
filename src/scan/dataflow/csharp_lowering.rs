@@ -77,7 +77,7 @@
 //!     Java equivalent (which uses a bare `identifier`).
 
 use super::cfg::{Cfg, NodeKind};
-use super::ir::{ConstValue, IrStmt, Lhs, Rhs};
+use super::ir::{ConstValue, IrStmt, Lhs, Rhs, named_children};
 use std::collections::BTreeMap;
 use tree_sitter::Node;
 
@@ -183,7 +183,7 @@ impl<'src> CSharpLowerer<'src> {
         }
 
         if t == "parenthesized_expression" {
-            let inner = expr.named_children(&mut expr.walk()).next();
+            let inner = named_children(expr).next();
             return self.lower_expr(inner);
         }
 
@@ -260,8 +260,7 @@ impl<'src> CSharpLowerer<'src> {
         }
 
         if t == "initializer_expression" {
-            let elements: Vec<Rhs> = expr
-                .named_children(&mut expr.walk())
+            let elements: Vec<Rhs> = named_children(expr)
                 .map(|e| self.lower_expr(Some(e)))
                 .collect();
             return Rhs::ListRef(elements);
@@ -368,6 +367,71 @@ impl<'src> CSharpLowerer<'src> {
             return Rhs::VarRef(tmp);
         }
 
+        // Ticket #255: the forms below used to fall to the fallback and
+        // lose the taint of their operands (inventory of the corpus, see
+        // the ticket). `await GetAsync(x)`: the value of the awaited task.
+        if t == "await_expression" {
+            return self.lower_expr(named_children(expr).next());
+        }
+
+        // `(a, b)`: a tuple of its elements.
+        if t == "tuple_expression" {
+            let elements = named_children(expr)
+                .map(|a| self.lower_wrapped_argument(a))
+                .collect();
+            return Rhs::TupleRef(elements);
+        }
+
+        // `record with { Path = input }`, `new { Name = x, y }`, a LINQ
+        // query `from l in lines where ... select l.Trim()`: a value built
+        // from its parts, which carries the taint of every one of them. The
+        // member names (`Path`, `Name`) are lowered too, as variables no
+        // state holds.
+        if matches!(
+            t,
+            "with_expression" | "anonymous_object_creation_expression" | "query_expression"
+        ) {
+            let parts = self.lower_parts(expr);
+            return Rhs::TupleRef(parts);
+        }
+
+        // `new(path, mode)`: a constructor call whose type is written on the
+        // other side of the assignment.
+        if t == "implicit_object_creation_expression" {
+            let mut args = Vec::new();
+            for child in named_children(expr) {
+                match child.kind() {
+                    "argument_list" => args.extend(self.lower_arg_list(Some(child))),
+                    _ => args.push(self.lower_expr(Some(child))),
+                }
+            }
+            let tmp = self.fresh_temp();
+            self.emit(IrStmt::Assign {
+                lhs: Lhs::VarLhs(tmp.clone()),
+                rhs: Rhs::CallRef {
+                    callee: Box::new(Rhs::VarRef("new".to_string())),
+                    args,
+                    kwargs: Vec::new(),
+                },
+                lineno: self.line(expr),
+            });
+            return Rhs::VarRef(tmp);
+        }
+
+        // `string.Format(...)`, `List<int>.Empty`: a type used as the
+        // receiver of a member, named as written (without its type
+        // arguments) so the call is named `string.Format`.
+        if t == "predefined_type" {
+            return Rhs::VarRef(self.text(expr));
+        }
+        if t == "generic_name" {
+            let name = named_children(expr)
+                .find(|n| n.kind() == "identifier")
+                .map(|n| self.text(n))
+                .unwrap_or_else(|| self.text(expr));
+            return Rhs::VarRef(name);
+        }
+
         if t == "as_expression" {
             // `x as Foo` — a cast that yields null instead of throwing. For
             // taint purposes: identical to a cast, propagates the operand.
@@ -421,9 +485,7 @@ impl<'src> CSharpLowerer<'src> {
         let Some(arg_list) = arg_list else {
             return Vec::new();
         };
-        let mut w = arg_list.walk();
-        arg_list
-            .named_children(&mut w)
+        named_children(arg_list)
             .map(|a| self.lower_wrapped_argument(a))
             .collect()
     }
@@ -435,16 +497,37 @@ impl<'src> CSharpLowerer<'src> {
         let Some(arg_list) = arg_list else {
             return Rhs::Opaque;
         };
-        let first = arg_list.named_children(&mut arg_list.walk()).next();
+        let first = named_children(arg_list).next();
         match first {
             Some(a) => self.lower_wrapped_argument(a),
             None => Rhs::Opaque,
         }
     }
 
+    /// Every expression under `node`, lowered: the parts of a value built
+    /// from several of them (see the `with_expression` arm of
+    /// `lower_expr`). A clause (`from_clause`, `where_clause`,
+    /// `with_initializer`) is not an expression: its own parts are read.
+    fn lower_parts(&mut self, node: Node<'src>) -> Vec<Rhs> {
+        let mut parts = Vec::new();
+        for child in named_children(node) {
+            if child.kind().ends_with("_clause")
+                || matches!(child.kind(), "with_initializer" | "argument")
+            {
+                parts.extend(self.lower_parts(child));
+            } else if !child.kind().ends_with("type") {
+                parts.push(self.lower_expr(Some(child)));
+            }
+        }
+        parts
+    }
+
     fn lower_wrapped_argument(&mut self, a: Node<'src>) -> Rhs {
         if a.kind() == "argument" {
-            let inner = a.named_children(&mut a.walk()).next();
+            // The value is the last named child: a named argument
+            // `Open(path: input)` holds the name first (ticket #255: the
+            // name was read as the value, and `input` lost its taint).
+            let inner = named_children(a).last();
             self.lower_expr(inner)
         } else {
             self.lower_expr(Some(a))
@@ -461,8 +544,7 @@ impl<'src> CSharpLowerer<'src> {
             return vec![self.text(params)];
         }
         let mut names = Vec::new();
-        let mut w = params.walk();
-        for p in params.named_children(&mut w) {
+        for p in named_children(params) {
             if p.kind() == "parameter" {
                 if let Some(name_node) = p.child_by_field_name("name") {
                     names.push(self.text(name_node));
@@ -504,7 +586,7 @@ impl<'src> CSharpLowerer<'src> {
     /// node (verified): `children[0]` is the anonymous operator token,
     /// `named_children[0]` the single named operand.
     fn lower_prefix_unary(&mut self, expr: Node<'src>) -> Rhs {
-        let operand_node = expr.named_children(&mut expr.walk()).next();
+        let operand_node = named_children(expr).next();
         let Some(operand_node) = operand_node else {
             return Rhs::Opaque;
         };
@@ -533,7 +615,7 @@ impl<'src> CSharpLowerer<'src> {
     /// `named_children[0]` the single named operand, the LAST raw
     /// child the anonymous operator token (reverse order from prefix).
     fn lower_postfix_unary(&mut self, expr: Node<'src>) -> Rhs {
-        let operand_node = expr.named_children(&mut expr.walk()).next();
+        let operand_node = named_children(expr).next();
         let Some(operand_node) = operand_node else {
             return Rhs::Opaque;
         };
@@ -672,7 +754,19 @@ impl<'src> CSharpLowerer<'src> {
             if c.kind() == "string_content" {
                 parts.push(Rhs::Const(ConstValue::Str(self.text(c))));
             } else if c.kind() == "interpolation" {
-                let inner = c.named_children(&mut c.walk()).next();
+                // `{id,10:N}`: the braces, the alignment and the format are
+                // named children too; the value is the one expression. The
+                // first named child is the `{` (`interpolation_brace`), which
+                // was read as the value before ticket #255: an interpolated
+                // string lost the taint of every variable it held.
+                let inner = named_children(c).find(|n| {
+                    !matches!(
+                        n.kind(),
+                        "interpolation_brace"
+                            | "interpolation_alignment_clause"
+                            | "interpolation_format_clause"
+                    )
+                });
                 parts.push(self.lower_expr(inner));
             }
         }
@@ -720,10 +814,7 @@ impl<'src> CSharpLowerer<'src> {
     }
 
     fn lower_local_declaration_statement(&mut self, stmt: Node<'src>) {
-        let mut w = stmt.walk();
-        let decl = stmt
-            .named_children(&mut w)
-            .find(|c| c.kind() == "variable_declaration");
+        let decl = named_children(stmt).find(|c| c.kind() == "variable_declaration");
         match decl {
             Some(d) => self.lower_declarators(d, stmt),
             None => self.emit(IrStmt::Noop {
@@ -742,9 +833,7 @@ impl<'src> CSharpLowerer<'src> {
     }
 
     fn lower_declarators(&mut self, decl: Node<'src>, lineno_src: Node<'src>) {
-        let mut w = decl.walk();
-        let declarators: Vec<Node<'src>> = decl
-            .named_children(&mut w)
+        let declarators: Vec<Node<'src>> = named_children(decl)
             .filter(|c| c.kind() == "variable_declarator")
             .collect();
         for declarator in declarators {
@@ -754,8 +843,7 @@ impl<'src> CSharpLowerer<'src> {
             let name = self.text(name_node);
             // No named `value` field (verified) — the initializer, if
             // present, is the SECOND named child.
-            let named: Vec<Node<'src>> =
-                declarator.named_children(&mut declarator.walk()).collect();
+            let named: Vec<Node<'src>> = named_children(declarator).collect();
             let value_node = named.get(1).copied();
             match value_node {
                 None => self.emit(IrStmt::Noop {
@@ -774,7 +862,7 @@ impl<'src> CSharpLowerer<'src> {
     }
 
     fn lower_expression_statement(&mut self, stmt: Node<'src>) {
-        let inner = stmt.named_children(&mut stmt.walk()).next();
+        let inner = named_children(stmt).next();
         let Some(inner) = inner else {
             self.emit(IrStmt::Noop {
                 lineno: self.line(stmt),
@@ -810,7 +898,7 @@ impl<'src> CSharpLowerer<'src> {
     }
 
     fn lower_return_statement(&mut self, stmt: Node<'src>) {
-        let value_node = stmt.named_children(&mut stmt.walk()).next();
+        let value_node = named_children(stmt).next();
         let value = value_node.map(|v| self.lower_expr(Some(v)));
         self.emit(IrStmt::Return {
             value,
@@ -819,7 +907,7 @@ impl<'src> CSharpLowerer<'src> {
     }
 
     fn lower_throw_statement(&mut self, stmt: Node<'src>) {
-        let value_node = stmt.named_children(&mut stmt.walk()).next();
+        let value_node = named_children(stmt).next();
         let value = value_node.map(|v| self.lower_expr(Some(v)));
         self.emit(IrStmt::Raise {
             value,
@@ -833,8 +921,7 @@ impl<'src> CSharpLowerer<'src> {
     /// processing, mirroring
     /// `java_lowering.rs::lower_synchronized_statement`.
     fn lower_lock_statement(&mut self, stmt: Node<'src>) {
-        let mut w = stmt.walk();
-        let lock_expr = stmt.named_children(&mut w).find(|c| c.kind() != "block");
+        let lock_expr = named_children(stmt).find(|c| c.kind() != "block");
         match lock_expr {
             Some(l) => {
                 self.lower_expr(Some(l));
@@ -929,7 +1016,7 @@ pub fn lower_condition<'src>(source: &'src [u8], expr: Node<'src>) -> Vec<IrStmt
         if unwrapped.kind() != "parenthesized_expression" {
             break;
         }
-        let Some(inner) = unwrapped.named_children(&mut unwrapped.walk()).next() else {
+        let Some(inner) = named_children(unwrapped).next() else {
             break;
         };
         unwrapped = inner;

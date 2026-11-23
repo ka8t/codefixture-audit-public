@@ -20,7 +20,7 @@
 //! Python).
 
 use super::cfg::field_children;
-use super::ir::{ConstValue, IrStmt, Lhs, Rhs};
+use super::ir::{ConstValue, IrStmt, Lhs, Rhs, named_children};
 use tree_sitter::Node;
 
 pub struct Lowerer<'src> {
@@ -102,13 +102,10 @@ impl<'src> Lowerer<'src> {
                     key: Box::new(key),
                 }
             }
-            "parenthesized_expression" => {
-                let mut w = node.walk();
-                node.named_children(&mut w)
-                    .next()
-                    .map(|n| self.lower_expr(n))
-                    .unwrap_or(Rhs::Const(ConstValue::None))
-            }
+            "parenthesized_expression" => named_children(node)
+                .next()
+                .map(|n| self.lower_expr(n))
+                .unwrap_or(Rhs::Const(ConstValue::None)),
             "binary_operator" => {
                 let left = node
                     .child_by_field_name("left")
@@ -204,8 +201,7 @@ impl<'src> Lowerer<'src> {
             "set" => Rhs::SetRef(self.lower_named_children(node)),
             "dictionary" => {
                 let mut items = Vec::new();
-                let mut w = node.walk();
-                for child in node.named_children(&mut w) {
+                for child in named_children(node) {
                     if child.kind() == "pair" {
                         let k = child
                             .child_by_field_name("key")
@@ -216,19 +212,17 @@ impl<'src> Lowerer<'src> {
                             .map(|n| self.lower_expr(n))
                             .unwrap_or(Rhs::Const(ConstValue::None));
                         items.push((k, v));
-                    } else if child.kind() == "dictionary_splat" {
-                        let mut cw = child.walk();
-                        if let Some(inner) = child.named_children(&mut cw).next() {
-                            let v = self.lower_expr(inner);
-                            items.push((Rhs::Const(ConstValue::None), v));
-                        }
+                    } else if child.kind() == "dictionary_splat"
+                        && let Some(inner) = named_children(child).next()
+                    {
+                        let v = self.lower_expr(inner);
+                        items.push((Rhs::Const(ConstValue::None), v));
                     }
                 }
                 Rhs::DictRef(items)
             }
             "conditional_expression" => {
-                let mut w = node.walk();
-                let parts: Vec<Node> = node.named_children(&mut w).collect();
+                let parts: Vec<Node> = named_children(node).collect();
                 // Grammar order: then, cond, orelse (`then if cond else orelse`).
                 let then_rhs = parts
                     .first()
@@ -274,20 +268,12 @@ impl<'src> Lowerer<'src> {
             "lambda" => {
                 let arg_names = node
                     .child_by_field_name("parameters")
-                    .map(|params| {
-                        let mut w = params.walk();
-                        params
-                            .named_children(&mut w)
-                            .map(|p| self.text(p))
-                            .collect()
-                    })
+                    .map(|params| named_children(params).map(|p| self.text(p)).collect())
                     .unwrap_or_default();
                 Rhs::LambdaRef { arg_names }
             }
             "list_splat" => {
-                let mut w = node.walk();
-                let inner = node
-                    .named_children(&mut w)
+                let inner = named_children(node)
                     .next()
                     .map(|n| self.lower_expr(n))
                     .unwrap_or(Rhs::Const(ConstValue::None));
@@ -297,9 +283,7 @@ impl<'src> Lowerer<'src> {
                 }
             }
             "dictionary_splat" => {
-                let mut w = node.walk();
-                let inner = node
-                    .named_children(&mut w)
+                let inner = named_children(node)
                     .next()
                     .map(|n| self.lower_expr(n))
                     .unwrap_or(Rhs::Const(ConstValue::None));
@@ -308,14 +292,58 @@ impl<'src> Lowerer<'src> {
                     double: true,
                 }
             }
-            "await" => {
-                let mut w = node.walk();
-                node.named_children(&mut w)
-                    .next()
-                    .map(|n| self.lower_expr(n))
-                    .unwrap_or(Rhs::Const(ConstValue::None))
+            "await" => named_children(node)
+                .next()
+                .map(|n| self.lower_expr(n))
+                .unwrap_or(Rhs::Const(ConstValue::None)),
+            // Ticket #255: the forms below used to fall to the fallback and
+            // lose the taint of their operands (inventory of the corpus,
+            // see the ticket). `"a" f"{x}"`: implicit concatenation.
+            "concatenated_string" => {
+                let mut parts = named_children(node).map(|part| self.lower_expr(part));
+                let first = parts.next().unwrap_or(Rhs::Opaque);
+                parts.fold(first, |left, right| Rhs::BinOp {
+                    op: "+".to_string(),
+                    left: Box::new(left),
+                    right: Box::new(right),
+                })
             }
-            // Comprehensions, yield, other rare forms: opaque fallback,
+            // `return a, b`, `x = a, b`: a tuple.
+            "expression_list" => Rhs::TupleRef(self.lower_named_children(node)),
+            // `[f(x) for x in xs if c]` (and the set, dict and generator
+            // forms): a collection built from the produced expression and
+            // from the iterables. The loop variable is not bound (it does
+            // not exist outside the comprehension in Python 3, and binding
+            // it could overwrite a variable of the function), so the taint
+            // of the iterables is joined directly: `[x.strip() for x in
+            // tainted]` is tainted. A sanitizer applied to the element
+            // (`[escape(x) for x in tainted]`) is therefore not seen: a
+            // false positive kept, never a finding lost.
+            "list_comprehension"
+            | "set_comprehension"
+            | "dictionary_comprehension"
+            | "generator_expression" => {
+                let mut parts = Vec::new();
+                for child in named_children(node) {
+                    match child.kind() {
+                        "for_in_clause" => {
+                            if let Some(iterable) = child.child_by_field_name("right") {
+                                parts.push(self.lower_expr(iterable));
+                            }
+                        }
+                        // A filter carries no data of the collection.
+                        "if_clause" => {}
+                        "pair" => {
+                            for side in named_children(child) {
+                                parts.push(self.lower_expr(side));
+                            }
+                        }
+                        _ => parts.push(self.lower_expr(child)),
+                    }
+                }
+                Rhs::TupleRef(parts)
+            }
+            // `yield`, `...`, slices, other rare forms: opaque fallback,
             // no taint and no known value (ticket #253: the Audit returns
             // `Const(None)`, which the constant pass reads as false, so a
             // condition such as `if [x for x in xs]:` lost its body).
@@ -324,8 +352,7 @@ impl<'src> Lowerer<'src> {
     }
 
     fn lower_named_children(&mut self, node: Node<'src>) -> Vec<Rhs> {
-        let mut w = node.walk();
-        let children: Vec<Node> = node.named_children(&mut w).collect();
+        let children: Vec<Node> = named_children(node).collect();
         children.into_iter().map(|n| self.lower_expr(n)).collect()
     }
 
@@ -398,16 +425,12 @@ impl<'src> Lowerer<'src> {
     /// choice), modeled as `Call(__format__, [hole1, hole2, ...])`.
     /// A string with no interpolation stays a plain constant.
     fn lower_string(&mut self, node: Node<'src>) -> Rhs {
-        let mut w = node.walk();
-        let has_interpolation = node
-            .named_children(&mut w)
-            .any(|c| c.kind() == "interpolation");
+        let has_interpolation = named_children(node).any(|c| c.kind() == "interpolation");
         if !has_interpolation {
             return Rhs::Const(ConstValue::Str(self.text(node)));
         }
-        let mut w2 = node.walk();
         let mut args = Vec::new();
-        for child in node.named_children(&mut w2) {
+        for child in named_children(node) {
             if child.kind() == "interpolation"
                 && let Some(expr) = child.child_by_field_name("expression")
             {
@@ -450,8 +473,7 @@ impl<'src> Lowerer<'src> {
         let mut args = Vec::new();
         let mut kwargs = Vec::new();
         if let Some(arg_list) = call_node.child_by_field_name("arguments") {
-            let mut w = arg_list.walk();
-            for child in arg_list.named_children(&mut w) {
+            for child in named_children(arg_list) {
                 match child.kind() {
                     "keyword_argument" => {
                         let name = child
@@ -509,14 +531,11 @@ impl<'src> Lowerer<'src> {
                 }
             }
             "pattern_list" | "tuple" | "list_pattern" => {
-                let mut w = node.walk();
-                let elements: Vec<Node> = node.named_children(&mut w).collect();
+                let elements: Vec<Node> = named_children(node).collect();
                 Lhs::TupleLhs(elements.into_iter().map(|n| self.lower_target(n)).collect())
             }
             "list_splat_pattern" => {
-                let mut w = node.walk();
-                let inner = node
-                    .named_children(&mut w)
+                let inner = named_children(node)
                     .next()
                     .map(|n| self.lower_target(n))
                     .unwrap_or(Lhs::VarLhs(String::new()));
@@ -541,8 +560,7 @@ impl<'src> Lowerer<'src> {
             }),
             "delete_statement" => self.lower_delete(node),
             "assert_statement" => {
-                let mut w = node.walk();
-                for child in node.named_children(&mut w) {
+                for child in named_children(node) {
                     self.lower_expr(child);
                 }
                 self.emit(IrStmt::Noop {
@@ -559,13 +577,7 @@ impl<'src> Lowerer<'src> {
                     .unwrap_or_default();
                 let arg_names = node
                     .child_by_field_name("parameters")
-                    .map(|params| {
-                        let mut w = params.walk();
-                        params
-                            .named_children(&mut w)
-                            .map(|p| self.text(p))
-                            .collect()
-                    })
+                    .map(|params| named_children(params).map(|p| self.text(p)).collect())
                     .unwrap_or_default();
                 self.emit(IrStmt::Assign {
                     lhs: Lhs::VarLhs(name),
@@ -599,8 +611,7 @@ impl<'src> Lowerer<'src> {
     }
 
     fn lower_expression_statement(&mut self, node: Node<'src>) {
-        let mut w = node.walk();
-        let Some(inner) = node.named_children(&mut w).next() else {
+        let Some(inner) = named_children(node).next() else {
             return;
         };
         match inner.kind() {
@@ -660,12 +671,10 @@ impl<'src> Lowerer<'src> {
                     lineno,
                 });
                 let tmp_ref = Rhs::VarRef(tmp);
-                let mut w = target.walk();
-                let elements: Vec<Node> = target.named_children(&mut w).collect();
+                let elements: Vec<Node> = named_children(target).collect();
                 for (i, sub_target) in elements.into_iter().enumerate() {
                     if sub_target.kind() == "list_splat_pattern" {
-                        let mut sw = sub_target.walk();
-                        if let Some(inner) = sub_target.named_children(&mut sw).next() {
+                        if let Some(inner) = named_children(sub_target).next() {
                             let lhs = Lhs::StarLhs(Box::new(self.lower_target(inner)));
                             self.emit(IrStmt::Assign {
                                 lhs,
@@ -726,8 +735,7 @@ impl<'src> Lowerer<'src> {
 
     fn lower_import(&mut self, node: Node<'src>) {
         let lineno = self.line(node);
-        let mut w = node.walk();
-        for child in node.named_children(&mut w) {
+        for child in named_children(node) {
             let (module_path, local_name) = match child.kind() {
                 "aliased_import" => {
                     let name_node = child.child_by_field_name("name");
@@ -816,11 +824,9 @@ impl<'src> Lowerer<'src> {
 
     fn lower_delete(&mut self, node: Node<'src>) {
         let lineno = self.line(node);
-        let mut w = node.walk();
-        let named: Vec<Node> = node.named_children(&mut w).collect();
+        let named: Vec<Node> = named_children(node).collect();
         let targets: Vec<Node> = if named.len() == 1 && named[0].kind() == "expression_list" {
-            let mut ew = named[0].walk();
-            named[0].named_children(&mut ew).collect()
+            named_children(named[0]).collect()
         } else {
             named
         };
@@ -845,8 +851,7 @@ impl<'src> Lowerer<'src> {
             .children(&mut node.walk())
             .find(|c| c.kind() == "with_clause")
         {
-            let mut w = clause.walk();
-            for item in clause.named_children(&mut w) {
+            for item in named_children(clause) {
                 if item.kind() != "with_item" {
                     continue;
                 }
@@ -854,11 +859,10 @@ impl<'src> Lowerer<'src> {
                     continue;
                 };
                 let (ctx_expr_node, alias) = if value.kind() == "as_pattern" {
-                    let mut vw = value.walk();
-                    let expr = value.named_children(&mut vw).next();
+                    let expr = named_children(value).next();
                     let alias = value
                         .child_by_field_name("alias")
-                        .and_then(|a| a.named_children(&mut a.walk()).next())
+                        .and_then(|a| named_children(a).next())
                         .map(|n| self.text(n));
                     (expr, alias)
                 } else {
@@ -923,21 +927,13 @@ impl<'src> Lowerer<'src> {
 
     fn lower_raise(&mut self, node: Node<'src>) {
         let lineno = self.line(node);
-        let mut w = node.walk();
-        let value = node
-            .named_children(&mut w)
-            .next()
-            .map(|n| self.lower_expr(n));
+        let value = named_children(node).next().map(|n| self.lower_expr(n));
         self.emit(IrStmt::Raise { value, lineno });
     }
 
     fn lower_return(&mut self, node: Node<'src>) {
         let lineno = self.line(node);
-        let mut w = node.walk();
-        let value = node
-            .named_children(&mut w)
-            .next()
-            .map(|n| self.lower_expr(n));
+        let value = named_children(node).next().map(|n| self.lower_expr(n));
         self.emit(IrStmt::Return { value, lineno });
     }
 }

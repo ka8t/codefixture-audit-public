@@ -61,7 +61,7 @@
 //! model in the rest of the engine).
 
 use super::cfg::{Cfg, NodeKind};
-use super::ir::{ConstValue, IrStmt, Lhs, Rhs};
+use super::ir::{ConstValue, IrStmt, Lhs, Rhs, named_children};
 use std::collections::BTreeMap;
 use tree_sitter::Node;
 
@@ -143,7 +143,7 @@ impl<'src> JsLowerer<'src> {
         }
 
         if t == "parenthesized_expression" {
-            let inner = expr.named_children(&mut expr.walk()).next();
+            let inner = named_children(expr).next();
             return self.lower_expr(inner);
         }
 
@@ -172,6 +172,31 @@ impl<'src> JsLowerer<'src> {
             return self.lower_call_expression(expr);
         }
 
+        // Ticket #255: the forms below used to fall to the fallback and
+        // lose the taint of their operands (inventory of the corpus, see
+        // the ticket). `(a(), b)`: every part runs, the value is the last.
+        if t == "sequence_expression" {
+            let mut value = Rhs::Opaque;
+            for part in named_children(expr) {
+                value = self.lower_expr(Some(part));
+            }
+            return value;
+        }
+
+        // JSX, `<div title={x}>{y}</div>`: an element built from the
+        // expressions it embeds, which carries the taint of every one of
+        // them (`renderToString(element)` then sends it).
+        if matches!(t, "jsx_element" | "jsx_self_closing_element") {
+            let mut parts = Vec::new();
+            self.collect_jsx_expressions(expr, &mut parts);
+            return Rhs::TupleRef(parts);
+        }
+
+        // TypeScript `f<string>`: the function `f`.
+        if t == "instantiation_expression" {
+            return self.lower_expr(expr.child_by_field_name("function"));
+        }
+
         if t == "new_expression" {
             let callee = self.lower_expr(expr.child_by_field_name("constructor"));
             let args = self.lower_arg_list(expr.child_by_field_name("arguments"));
@@ -189,8 +214,7 @@ impl<'src> JsLowerer<'src> {
         }
 
         if t == "array" {
-            let elements: Vec<Rhs> = expr
-                .named_children(&mut expr.walk())
+            let elements: Vec<Rhs> = named_children(expr)
                 .map(|e| self.lower_spreadable(e))
                 .collect();
             return Rhs::ListRef(elements);
@@ -292,12 +316,12 @@ impl<'src> JsLowerer<'src> {
         if t == "await_expression" || t == "yield_expression" {
             // Transparent wrapper: the operand's taint passes through,
             // no async/generator semantics modeled (see module doc).
-            let inner = expr.named_children(&mut expr.walk()).next();
+            let inner = named_children(expr).next();
             return self.lower_expr(inner);
         }
 
         if t == "spread_element" {
-            let inner = expr.named_children(&mut expr.walk()).next();
+            let inner = named_children(expr).next();
             return self.lower_expr(inner);
         }
 
@@ -312,11 +336,11 @@ impl<'src> JsLowerer<'src> {
         //   - `x!` (non_null_expression): a single named child, the
         //     expression itself.
         if t == "as_expression" || t == "non_null_expression" {
-            let inner = expr.named_children(&mut expr.walk()).next();
+            let inner = named_children(expr).next();
             return self.lower_expr(inner);
         }
         if t == "type_assertion" {
-            let inner = expr.named_children(&mut expr.walk()).last();
+            let inner = named_children(expr).last();
             return self.lower_expr(inner);
         }
 
@@ -335,8 +359,7 @@ impl<'src> JsLowerer<'src> {
 
     fn lower_object(&mut self, expr: Node<'src>) -> Rhs {
         let mut pairs = Vec::new();
-        let mut w = expr.walk();
-        for child in expr.named_children(&mut w) {
+        for child in named_children(expr) {
             match child.kind() {
                 "pair" => {
                     let key = child
@@ -351,7 +374,7 @@ impl<'src> JsLowerer<'src> {
                     pairs.push((Rhs::Const(ConstValue::Str(name.clone())), Rhs::VarRef(name)));
                 }
                 "spread_element" => {
-                    let inner = child.named_children(&mut child.walk()).next();
+                    let inner = named_children(child).next();
                     let value = self.lower_expr(inner);
                     pairs.push((Rhs::Const(ConstValue::Str("...".to_string())), value));
                 }
@@ -384,7 +407,7 @@ impl<'src> JsLowerer<'src> {
             match child.kind() {
                 "string_fragment" => parts.push(Rhs::Const(ConstValue::Str(self.text(child)))),
                 "template_substitution" => {
-                    let inner = child.named_children(&mut child.walk()).next();
+                    let inner = named_children(child).next();
                     parts.push(self.lower_expr(inner));
                 }
                 _ => {}
@@ -434,12 +457,32 @@ impl<'src> JsLowerer<'src> {
         Rhs::VarRef(tmp)
     }
 
+    /// The expressions embedded in a JSX element (`{x}` children and
+    /// attribute values, nested elements included), lowered.
+    fn collect_jsx_expressions(&mut self, node: Node<'src>, parts: &mut Vec<Rhs>) {
+        for child in named_children(node) {
+            if child.kind() == "jsx_expression" {
+                for inner in named_children(child) {
+                    parts.push(self.lower_expr(Some(inner)));
+                }
+            } else {
+                self.collect_jsx_expressions(child, parts);
+            }
+        }
+    }
+
     fn lower_arg_list(&mut self, arg_list: Option<Node<'src>>) -> Vec<Rhs> {
         let Some(arg_list) = arg_list else {
             return Vec::new();
         };
-        arg_list
-            .named_children(&mut arg_list.walk())
+        // A tagged template, `` sql`SELECT ${id}` ``, passes its template
+        // as the arguments: one value, the whole string (ticket #255: its
+        // fragments and `${...}` were read as arguments of their own, and
+        // the substitutions lost their taint).
+        if arg_list.kind() == "template_string" {
+            return vec![self.lower_template_string(arg_list)];
+        }
+        named_children(arg_list)
             .map(|a| self.lower_expr(Some(a)))
             .collect()
     }
@@ -453,12 +496,11 @@ impl<'src> JsLowerer<'src> {
             return vec![self.text(params)];
         }
         let mut names = Vec::new();
-        let mut w = params.walk();
-        for p in params.named_children(&mut w) {
+        for p in named_children(params) {
             match p.kind() {
                 "identifier" => names.push(self.text(p)),
                 "required_parameter" | "optional_parameter" => {
-                    if let Some(pat) = p.named_children(&mut p.walk()).next()
+                    if let Some(pat) = named_children(p).next()
                         && pat.kind() == "identifier"
                     {
                         names.push(self.text(pat));
@@ -472,7 +514,7 @@ impl<'src> JsLowerer<'src> {
                     }
                 }
                 "rest_pattern" => {
-                    if let Some(inner) = p.named_children(&mut p.walk()).next() {
+                    if let Some(inner) = named_children(p).next() {
                         names.push(self.text(inner));
                     }
                 }
@@ -613,9 +655,7 @@ impl<'src> JsLowerer<'src> {
     }
 
     fn lower_variable_declaration(&mut self, stmt: Node<'src>) {
-        let mut w = stmt.walk();
-        let decls: Vec<Node<'src>> = stmt
-            .named_children(&mut w)
+        let decls: Vec<Node<'src>> = named_children(stmt)
             .filter(|c| c.kind() == "variable_declarator")
             .collect();
         for decl in decls {
@@ -651,7 +691,7 @@ impl<'src> JsLowerer<'src> {
     }
 
     fn lower_expression_statement(&mut self, stmt: Node<'src>) {
-        let inner = stmt.named_children(&mut stmt.walk()).next();
+        let inner = named_children(stmt).next();
         let Some(inner) = inner else {
             self.emit(IrStmt::Noop {
                 lineno: self.line(stmt),
@@ -685,7 +725,7 @@ impl<'src> JsLowerer<'src> {
     }
 
     fn lower_return_statement(&mut self, stmt: Node<'src>) {
-        let value_node = stmt.named_children(&mut stmt.walk()).next();
+        let value_node = named_children(stmt).next();
         let value = value_node.map(|v| self.lower_expr(Some(v)));
         self.emit(IrStmt::Return {
             value,
@@ -694,7 +734,7 @@ impl<'src> JsLowerer<'src> {
     }
 
     fn lower_throw_statement(&mut self, stmt: Node<'src>) {
-        let value_node = stmt.named_children(&mut stmt.walk()).next();
+        let value_node = named_children(stmt).next();
         let value = value_node.map(|v| self.lower_expr(Some(v)));
         self.emit(IrStmt::Raise {
             value,
@@ -768,7 +808,7 @@ pub fn lower_condition<'src>(source: &'src [u8], expr: Node<'src>) -> Vec<IrStmt
         if unwrapped.kind() != "parenthesized_expression" {
             break;
         }
-        let Some(inner) = unwrapped.named_children(&mut unwrapped.walk()).next() else {
+        let Some(inner) = named_children(unwrapped).next() else {
             break;
         };
         unwrapped = inner;
