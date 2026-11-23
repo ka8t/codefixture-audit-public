@@ -1688,6 +1688,7 @@ fn write_sbom(
     let deps = codefixture_audit::project::dependencies::collect_dependencies(
         &config.root,
         &config.include_paths,
+        &config.exclude_patterns,
     );
     let sbom = codefixture_audit::report::exports::sbom::build_dependency_sbom(
         &deps,

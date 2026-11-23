@@ -106,6 +106,7 @@ impl ScanInputs {
         let manifest_files: Vec<PathBuf> = crate::project::dependencies::find_dependency_files(
             &config.root,
             &config.include_paths,
+            &config.exclude_patterns,
         )
         .into_iter()
         .map(|(path, _)| path)

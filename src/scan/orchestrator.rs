@@ -1895,10 +1895,14 @@ pub fn run_scan(config: &ScanConfig) -> ScanReport {
             .is_ok_and(|header| header.has_version_rules());
     let mut declared_dependencies = ((config.with_deps || pack_has_version_rules)
         && !config.quick_mode)
-        // Root + every `paths.include` entry, like Python — see
-        // `dependencies::collect_dependencies` (fix 2026-11-04).
+        // Every manifest under the scanned folders, with the scan's
+        // exclusions — see `dependencies::find_dependency_files` (#287).
         .then(|| {
-            crate::project::dependencies::collect_dependencies(&config.root, &config.include_paths)
+            crate::project::dependencies::collect_dependencies(
+                &config.root,
+                &config.include_paths,
+                &config.exclude_patterns,
+            )
         });
     let deps_phase_active = !config.quick_mode
         && (config.with_deps

@@ -228,65 +228,138 @@ fn read_lines(path: &Path) -> Vec<(usize, String)> {
         .unwrap_or_default()
 }
 
-const ROOT_DEP_FILES: [(&str, DepFileType); 6] = [
+/// Manifest names recognized wherever they sit in the scanned folders,
+/// with the parser each one goes to. `*.csproj` and `requirements/*.txt`
+/// are recognized by [`manifest_type`] instead, since they have no fixed
+/// name.
+const MANIFEST_FILES: [(&str, DepFileType); 7] = [
     ("requirements.txt", DepFileType::Requirements),
     ("pyproject.toml", DepFileType::Requirements),
     ("Pipfile", DepFileType::Pipfile),
     ("pom.xml", DepFileType::PomXml),
     ("build.gradle", DepFileType::BuildGradle),
     ("composer.json", DepFileType::ComposerJson),
+    ("package.json", DepFileType::PackageJson),
 ];
 
-fn add_root_files(
-    base: &Path,
-    dep_files: &mut Vec<(PathBuf, DepFileType)>,
-    seen: &mut std::collections::BTreeSet<PathBuf>,
-) {
-    for (filename, file_type) in ROOT_DEP_FILES {
-        let filepath = normalize(&base.join(filename));
-        if filepath.exists() && seen.insert(filepath.clone()) {
-            dep_files.push((filepath, file_type));
-        }
+/// The manifest type of `path`, or `None` when it is no manifest: one of
+/// [`MANIFEST_FILES`], a `*.csproj`, or a `.txt` file in a folder named
+/// `requirements` (the `requirements/base.txt` layout).
+fn manifest_type(path: &Path) -> Option<DepFileType> {
+    let name = path.file_name()?.to_str()?;
+    if let Some((_, file_type)) = MANIFEST_FILES.iter().find(|(n, _)| *n == name) {
+        return Some(*file_type);
     }
-    for entry in glob_csproj(base) {
-        let entry = normalize(&entry);
-        if seen.insert(entry.clone()) {
-            dep_files.push((entry, DepFileType::Csproj));
-        }
+    let extension = path.extension().and_then(|e| e.to_str());
+    if extension == Some("csproj") {
+        return Some(DepFileType::Csproj);
     }
-    for entry in glob_requirements_dir(base) {
-        let entry = normalize(&entry);
-        if seen.insert(entry.clone()) {
-            dep_files.push((entry, DepFileType::Requirements));
-        }
-    }
+    let in_requirements_dir = path
+        .parent()
+        .and_then(Path::file_name)
+        .is_some_and(|dir| dir == "requirements");
+    (extension == Some("txt") && in_requirements_dir).then_some(DepFileType::Requirements)
 }
 
-/// Finds the dependency manifest files of the audited project —
-/// port of `_find_dependency_files`.
+/// Finds the dependency manifests of the audited project: every manifest
+/// under the scanned folders (`paths.include`, the root by default), with
+/// the same discovery as the code files, so the same exclusions apply
+/// (`paths.exclude`, the default `node_modules/`, `vendor/`…, build output,
+/// virtualenvs and documentation folders).
+///
+/// Deliberate deviation from Python (`_find_dependency_files`, ticket
+/// #287): Audit only looked at the root and at the root of each
+/// `paths.include` entry, so a manifest one folder lower was ignored
+/// without a word. DVWA keeps its `composer.json` in `vulnerabilities/api/`:
+/// its dependencies were never checked and its SBOM was empty. A project
+/// usually declares its dependencies where its code is, at any depth, and
+/// the third-party copies are the folders the exclusions already leave out.
 pub fn find_dependency_files(
     root_dir: &Path,
     include_paths: &[String],
+    exclude_patterns: &[String],
 ) -> Vec<(PathBuf, DepFileType)> {
-    let mut dep_files = Vec::new();
-    let mut seen = std::collections::BTreeSet::new();
-
-    add_root_files(root_dir, &mut dep_files, &mut seen);
-
-    for base_path in include_paths {
-        let full_path = root_dir.join(base_path);
-        if !full_path.exists() {
-            continue;
-        }
-        add_root_files(&full_path, &mut dep_files, &mut seen);
-
-        let pkg_json = normalize(&full_path.join("package.json"));
-        if pkg_json.exists() && seen.insert(pkg_json.clone()) {
-            dep_files.push((pkg_json, DepFileType::PackageJson));
-        }
+    let config = crate::scan::discovery::FileDiscoveryConfig {
+        extensions: vec![".csproj".to_string(), ".txt".to_string()],
+        filenames: MANIFEST_FILES.iter().map(|(n, _)| n.to_string()).collect(),
+        exclude_patterns: exclude_patterns.to_vec(),
+        prune_excludes: exclude_patterns.to_vec(),
+        skip_non_project_dirs: true,
+    };
+    // The manifests at the root come first and are read even when
+    // `paths.include` limits the scan to subfolders (`include: ["src/"]`
+    // with `build.gradle` at the root), as Audit and the engine always did:
+    // the build file of a project sits at its root. They are named one by
+    // one, so the rest of the root is not walked; the walk's deduplication
+    // keeps each file once. Then come the scanned folders.
+    let mut starts: Vec<PathBuf> = root_manifest_starts(root_dir);
+    if include_paths.is_empty() {
+        starts.push(PathBuf::from("."));
+    } else {
+        starts.extend(include_paths.iter().map(PathBuf::from));
     }
+    let starts: Vec<&Path> = starts.iter().map(PathBuf::as_path).collect();
+    let found: Vec<(PathBuf, DepFileType)> =
+        crate::scan::discovery::find_files(root_dir, &starts, &config)
+            .into_iter()
+            .filter_map(|path| manifest_type(&path).map(|t| (normalize(&path), t)))
+            .collect();
+    // The walk lists a folder's files by name; within one folder the
+    // manifests keep Audit's order (`requirements.txt` before
+    // `pyproject.toml`…, the order of `MANIFEST_FILES`), so the SBOM and the
+    // report of a project whose manifests sit at the root do not change.
+    // The folders themselves keep the walk order (a stable sort).
+    let folder_rank: Vec<PathBuf> = found.iter().fold(Vec::new(), |mut folders, (path, _)| {
+        let folder = path.parent().map(Path::to_path_buf).unwrap_or_default();
+        if !folders.contains(&folder) {
+            folders.push(folder);
+        }
+        folders
+    });
+    let mut found = found;
+    found.sort_by_key(|(path, file_type)| {
+        let folder = path.parent().map(Path::to_path_buf).unwrap_or_default();
+        let folder_index = folder_rank
+            .iter()
+            .position(|f| *f == folder)
+            .unwrap_or(usize::MAX);
+        (folder_index, manifest_rank(path, *file_type))
+    });
+    found
+}
 
-    dep_files
+/// The manifests at the root of the project, as paths relative to it:
+/// the named ones of [`MANIFEST_FILES`], the `*.csproj` files and the
+/// `requirements/` folder (walked, for its `*.txt` files).
+fn root_manifest_starts(root_dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(root_dir) else {
+        return Vec::new();
+    };
+    let mut starts: Vec<PathBuf> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            (path.is_file() && manifest_type(path).is_some())
+                || (path.is_dir() && path.file_name().is_some_and(|n| n == "requirements"))
+        })
+        .filter_map(|path| path.file_name().map(PathBuf::from))
+        .collect();
+    starts.sort();
+    starts
+}
+
+/// Position of a manifest in Audit's order within one folder: the named
+/// manifests in the order of [`MANIFEST_FILES`], then `*.csproj`, then the
+/// `requirements/*.txt` files.
+fn manifest_rank(path: &Path, file_type: DepFileType) -> usize {
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    if let Some(index) = MANIFEST_FILES.iter().position(|(n, _)| *n == name) {
+        return index;
+    }
+    match file_type {
+        DepFileType::Csproj => MANIFEST_FILES.len(),
+        _ => MANIFEST_FILES.len() + 1,
+    }
 }
 
 fn normalize(path: &Path) -> PathBuf {
@@ -295,31 +368,6 @@ fn normalize(path: &Path) -> PathBuf {
     // to `os.path.normpath` for the use `_find_dependency_files` makes
     // of it (deduplicating "root/./requirements.txt" and "root/requirements.txt").
     path.components().collect()
-}
-
-fn glob_csproj(dir: &Path) -> Vec<PathBuf> {
-    std::fs::read_dir(dir)
-        .map(|entries| {
-            entries
-                .flatten()
-                .map(|e| e.path())
-                .filter(|p| p.extension().is_some_and(|e| e == "csproj"))
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-fn glob_requirements_dir(dir: &Path) -> Vec<PathBuf> {
-    let req_dir = dir.join("requirements");
-    std::fs::read_dir(&req_dir)
-        .map(|entries| {
-            entries
-                .flatten()
-                .map(|e| e.path())
-                .filter(|p| p.extension().is_some_and(|e| e == "txt"))
-                .collect()
-        })
-        .unwrap_or_default()
 }
 
 /// Port of `_parse_requirements_txt` (delegates to
@@ -1156,7 +1204,8 @@ pub fn parse_dependency_file(path: &Path, file_type: DepFileType) -> Vec<Depende
 }
 
 /// Discovers and parses every dependency manifest of the audited
-/// project: the root, plus each `paths.include` entry — mirrors
+/// project: every manifest under the scanned folders, outside the excluded
+/// ones ([`find_dependency_files`], ticket #287) — mirrors
 /// `_find_dependency_files` + the per-file parsers, as used both by
 /// `_audit_dependencies` (`--with-deps`) and `_export_sbom` (`--sbom`)
 /// on the Python side. Shared by both Rust consumers so they can never
@@ -1172,8 +1221,12 @@ pub fn parse_dependency_file(path: &Path, file_type: DepFileType) -> Vec<Depende
 /// `pyproject.toml`) share its lockfile, so each lists its transitive
 /// packages. Each is kept once, and a package one manifest declares
 /// directly is not also listed as another's transitive one.
-pub fn collect_dependencies(root_dir: &Path, include_paths: &[String]) -> Vec<Dependency> {
-    let all: Vec<Dependency> = find_dependency_files(root_dir, include_paths)
+pub fn collect_dependencies(
+    root_dir: &Path,
+    include_paths: &[String],
+    exclude_patterns: &[String],
+) -> Vec<Dependency> {
+    let all: Vec<Dependency> = find_dependency_files(root_dir, include_paths, exclude_patterns)
         .iter()
         .flat_map(|(path, file_type)| parse_dependency_file(path, *file_type))
         .collect();
@@ -1862,10 +1915,10 @@ local = { path = "../local" }
         )
         .unwrap();
 
-        let files = find_dependency_files(&dir, &[]);
+        let files = find_dependency_files(&dir, &[], &[]);
         assert_eq!(files, vec![(dir.join("Pipfile"), DepFileType::Pipfile)]);
 
-        let deps = collect_dependencies(&dir, &[]);
+        let deps = collect_dependencies(&dir, &[], &[]);
         let listed: Vec<(&str, Option<&str>, usize, &VersionSource)> = deps
             .iter()
             .map(|d| {
@@ -1934,7 +1987,7 @@ local = { path = "../local" }
             "[[package]]\nname = \"requests\"\nversion = \"2.31.0\"\n\n[package.dependencies]\nurllib3 = \">=1\"\nidna = \">=2\"\n\n[[package]]\nname = \"urllib3\"\nversion = \"2.0.7\"\n\n[[package]]\nname = \"idna\"\nversion = \"3.6\"\n",
         )
         .unwrap();
-        let deps = collect_dependencies(&dir, &[]);
+        let deps = collect_dependencies(&dir, &[], &[]);
         let listed: Vec<(String, Option<String>, bool)> = deps
             .iter()
             .map(|d| {
@@ -1956,6 +2009,107 @@ local = { path = "../local" }
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// Ticket #287: with `paths.include` limited to `src/`, the manifest at
+    /// the root is still read (spring-boot-realworld keeps `build.gradle` at
+    /// its root and scans `src/` only), and only once.
+    #[test]
+    fn test_find_dependency_files_reads_the_root_outside_include_paths() {
+        let dir = std::env::temp_dir().join(format!(
+            "codefixture-audit-deps-root-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src/web")).unwrap();
+        std::fs::write(dir.join("build.gradle"), "dependencies {}\n").unwrap();
+        std::fs::write(dir.join("src/web/package.json"), "{}").unwrap();
+        let names: Vec<String> = find_dependency_files(&dir, &["src/".to_string()], &[])
+            .into_iter()
+            .map(|(path, _)| {
+                path.strip_prefix(&dir)
+                    .unwrap_or(&path)
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "build.gradle".to_string(),
+                "src/web/package.json".to_string()
+            ]
+        );
+        let names_root: Vec<String> = find_dependency_files(&dir, &[".".to_string()], &[])
+            .into_iter()
+            .map(|(path, _)| {
+                path.strip_prefix(&dir)
+                    .unwrap_or(&path)
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
+            .collect();
+        assert_eq!(
+            names_root,
+            vec![
+                "build.gradle".to_string(),
+                "src/web/package.json".to_string()
+            ]
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Ticket #287: a manifest one folder below the root is read (DVWA keeps
+    /// its `composer.json` in `vulnerabilities/api/`), a manifest inside an
+    /// excluded folder is not, a `.txt` that is no manifest is not, and the
+    /// `requirements/*.txt` layout is recognized at any depth.
+    #[test]
+    fn test_find_dependency_files_reads_manifests_below_the_root() {
+        let dir = std::env::temp_dir().join(format!(
+            "codefixture-audit-deps-nested-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        for sub in [
+            "api",
+            "node_modules/left-pad",
+            "backend/requirements",
+            "docs-src",
+        ] {
+            std::fs::create_dir_all(dir.join(sub)).unwrap();
+        }
+        std::fs::write(
+            dir.join("api/composer.json"),
+            r#"{"require":{"a/b":"1.0"}}"#,
+        )
+        .unwrap();
+        std::fs::write(dir.join("node_modules/left-pad/package.json"), "{}").unwrap();
+        std::fs::write(dir.join("backend/requirements/base.txt"), "django==4.0\n").unwrap();
+        std::fs::write(dir.join("docs-src/notes.txt"), "not a manifest\n").unwrap();
+        let excludes = vec!["node_modules".to_string()];
+        let found: Vec<(String, DepFileType)> =
+            find_dependency_files(&dir, &[".".to_string()], &excludes)
+                .into_iter()
+                .map(|(path, t)| {
+                    let rel = path
+                        .strip_prefix(&dir)
+                        .unwrap_or(&path)
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    (rel, t)
+                })
+                .collect();
+        assert_eq!(
+            found,
+            vec![
+                ("api/composer.json".to_string(), DepFileType::ComposerJson),
+                (
+                    "backend/requirements/base.txt".to_string(),
+                    DepFileType::Requirements
+                ),
+            ]
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn test_find_dependency_files_root_requirements() {
         let dir = std::env::temp_dir().join(format!(
@@ -1964,7 +2118,7 @@ local = { path = "../local" }
         ));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("requirements.txt"), "django==4.0\n").unwrap();
-        let files = find_dependency_files(&dir, &[]);
+        let files = find_dependency_files(&dir, &[], &[]);
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].1, DepFileType::Requirements);
         std::fs::remove_dir_all(&dir).ok();
