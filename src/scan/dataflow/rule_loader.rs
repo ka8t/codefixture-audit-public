@@ -327,7 +327,7 @@ fn finalize_dotted(pattern: &str) -> String {
 /// "Best-effort" conversion of a DSL regex into a list of "dotted"
 /// patterns. Returns an empty list if the regex is too opaque.
 pub fn regex_to_dotted_patterns(regex_str: &str) -> Vec<String> {
-    to_dotted_patterns(regex_str, ArgumentText::Keep)
+    to_dotted_patterns(regex_str, ArgumentText::Keep).patterns
 }
 
 /// [`regex_to_dotted_patterns`] for a sink: the pattern ends at the `(`
@@ -345,7 +345,35 @@ pub fn regex_to_dotted_patterns(regex_str: &str) -> Vec<String> {
 /// and `file_get_contents\s*\(\s*['"]php://input` cut to
 /// `file_get_contents` would make every call of it a source.
 pub fn sink_regex_to_dotted_patterns(regex_str: &str) -> Vec<String> {
-    to_dotted_patterns(regex_str, ArgumentText::CutAtCall)
+    to_dotted_patterns(regex_str, ArgumentText::CutAtCall).patterns
+}
+
+/// The dotted patterns of a source's or a sanitizer's regex, and whether
+/// the data flow must confirm a match on the line (ticket #270).
+pub struct ConfirmedPatterns {
+    /// The dotted patterns, cut at the `(` of the call as for a sink.
+    pub patterns: Vec<String>,
+    /// The patterns dropped part of the regex: a look-around
+    /// (`\.getProperty\s*\(\s*"(?!os\.name|…)`) or the text of the
+    /// arguments (`filter_var\s*\([^)]*FILTER_SANITIZE`). The data flow
+    /// then takes a name matching them only when the regex matches the
+    /// line ([`SourceSpec::confirm_on_line`]).
+    pub confirm_on_line: bool,
+}
+
+/// [`regex_to_dotted_patterns`] for a source or a sanitizer: the pattern
+/// ends at the call, as a sink's does, and what that cut or a
+/// look-around dropped is checked on the line instead of being lost.
+/// Before ticket #270 the argument text stayed in the pattern
+/// (`filter_var[^)]*FILTER_SANITIZE`, a name no call has), and a
+/// look-around was dropped silently: `getProperty("os.name")`, which
+/// the rule excludes, was a source for the data flow.
+pub fn confirmed_regex_to_dotted_patterns(regex_str: &str) -> ConfirmedPatterns {
+    let conversion = to_dotted_patterns(regex_str, ArgumentText::CutAtCall);
+    ConfirmedPatterns {
+        patterns: conversion.patterns,
+        confirm_on_line: conversion.dropped_constraint,
+    }
 }
 
 /// What [`to_dotted_patterns`] does with the text after the `(` of a call.
@@ -357,11 +385,24 @@ enum ArgumentText {
     CutAtCall,
 }
 
-fn to_dotted_patterns(regex_str: &str, arguments: ArgumentText) -> Vec<String> {
+/// What [`to_dotted_patterns`] gives: the patterns, and whether they
+/// dropped part of the regex.
+struct Conversion {
+    patterns: Vec<String>,
+    /// A look-around was removed, or an alternative had text after the
+    /// `(` of its call (with [`ArgumentText::CutAtCall`]).
+    dropped_constraint: bool,
+}
+
+fn to_dotted_patterns(regex_str: &str, arguments: ArgumentText) -> Conversion {
     if regex_str.is_empty() {
-        return Vec::new();
+        return Conversion {
+            patterns: Vec::new(),
+            dropped_constraint: false,
+        };
     }
     let stripped = strip_lookaround_groups(regex_str);
+    let mut dropped_constraint = stripped != regex_str;
     // `new X(...)` is named after its class by every conversion: Java and
     // C# `type_to_rhs` (`File`, `java.io.File`), the JavaScript
     // `constructor` field (`URL`, `foo.Bar`), the PHP class name
@@ -403,13 +444,23 @@ fn to_dotted_patterns(regex_str: &str, arguments: ArgumentText) -> Vec<String> {
     let clean = clean.replace(r"\::", &dot).replace("::", &dot);
     let clean = clean.trim_start_matches('^').trim_end_matches('$');
     let clean = clean.split('=').next().unwrap_or("").trim().to_string();
-    expand_alternations(&clean)
+    let alternatives = expand_alternations(&clean);
+    dropped_constraint |= alternatives.iter().any(|alternative| {
+        alternative
+            .split_once(CALL_PAREN)
+            .is_some_and(|(_, after)| !after.trim().is_empty())
+    });
+    let patterns = alternatives
         .into_iter()
         .filter_map(|p| {
             let f = finalize_dotted(&p).replace(LITERAL_BACKSLASH, "\\");
             if f.is_empty() { None } else { Some(f) }
         })
-        .collect()
+        .collect();
+    Conversion {
+        patterns,
+        dropped_constraint,
+    }
 }
 
 // ============================================================================
@@ -484,7 +535,7 @@ pub fn has_taint_specs(rule_json: &Value) -> bool {
                     let dotted = if key == "sinks" {
                         sink_regex_to_dotted_patterns(pattern)
                     } else {
-                        regex_to_dotted_patterns(pattern)
+                        confirmed_regex_to_dotted_patterns(pattern).patterns
                     };
                     !dotted.is_empty()
                 })
@@ -515,9 +566,11 @@ pub fn rule_json_to_specs(rule_json: &Value, lang: &str) -> Option<RuleSpecs> {
             json_str(s, "kind")
         };
         let compiled = safe_compile_regex(regex);
-        for dotted in regex_to_dotted_patterns(regex) {
+        let conversion = confirmed_regex_to_dotted_patterns(regex);
+        for dotted in conversion.patterns {
             let mut spec = SourceSpec::new(dotted, kind);
             spec.raw_regex = compiled.clone();
+            spec.confirm_on_line = conversion.confirm_on_line;
             sources.push(spec);
         }
     }
@@ -576,9 +629,11 @@ pub fn rule_json_to_specs(rule_json: &Value, lang: &str) -> Option<RuleSpecs> {
     {
         let regex = json_str(s, "pattern");
         let compiled = safe_compile_regex(regex);
-        for dotted in regex_to_dotted_patterns(regex) {
+        let conversion = confirmed_regex_to_dotted_patterns(regex);
+        for dotted in conversion.patterns {
             let mut spec = SanitizerSpec::new(dotted);
             spec.raw_regex = compiled.clone();
+            spec.confirm_on_line = conversion.confirm_on_line;
             sanitizers.push(spec);
         }
     }
@@ -1099,6 +1154,42 @@ mod tests {
             regex_to_dotted_patterns(r#"file_get_contents\s*\(\s*['"]php://input"#),
             vec![r#"file_get_contents['"]php://input"#]
         );
+    }
+
+    #[test]
+    fn test_source_or_sanitizer_that_drops_a_constraint_is_confirmed_on_its_line() {
+        // A look-around: the excluded keys are checked on the line.
+        let property = confirmed_regex_to_dotted_patterns(r#"\.getProperty\s*\(\s*"(?!os\.name)"#);
+        assert_eq!(property.patterns, vec!["**.getProperty"]);
+        assert!(property.confirm_on_line);
+        // Argument text: cut at the call, checked on the line.
+        let filter = confirmed_regex_to_dotted_patterns(r"filter_var\s*\([^)]*FILTER_SANITIZE");
+        assert_eq!(filter.patterns, vec!["filter_var"]);
+        assert!(filter.confirm_on_line);
+        // A plain call name drops nothing.
+        let plain = confirmed_regex_to_dotted_patterns(r"request\.getParameter\s*\(");
+        assert_eq!(plain.patterns, vec!["request.getParameter"]);
+        assert!(!plain.confirm_on_line);
+        let attribute = confirmed_regex_to_dotted_patterns(r"req\.query\.");
+        assert_eq!(attribute.patterns, vec!["req.query.*"]);
+        assert!(!attribute.confirm_on_line);
+    }
+
+    #[test]
+    fn test_loaded_specs_carry_the_confirmation() {
+        let rule = serde_json::json!({
+            "id": "t",
+            "sources": [
+                {"pattern": r#"\.getProperty\s*\(\s*"(?!os\.name)"#, "kind": "env"},
+                {"pattern": r"request\.getParameter\s*\(", "kind": "http"},
+            ],
+            "sinks": [{"pattern": r"new\s+File\s*\(", "arg_index": 0}],
+            "sanitizers": [{"pattern": r"filter_var\s*\([^)]*FILTER_SANITIZE"}],
+        });
+        let specs = rule_json_to_specs(&rule, "java").expect("taint specs");
+        assert!(specs.sources[0].confirm_on_line);
+        assert!(!specs.sources[1].confirm_on_line);
+        assert!(specs.sanitizers[0].confirm_on_line);
     }
 
     fn compile_glob(pattern: &str) -> super::super::transfer::GlobPattern {

@@ -744,6 +744,11 @@ pub struct SourceSpec {
     pub kind: String,
     /// Phase 7 — regex over the raw source line (§10bis, next component).
     pub raw_regex: Option<Regex>,
+    /// The dotted pattern dropped part of the rule's regex (a look-around,
+    /// the text of the arguments): the data flow takes a name matching it
+    /// as this source only when `raw_regex` also matches the line (see
+    /// [`Site::confirms`]). Ticket #270.
+    pub confirm_on_line: bool,
     compiled: GlobPattern,
 }
 
@@ -755,6 +760,7 @@ impl SourceSpec {
             pattern,
             kind: kind.into(),
             raw_regex: None,
+            confirm_on_line: false,
             compiled,
         }
     }
@@ -823,6 +829,10 @@ pub struct SanitizerSpec {
     pub pattern: String,
     pub args: Vec<usize>,
     pub raw_regex: Option<Regex>,
+    /// Same as [`SourceSpec::confirm_on_line`], for a sanitizer:
+    /// `filter_var\s*\([^)]*FILTER_SANITIZE` cleans a `filter_var` call only
+    /// when its line passes the filter the regex names. Ticket #270.
+    pub confirm_on_line: bool,
     compiled: GlobPattern,
 }
 
@@ -834,6 +844,7 @@ impl SanitizerSpec {
             pattern,
             args: Vec::new(),
             raw_regex: None,
+            confirm_on_line: false,
             compiled,
         }
     }
@@ -1021,9 +1032,20 @@ pub enum ResolvedSpec<'a> {
 
 /// Resolves a callee name against a rule's specs.
 /// Priority (§5.2): SOURCE > SINK > SANITIZER > PASSTHROUGH > UNKNOWN.
-pub fn resolve_spec<'a>(callee_name: &str, specs: &'a RuleSpecs) -> ResolvedSpec<'a> {
+///
+/// A source or a sanitizer whose dotted pattern dropped part of its regex
+/// is taken only when `site` confirms it on the line (ticket #270);
+/// otherwise the search goes on with the next spec, as if its name did
+/// not match.
+pub fn resolve_spec<'a>(
+    callee_name: &str,
+    specs: &'a RuleSpecs,
+    site: Site<'_>,
+) -> ResolvedSpec<'a> {
     for s in &specs.sources {
-        if match_pattern(callee_name, &s.compiled) {
+        if match_pattern(callee_name, &s.compiled)
+            && site.confirms(s.confirm_on_line, s.raw_regex.as_ref())
+        {
             return ResolvedSpec::Source(s);
         }
     }
@@ -1033,7 +1055,9 @@ pub fn resolve_spec<'a>(callee_name: &str, specs: &'a RuleSpecs) -> ResolvedSpec
         }
     }
     for s in &specs.sanitizers {
-        if match_pattern(callee_name, &s.compiled) {
+        if match_pattern(callee_name, &s.compiled)
+            && site.confirms(s.confirm_on_line, s.raw_regex.as_ref())
+        {
             return ResolvedSpec::Sanitizer(s);
         }
     }
@@ -1045,9 +1069,12 @@ pub fn resolve_spec<'a>(callee_name: &str, specs: &'a RuleSpecs) -> ResolvedSpec
     ResolvedSpec::Unknown
 }
 
-fn check_source_match(name: &str, specs: &RuleSpecs, lineno: usize) -> Option<Taint> {
+fn check_source_match(name: &str, specs: &RuleSpecs, site: Site<'_>) -> Option<Taint> {
+    let lineno = site.line;
     for s in &specs.sources {
-        if match_pattern(name, &s.compiled) {
+        if match_pattern(name, &s.compiled)
+            && site.confirms(s.confirm_on_line, s.raw_regex.as_ref())
+        {
             return Some(Taint::tainted(
                 [s.kind.clone()],
                 SourceInfo {
@@ -1085,17 +1112,64 @@ fn key_repr(rhs: &Rhs) -> String {
 // RHS evaluation (§5.1)
 // ============================================================================
 
+/// Where an expression is evaluated: the line of its statement and, when
+/// the caller has them, the lines of the file. The data flow reads the
+/// line's text for one purpose only: confirming a source or a sanitizer
+/// whose dotted pattern dropped part of its regex (ticket #270).
+#[derive(Clone, Copy)]
+pub struct Site<'a> {
+    /// The line (1-based) of the statement.
+    pub line: usize,
+    lines: Option<&'a RuleLines<'a>>,
+}
+
+impl<'a> Site<'a> {
+    /// The statement at `line` of the file `lines` holds, when known.
+    pub fn new(line: usize, lines: Option<&'a RuleLines<'a>>) -> Self {
+        Site { line, lines }
+    }
+
+    /// A statement whose file text is not at hand (unit tests, callers
+    /// without the file's lines).
+    pub fn bare(line: usize) -> Self {
+        Site { line, lines: None }
+    }
+
+    /// Whether a spec matched by its dotted pattern is confirmed here.
+    /// A spec that needs no confirmation always is. One that needs it is
+    /// confirmed when its raw regex matches the text of the line; without
+    /// that text, it is taken as before ticket #270, as the engine has
+    /// nothing to read the dropped part of the regex against.
+    ///
+    /// The regex is tested here rather than read from the line's cached
+    /// facts: the facts keep the first matching sanitizer only, and the
+    /// specs that need a confirmation are few (a regex with a look-around
+    /// or argument text, about 30 in the catalog), tested only when their
+    /// name matched.
+    pub fn confirms(&self, confirm_on_line: bool, raw_regex: Option<&Regex>) -> bool {
+        if !confirm_on_line {
+            return true;
+        }
+        let (Some(lines), Some(regex)) = (self.lines, raw_regex) else {
+            return true;
+        };
+        lines
+            .line(self.line)
+            .is_some_and(|text| regex.is_match(text).unwrap_or(false))
+    }
+}
+
 pub fn eval_rhs(
     rhs: &Rhs,
     state: &State,
     specs: &RuleSpecs,
     findings: &mut Vec<Finding>,
-    lineno: usize,
+    site: Site<'_>,
 ) -> Taint {
     match rhs {
         Rhs::Const(_) => Taint::Clean,
         Rhs::VarRef(name) => {
-            if let Some(t) = check_source_match(name, specs, lineno) {
+            if let Some(t) = check_source_match(name, specs, site) {
                 return t;
             }
             // §9.bis — aggregates indexed sub-entries: if `obj['k']`
@@ -1122,13 +1196,13 @@ pub fn eval_rhs(
         }
         Rhs::AttrRef { base, .. } => {
             let attr_name = canon_callee(rhs);
-            if let Some(t) = check_source_match(&attr_name, specs, lineno) {
+            if let Some(t) = check_source_match(&attr_name, specs, site) {
                 return t;
             }
             let attr_key = canon_rhs(rhs);
             join(
                 &state_get(state, &attr_key),
-                &eval_rhs(base, state, specs, findings, lineno),
+                &eval_rhs(base, state, specs, findings, site),
             )
         }
         Rhs::SubscriptRef { base, key } => {
@@ -1146,43 +1220,43 @@ pub fn eval_rhs(
             join(
                 &join(&sub_taint, &state_get(state, &base_key)),
                 &join(
-                    &eval_rhs(base, state, specs, findings, lineno),
-                    &eval_rhs(key, state, specs, findings, lineno),
+                    &eval_rhs(base, state, specs, findings, site),
+                    &eval_rhs(key, state, specs, findings, site),
                 ),
             )
         }
         Rhs::BinOp { left, right, .. } => join(
-            &eval_rhs(left, state, specs, findings, lineno),
-            &eval_rhs(right, state, specs, findings, lineno),
+            &eval_rhs(left, state, specs, findings, site),
+            &eval_rhs(right, state, specs, findings, site),
         ),
-        Rhs::UnaryOp { operand, .. } => eval_rhs(operand, state, specs, findings, lineno),
+        Rhs::UnaryOp { operand, .. } => eval_rhs(operand, state, specs, findings, site),
         Rhs::Cmp { left, right, .. } => {
-            eval_rhs(left, state, specs, findings, lineno);
-            eval_rhs(right, state, specs, findings, lineno);
+            eval_rhs(left, state, specs, findings, site);
+            eval_rhs(right, state, specs, findings, site);
             Taint::Clean
         }
         Rhs::Bool { operands, .. } => operands.iter().fold(Taint::Clean, |acc, op| {
-            join(&acc, &eval_rhs(op, state, specs, findings, lineno))
+            join(&acc, &eval_rhs(op, state, specs, findings, site))
         }),
         Rhs::TupleRef(elements) | Rhs::ListRef(elements) | Rhs::SetRef(elements) => {
             elements.iter().fold(Taint::Clean, |acc, e| {
-                join(&acc, &eval_rhs(e, state, specs, findings, lineno))
+                join(&acc, &eval_rhs(e, state, specs, findings, site))
             })
         }
         Rhs::DictRef(items) => items.iter().fold(Taint::Clean, |acc, (k, v)| {
-            let acc = join(&acc, &eval_rhs(k, state, specs, findings, lineno));
-            join(&acc, &eval_rhs(v, state, specs, findings, lineno))
+            let acc = join(&acc, &eval_rhs(k, state, specs, findings, site));
+            join(&acc, &eval_rhs(v, state, specs, findings, site))
         }),
-        Rhs::Star { inner, .. } => eval_rhs(inner, state, specs, findings, lineno),
+        Rhs::Star { inner, .. } => eval_rhs(inner, state, specs, findings, site),
         Rhs::IfExp { cond, then, orelse } => {
             // §9 — conservative semantics: evaluates the condition for
             // its effects, then joins both branches. Simplification
             // when cond is Const-evaluable is done upstream by
             // `_compute_dead_edges` (const_eval.rs).
-            eval_rhs(cond, state, specs, findings, lineno);
+            eval_rhs(cond, state, specs, findings, site);
             join(
-                &eval_rhs(then, state, specs, findings, lineno),
-                &eval_rhs(orelse, state, specs, findings, lineno),
+                &eval_rhs(then, state, specs, findings, site),
+                &eval_rhs(orelse, state, specs, findings, site),
             )
         }
         Rhs::LambdaRef { .. } => Taint::Clean,
@@ -1193,7 +1267,7 @@ pub fn eval_rhs(
             callee,
             args,
             kwargs,
-        } => eval_call(callee, args, kwargs, state, specs, findings, lineno),
+        } => eval_call(callee, args, kwargs, state, specs, findings, site),
     }
 }
 
@@ -1232,12 +1306,13 @@ pub fn eval_call(
     state: &State,
     specs: &RuleSpecs,
     findings: &mut Vec<Finding>,
-    lineno: usize,
+    site: Site<'_>,
 ) -> Taint {
+    let lineno = site.line;
     let arg_taints: Vec<Taint> = args
         .iter()
         .map(|arg| {
-            let t = eval_rhs(arg, state, specs, findings, lineno);
+            let t = eval_rhs(arg, state, specs, findings, site);
             if t.is_clean() {
                 arg_regex_source(arg, specs, lineno).unwrap_or(t)
             } else {
@@ -1248,7 +1323,7 @@ pub fn eval_call(
     let kw_taints: BTreeMap<String, Taint> = kwargs
         .iter()
         .map(|(name, val)| {
-            let t = eval_rhs(val, state, specs, findings, lineno);
+            let t = eval_rhs(val, state, specs, findings, site);
             let t = if t.is_clean() {
                 arg_regex_source(val, specs, lineno).unwrap_or(t)
             } else {
@@ -1262,9 +1337,9 @@ pub fn eval_call(
     // The receiver is also evaluated for its effects AND its taint
     // (e.g. `request.args` in `request.args.get(...)`) — propagates
     // to the result.
-    let callee_taint = eval_rhs(callee, state, specs, findings, lineno);
+    let callee_taint = eval_rhs(callee, state, specs, findings, site);
 
-    match resolve_spec(&callee_name, specs) {
+    match resolve_spec(&callee_name, specs, site) {
         ResolvedSpec::Source(spec) => Taint::tainted(
             [spec.kind.clone()],
             SourceInfo {
@@ -1653,12 +1728,13 @@ fn lhs_sink_target(lhs: &Lhs) -> Option<String> {
 fn transfer_assign(
     stmt_lhs: &Lhs,
     stmt_rhs: &Rhs,
-    lineno: usize,
+    site: Site<'_>,
     state: &mut State,
     specs: &RuleSpecs,
     findings: &mut Vec<Finding>,
 ) {
-    let rhs_taint = eval_rhs(stmt_rhs, state, specs, findings, lineno);
+    let lineno = site.line;
+    let rhs_taint = eval_rhs(stmt_rhs, state, specs, findings, site);
     if rhs_taint.is_tainted()
         && let Some(target_name) = lhs_sink_target(stmt_lhs)
     {
@@ -1732,20 +1808,20 @@ fn compute_indexed_write_key(
     state: &State,
     specs: &RuleSpecs,
     findings: &mut Vec<Finding>,
-    lineno: usize,
+    site: Site<'_>,
 ) -> Option<(String, Taint)> {
     if !INDEXED_WRITE_METHODS.contains(&callee_attr) {
         return None;
     }
     if call_args.len() == 2 {
         let kstr = key_repr(&call_args[0]);
-        let val_taint = eval_rhs(&call_args[1], state, specs, findings, lineno);
+        let val_taint = eval_rhs(&call_args[1], state, specs, findings, site);
         return Some((format!("{base_key}[{kstr}]"), val_taint));
     }
     if call_args.len() == 3 && callee_attr == "set" {
         let k0 = key_repr(&call_args[0]);
         let k1 = key_repr(&call_args[1]);
-        let val_taint = eval_rhs(&call_args[2], state, specs, findings, lineno);
+        let val_taint = eval_rhs(&call_args[2], state, specs, findings, site);
         return Some((format!("{base_key}[{k0}][{k1}]"), val_taint));
     }
     None
@@ -1758,12 +1834,12 @@ pub fn transfer_call_stmt(
     callee: &Rhs,
     call_args: &[Rhs],
     kwargs: &[(String, Rhs)],
-    lineno: usize,
+    site: Site<'_>,
     state: &mut State,
     specs: &RuleSpecs,
     findings: &mut Vec<Finding>,
 ) {
-    eval_call(callee, call_args, kwargs, state, specs, findings, lineno);
+    eval_call(callee, call_args, kwargs, state, specs, findings, site);
 
     let Rhs::AttrRef { base, attr } = callee else {
         return;
@@ -1782,7 +1858,7 @@ pub fn transfer_call_stmt(
 
     if INDEXED_WRITE_METHODS.contains(&attr.as_str()) {
         let Some((slot, val_taint)) =
-            compute_indexed_write_key(attr, call_args, &base_key, state, specs, findings, lineno)
+            compute_indexed_write_key(attr, call_args, &base_key, state, specs, findings, site)
         else {
             return;
         };
@@ -1794,17 +1870,17 @@ pub fn transfer_call_stmt(
     }
 
     if BULK_UPDATE_METHODS.contains(&attr.as_str()) {
-        apply_bulk_update(call_args, kwargs, &base_key, state, specs, findings, lineno);
+        apply_bulk_update(call_args, kwargs, &base_key, state, specs, findings, site);
         return;
     }
 
     if ELEMENT_WRITE_METHODS.contains(&attr.as_str()) {
-        apply_element_write(call_args, kwargs, &base_key, state, specs, findings, lineno);
+        apply_element_write(call_args, kwargs, &base_key, state, specs, findings, site);
         return;
     }
 
     if RECEIVER_WRITE_METHODS.contains(&attr.as_str()) {
-        apply_receiver_write(call_args, kwargs, &base_key, state, specs, findings, lineno);
+        apply_receiver_write(call_args, kwargs, &base_key, state, specs, findings, site);
     }
 }
 
@@ -1815,7 +1891,7 @@ fn apply_bulk_update(
     state: &mut State,
     specs: &RuleSpecs,
     findings: &mut Vec<Finding>,
-    lineno: usize,
+    site: Site<'_>,
 ) {
     let mut items: Vec<(String, Rhs)> = Vec::new();
     if let Some(first) = call_args.first() {
@@ -1824,7 +1900,7 @@ fn apply_bulk_update(
                 items.push((key_repr(k), v.clone()));
             }
         } else {
-            let arg_taint = eval_rhs(first, state, specs, findings, lineno);
+            let arg_taint = eval_rhs(first, state, specs, findings, site);
             if arg_taint.is_tainted() {
                 let wkey = format!("{base_key}[*]");
                 let existing = state_get(state, &wkey);
@@ -1837,7 +1913,7 @@ fn apply_bulk_update(
     }
     for (kstr, v) in &items {
         let slot = format!("{base_key}[{kstr}]");
-        let vtaint = eval_rhs(v, state, specs, findings, lineno);
+        let vtaint = eval_rhs(v, state, specs, findings, site);
         if vtaint.is_tainted() {
             let existing = state_get(state, &slot);
             state_put(state, &slot, join(&existing, &vtaint));
@@ -1852,14 +1928,14 @@ fn apply_element_write(
     state: &mut State,
     specs: &RuleSpecs,
     findings: &mut Vec<Finding>,
-    lineno: usize,
+    site: Site<'_>,
 ) {
     let mut arg_taint = Taint::Clean;
     for arg in call_args {
-        arg_taint = join(&arg_taint, &eval_rhs(arg, state, specs, findings, lineno));
+        arg_taint = join(&arg_taint, &eval_rhs(arg, state, specs, findings, site));
     }
     for (_, val) in kwargs {
-        arg_taint = join(&arg_taint, &eval_rhs(val, state, specs, findings, lineno));
+        arg_taint = join(&arg_taint, &eval_rhs(val, state, specs, findings, site));
     }
     if arg_taint.is_tainted() {
         let wkey = format!("{base_key}[*]");
@@ -1875,14 +1951,14 @@ fn apply_receiver_write(
     state: &mut State,
     specs: &RuleSpecs,
     findings: &mut Vec<Finding>,
-    lineno: usize,
+    site: Site<'_>,
 ) {
     let mut arg_taint = Taint::Clean;
     for arg in call_args {
-        arg_taint = join(&arg_taint, &eval_rhs(arg, state, specs, findings, lineno));
+        arg_taint = join(&arg_taint, &eval_rhs(arg, state, specs, findings, site));
     }
     for (_, val) in kwargs {
-        arg_taint = join(&arg_taint, &eval_rhs(val, state, specs, findings, lineno));
+        arg_taint = join(&arg_taint, &eval_rhs(val, state, specs, findings, site));
     }
     if arg_taint.is_tainted() {
         let existing = state_get(state, base_key);
@@ -1892,25 +1968,25 @@ fn apply_receiver_write(
 
 fn transfer_return(
     value: Option<&Rhs>,
-    lineno: usize,
+    site: Site<'_>,
     state: &State,
     specs: &RuleSpecs,
     findings: &mut Vec<Finding>,
 ) {
     if let Some(v) = value {
-        eval_rhs(v, state, specs, findings, lineno);
+        eval_rhs(v, state, specs, findings, site);
     }
 }
 
 fn transfer_raise(
     value: Option<&Rhs>,
-    lineno: usize,
+    site: Site<'_>,
     state: &State,
     specs: &RuleSpecs,
     findings: &mut Vec<Finding>,
 ) {
     if let Some(v) = value {
-        eval_rhs(v, state, specs, findings, lineno);
+        eval_rhs(v, state, specs, findings, site);
     }
 }
 
@@ -1931,24 +2007,25 @@ pub fn transfer_stmt(
     source_lines: Option<&RuleLines>,
 ) {
     let before = findings.len();
+    let site = |lineno: &usize| Site::new(*lineno, source_lines);
     match stmt {
         IrStmt::Assign { lhs, rhs, lineno } => {
-            transfer_assign(lhs, rhs, *lineno, state, specs, findings)
+            transfer_assign(lhs, rhs, site(lineno), state, specs, findings)
         }
         IrStmt::Call {
             callee,
             args,
             kwargs,
             lineno,
-        } => transfer_call_stmt(callee, args, kwargs, *lineno, state, specs, findings),
+        } => transfer_call_stmt(callee, args, kwargs, site(lineno), state, specs, findings),
         IrStmt::Return { value, lineno } => {
-            transfer_return(value.as_ref(), *lineno, state, specs, findings)
+            transfer_return(value.as_ref(), site(lineno), state, specs, findings)
         }
         IrStmt::Raise { value, lineno } => {
-            transfer_raise(value.as_ref(), *lineno, state, specs, findings)
+            transfer_raise(value.as_ref(), site(lineno), state, specs, findings)
         }
         IrStmt::Branch { condition, lineno } => {
-            eval_rhs(condition, state, specs, findings, *lineno);
+            eval_rhs(condition, state, specs, findings, site(lineno));
         }
         IrStmt::Noop { .. } => return,
     }
@@ -2072,7 +2149,13 @@ mod tests {
             }
         }
         let specs = specs_with(vec![], vec![]);
-        let got = eval_rhs(&Rhs::VarRef("a".into()), &state, &specs, &mut vec![], 1);
+        let got = eval_rhs(
+            &Rhs::VarRef("a".into()),
+            &state,
+            &specs,
+            &mut vec![],
+            Site::bare(1),
+        );
         assert_eq!(got, expected);
         let Taint::Tainted { kinds, source } = got else {
             panic!("tainted")
@@ -2205,7 +2288,7 @@ mod tests {
             &empty_state(),
             &specs,
             &mut findings,
-            1,
+            Site::bare(1),
         );
         assert!(t.is_clean());
     }
@@ -2214,7 +2297,13 @@ mod tests {
     fn test_eval_rhs_varref_source_match() {
         let specs = specs_with(vec![SourceSpec::new("request", "http")], vec![]);
         let mut findings = Vec::new();
-        let t = eval_rhs(&varref("request"), &empty_state(), &specs, &mut findings, 5);
+        let t = eval_rhs(
+            &varref("request"),
+            &empty_state(),
+            &specs,
+            &mut findings,
+            Site::bare(5),
+        );
         assert!(t.is_tainted());
     }
 
@@ -2223,7 +2312,7 @@ mod tests {
         let specs = specs_with(vec![SourceSpec::new("request.GET", "http")], vec![]);
         let mut findings = Vec::new();
         let expr = attr(varref("request"), "GET");
-        let t = eval_rhs(&expr, &empty_state(), &specs, &mut findings, 3);
+        let t = eval_rhs(&expr, &empty_state(), &specs, &mut findings, Site::bare(3));
         assert!(t.is_tainted());
     }
 
@@ -2232,7 +2321,7 @@ mod tests {
         let specs = specs_with(vec![SourceSpec::new("input", "cli")], vec![]);
         let mut findings = Vec::new();
         let expr = call(varref("input"), vec![]);
-        let t = eval_rhs(&expr, &empty_state(), &specs, &mut findings, 1);
+        let t = eval_rhs(&expr, &empty_state(), &specs, &mut findings, Site::bare(1));
         assert!(t.is_tainted());
     }
 
@@ -2245,7 +2334,13 @@ mod tests {
         let mut findings = Vec::new();
         let src = call(varref("input"), vec![]);
         let sink_call = call(attr(varref("os"), "system"), vec![src]);
-        let t = eval_rhs(&sink_call, &empty_state(), &specs, &mut findings, 10);
+        let t = eval_rhs(
+            &sink_call,
+            &empty_state(),
+            &specs,
+            &mut findings,
+            Site::bare(10),
+        );
         assert!(t.is_clean(), "le retour d'un sink reste clean par défaut");
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].line, 10);
@@ -2260,7 +2355,13 @@ mod tests {
             attr(varref("os"), "system"),
             vec![Rhs::Const(ConstValue::Str("ls".to_string()))],
         );
-        eval_rhs(&sink_call, &empty_state(), &specs, &mut findings, 1);
+        eval_rhs(
+            &sink_call,
+            &empty_state(),
+            &specs,
+            &mut findings,
+            Site::bare(1),
+        );
         assert!(findings.is_empty());
     }
 
@@ -2271,7 +2372,13 @@ mod tests {
         let mut findings = Vec::new();
         let src = call(varref("input"), vec![]);
         let sanitized = call(attr(varref("shlex"), "quote"), vec![src]);
-        let t = eval_rhs(&sanitized, &empty_state(), &specs, &mut findings, 1);
+        let t = eval_rhs(
+            &sanitized,
+            &empty_state(),
+            &specs,
+            &mut findings,
+            Site::bare(1),
+        );
         assert!(t.is_clean());
     }
 
@@ -2282,7 +2389,13 @@ mod tests {
         let mut findings = Vec::new();
         let src = call(varref("input"), vec![]);
         let wrapped = call(varref("str"), vec![src]);
-        let t = eval_rhs(&wrapped, &empty_state(), &specs, &mut findings, 1);
+        let t = eval_rhs(
+            &wrapped,
+            &empty_state(),
+            &specs,
+            &mut findings,
+            Site::bare(1),
+        );
         assert!(t.is_tainted());
     }
 
@@ -2295,7 +2408,13 @@ mod tests {
         let mut findings = Vec::new();
         let src = call(varref("input"), vec![]); // kind = cli
         let sink_call = call(attr(varref("os"), "system"), vec![src]);
-        eval_rhs(&sink_call, &empty_state(), &specs, &mut findings, 1);
+        eval_rhs(
+            &sink_call,
+            &empty_state(),
+            &specs,
+            &mut findings,
+            Site::bare(1),
+        );
         assert!(
             findings.is_empty(),
             "kind cli ne doit pas matcher un sink filtré sur http"
@@ -2393,7 +2512,7 @@ mod tests {
             attr(varref("d"), "get"),
             vec![Rhs::Const(ConstValue::Str("k".to_string()))],
         );
-        let t = eval_rhs(&expr, &state, &specs, &mut findings, 1);
+        let t = eval_rhs(&expr, &state, &specs, &mut findings, Site::bare(1));
         assert!(t.is_tainted());
     }
 
@@ -2472,6 +2591,96 @@ mod tests {
             out.contains("{bar}"),
             "un littéral interpolé ne doit pas être retiré"
         );
+    }
+
+    /// A source whose dotted pattern dropped a look-around is taken by the
+    /// data flow only when its raw regex matches the line (ticket #270):
+    /// `System.getProperty("os.name")`, which the rule excludes, is not a
+    /// source; `System.getProperty("upload.dir")` is.
+    #[test]
+    fn test_source_needing_confirmation_reads_its_line() {
+        let mut specs = specs_with(vec![], vec![]);
+        let mut source = SourceSpec::new("**.getProperty", "env")
+            .with_raw_regex(Regex::new(r#"\.getProperty\s*\(\s*"(?!os\.name)"#).unwrap());
+        source.confirm_on_line = true;
+        specs.sources.push(source);
+        let source_lines: SourceLines = [
+            r#"String os = System.getProperty("os.name");"#.to_string(),
+            r#"String dir = System.getProperty("upload.dir");"#.to_string(),
+        ]
+        .into_iter()
+        .collect();
+        let lines = RuleLines::new(&source_lines, &specs);
+        let read = call(
+            attr(varref("System"), "getProperty"),
+            vec![Rhs::Const(ConstValue::Str("x".into()))],
+        );
+        let excluded = eval_rhs(
+            &read,
+            &empty_state(),
+            &specs,
+            &mut vec![],
+            Site::new(1, Some(&lines)),
+        );
+        assert!(excluded.is_clean(), "os.name is excluded by the rule");
+        let kept = eval_rhs(
+            &read,
+            &empty_state(),
+            &specs,
+            &mut vec![],
+            Site::new(2, Some(&lines)),
+        );
+        assert!(kept.is_tainted(), "upload.dir is a source");
+        // Without the file's text, the source is taken as before.
+        let bare = eval_rhs(&read, &empty_state(), &specs, &mut vec![], Site::bare(1));
+        assert!(bare.is_tainted());
+    }
+
+    /// A sanitizer cut at its call is taken only when its line passes the
+    /// filter its regex names (ticket #270).
+    #[test]
+    fn test_sanitizer_needing_confirmation_reads_its_line() {
+        let mut specs = specs_with(vec![], vec![]);
+        let mut sanitizer = SanitizerSpec::new("filter_var")
+            .with_raw_regex(Regex::new(r"filter_var\s*\([^)]*FILTER_SANITIZE").unwrap());
+        sanitizer.confirm_on_line = true;
+        specs.sanitizers.push(sanitizer);
+        let source_lines: SourceLines = [
+            "$id = filter_var($raw, FILTER_SANITIZE_NUMBER_INT);".to_string(),
+            "$id = filter_var($raw, FILTER_UNSAFE_RAW);".to_string(),
+        ]
+        .into_iter()
+        .collect();
+        let lines = RuleLines::new(&source_lines, &specs);
+        let state = state_set(
+            &empty_state(),
+            "raw",
+            Taint::tainted(
+                ["http".to_string()],
+                SourceInfo {
+                    line: 1,
+                    expr: "raw".into(),
+                    kind: "http".into(),
+                },
+            ),
+        );
+        let filtered = call(varref("filter_var"), vec![varref("raw")]);
+        let sanitized = eval_rhs(
+            &filtered,
+            &state,
+            &specs,
+            &mut vec![],
+            Site::new(1, Some(&lines)),
+        );
+        assert!(sanitized.is_clean(), "FILTER_SANITIZE cleans the value");
+        let unsafe_raw = eval_rhs(
+            &filtered,
+            &state,
+            &specs,
+            &mut vec![],
+            Site::new(2, Some(&lines)),
+        );
+        assert!(unsafe_raw.is_tainted(), "FILTER_UNSAFE_RAW does not");
     }
 
     #[test]
@@ -3053,7 +3262,13 @@ mod tests {
         let mut findings = Vec::new();
         let src = call(varref("input"), vec![]);
         let call_expr = call(varref("helper"), vec![src]);
-        eval_rhs(&call_expr, &empty_state(), &specs, &mut findings, 7);
+        eval_rhs(
+            &call_expr,
+            &empty_state(),
+            &specs,
+            &mut findings,
+            Site::bare(7),
+        );
 
         assert_eq!(findings.len(), 1);
         assert_eq!(
@@ -3087,7 +3302,13 @@ mod tests {
             varref("helper"),
             vec![Rhs::Const(ConstValue::Str("safe".to_string()))],
         );
-        eval_rhs(&call_expr, &empty_state(), &specs, &mut findings, 7);
+        eval_rhs(
+            &call_expr,
+            &empty_state(),
+            &specs,
+            &mut findings,
+            Site::bare(7),
+        );
 
         assert!(
             findings.is_empty(),
@@ -3110,7 +3331,13 @@ mod tests {
 
         let mut findings = Vec::new();
         let call_expr = call(varref("get_secret"), vec![]);
-        let t = eval_rhs(&call_expr, &empty_state(), &specs, &mut findings, 1);
+        let t = eval_rhs(
+            &call_expr,
+            &empty_state(),
+            &specs,
+            &mut findings,
+            Site::bare(1),
+        );
         assert!(
             t.is_tainted(),
             "source interne inconditionnelle -> retour tainté même sans argument tainté"
@@ -3141,7 +3368,13 @@ mod tests {
                 Rhs::Const(ConstValue::Str("safe".to_string())),
             ],
         );
-        let t = eval_rhs(&call_expr, &empty_state(), &specs, &mut findings, 1);
+        let t = eval_rhs(
+            &call_expr,
+            &empty_state(),
+            &specs,
+            &mut findings,
+            Site::bare(1),
+        );
         assert!(
             t.is_tainted(),
             "l'arg 0 (tainté) atteint le retour d'après le résumé"
@@ -3155,7 +3388,13 @@ mod tests {
         let specs = specs_with(vec![SourceSpec::new("input", "cli")], vec![]);
         let mut findings = Vec::new();
         let call_expr = call(varref("unknown_fn"), vec![call(varref("input"), vec![])]);
-        let t = eval_rhs(&call_expr, &empty_state(), &specs, &mut findings, 1);
+        let t = eval_rhs(
+            &call_expr,
+            &empty_state(),
+            &specs,
+            &mut findings,
+            Site::bare(1),
+        );
         assert!(t.is_tainted());
     }
 
@@ -3202,7 +3441,13 @@ mod tests {
             attr(varref("scr"), "method"),
             vec![call(varref("input"), vec![])],
         );
-        eval_rhs(&call_expr, &empty_state(), &specs, &mut findings, 7);
+        eval_rhs(
+            &call_expr,
+            &empty_state(),
+            &specs,
+            &mut findings,
+            Site::bare(7),
+        );
         assert_eq!(
             findings.len(),
             1,
@@ -3249,7 +3494,13 @@ mod tests {
             attr(ctor_call, "method"),
             vec![call(varref("input"), vec![])],
         );
-        eval_rhs(&call_expr, &empty_state(), &specs, &mut findings, 3);
+        eval_rhs(
+            &call_expr,
+            &empty_state(),
+            &specs,
+            &mut findings,
+            Site::bare(3),
+        );
         assert_eq!(
             findings.len(),
             1,

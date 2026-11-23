@@ -26,7 +26,7 @@ use super::lattice::{SourceInfo, State, Taint, empty_state, join, state_set};
 use super::line_facts::{RuleLines, SourceLines};
 use super::prepared::{PreparedCfg, PreparedFile, PreparedFunction};
 pub use super::transfer::FunctionSummary;
-use super::transfer::{Finding, RuleSpecs, eval_rhs, transfer_stmt};
+use super::transfer::{Finding, RuleSpecs, Site, eval_rhs, transfer_stmt};
 use super::worklist::prepare_ir;
 
 // ============================================================================
@@ -609,7 +609,16 @@ pub(crate) fn return_taint_generic(
         for stmt in ir {
             if let IrStmt::Return { value, lineno } = stmt {
                 if let Some(v) = value {
-                    total = join(&total, &eval_rhs(v, &state, specs, &mut scratch, *lineno));
+                    total = join(
+                        &total,
+                        &eval_rhs(
+                            v,
+                            &state,
+                            specs,
+                            &mut scratch,
+                            Site::new(*lineno, source_lines),
+                        ),
+                    );
                 }
                 total = join(
                     &total,
