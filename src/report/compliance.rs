@@ -755,13 +755,51 @@ mod tests {
         }
     }
 
+    /// OWASP ASVS 5.0.0 has 345 requirements in 17 chapters (official CSV,
+    /// tag v5.0.0). Deliberate deviation from Audit, whose mapping said 348
+    /// with wrong chapter counts (V6, V7, V8, V10, V11) and wrong levels;
+    /// ticket #286 regenerated chapters, counts, levels and texts from the CSV.
     #[test]
-    fn test_asvs_has_348_total_and_17_chapters() {
+    fn test_asvs_has_345_total_and_17_chapters() {
         let m = load_asvs_mapping();
-        assert_eq!(m.total_requirements, 348);
+        assert_eq!(m.total_requirements, 345);
         assert_eq!(m.chapters.len(), 17);
         let sum: usize = m.chapters.values().map(|c| c.count).sum();
-        assert_eq!(sum, 348);
+        assert_eq!(sum, 345);
+        let count = |c: &str| m.chapters[c].count;
+        assert_eq!(
+            (
+                count("V6"),
+                count("V7"),
+                count("V8"),
+                count("V10"),
+                count("V11")
+            ),
+            (47, 19, 13, 36, 24),
+            "chapter counts of ASVS 5.0.0"
+        );
+    }
+
+    /// Each requirement keeps the level OWASP gives it (L1, L2 or L3), and the
+    /// rules point at the requirement whose text describes them: log injection
+    /// is 16.4.1 (16.3.2 is the logging of failed authorizations), TLS
+    /// certificate checks are 12.3.2, MD5/SHA-1 is 11.4.1 (ticket #286).
+    #[test]
+    fn test_asvs_levels_and_rule_targets_follow_the_standard() {
+        let m = load_asvs_mapping();
+        let level = |id: &str| m.requirements[id].level.as_str();
+        assert_eq!(level("1.2.6"), "L2");
+        assert_eq!(level("1.2.10"), "L3");
+        assert_eq!(level("11.5.1"), "L2");
+        assert!(
+            m.requirements
+                .values()
+                .all(|r| ["L1", "L2", "L3"].contains(&r.level.as_str()))
+        );
+        assert_eq!(m.mapping["taint_log_injection"], vec!["16.4.1".to_string()]);
+        assert!(m.mapping["ssl_no_cert_validation"].contains(&"12.3.2".to_string()));
+        assert!(m.mapping["weak_crypto"].contains(&"11.4.1".to_string()));
+        assert!(!m.requirements.contains_key("16.3.2"));
     }
 
     #[test]
@@ -863,7 +901,7 @@ mod tests {
     fn test_asvs_compute_empty_findings() {
         let scope = load_rule_referential_scope();
         let result = compute_asvs_compliance(&[], &scope);
-        assert_eq!(result.total_requirements, 348);
+        assert_eq!(result.total_requirements, 345);
         assert!(result.covered_requirements > 0);
         assert_eq!(result.with_findings, 0);
         for r in result.requirements.values() {
