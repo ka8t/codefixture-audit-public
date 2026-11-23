@@ -33,10 +33,31 @@ fn safe_compile_regex(pattern: &str) -> Option<Regex> {
 static LOOKAROUND_OPEN_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^\(\?<?[=!]").expect("regex statique valide"));
 
-/// Regex noise to strip to obtain a readable "dotted" name.
+/// Regex noise to strip to obtain a readable "dotted" name. A
+/// non-capturing group opener `(?:` is not noise: it is read as a plain
+/// group `(` beforehand (see `NON_CAPTURING_GROUP_RE`).
 static REGEX_NOISE_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\\s\*|\\b|\\s\+|\\\(|\\\)|\\\[|\\\]|\(\?\:").expect("regex statique valide")
+    Regex::new(r"\\s\*|\\b|\\s\+|\\\(|\\\)|\\\[|\\\]").expect("regex statique valide")
 });
+
+/// The opener of a non-capturing group, `(?:`, not escaped. Read as a
+/// plain group so that [`expand_alternations`] expands its alternatives.
+/// Deviation from the Audit (ticket #266), whose noise pass dropped the
+/// opener and kept the closing `)`: `\b(?:eval|exec)\s*\(` gave
+/// `eval|exec)`, a name no call has.
+static NON_CAPTURING_GROUP_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?<!\\)\(\?:").expect("regex statique valide"));
+
+/// An empty call written in a chain, `\(\)` or `\(\s*\)`:
+/// `Runtime\.getRuntime\(\)\.exec\s*\(` names `Runtime.getRuntime.exec`.
+/// Read as noise, never as the call where a sink's pattern ends.
+static EMPTY_CALL_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\\\((?:\\s\*)?\\\)").expect("regex statique valide"));
+
+/// A run of non-blank characters, `\S*` or `\S+`: any text, dots
+/// included. Becomes `**` (see `ANY_DEPTH`).
+static NON_BLANK_RUN_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\\S[+*]").expect("regex statique valide"));
 
 static WORD_WILDCARD_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\\w[+*]?").expect("regex statique valide"));
@@ -66,6 +87,17 @@ const LITERAL_BACKSLASH: char = '\u{2}';
 /// The `new` keyword followed by blanks, at the start of an alternative:
 /// `new\s+File\s*\(`, `(new\s+A|new\s+B)`, `\bnew URL\s*\(`. Captures what
 /// precedes it, so that only the keyword and its blanks are dropped.
+/// Stand-in for a wildcard of any depth (`\S*`) until the stars are
+/// merged by [`finalize_dotted`], which would read `**` as `*`. The
+/// optional qualifier of `new\s+(?:\S*\.)?File\s*\(` gives `**.File`,
+/// which `java.io.File` meets, besides `File` (ticket #266).
+const ANY_DEPTH: char = '\u{3}';
+
+/// Stand-in for the escaped `(` that opens the arguments of a sink's call
+/// (`\(`), kept until [`finalize_dotted`] cuts the pattern there. See
+/// [`sink_regex_to_dotted_patterns`].
+const CALL_PAREN: char = '\u{4}';
+
 static CONSTRUCTOR_KEYWORD_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(^|[|(:]|\\b)new(?:\\s[+*]| +)").expect("regex statique valide"));
 
@@ -128,46 +160,124 @@ fn lookaround_end(chars: &[char], start: usize) -> usize {
     j.min(chars.len())
 }
 
-/// Expands `(a|b|c)` alternation groups into multiple patterns.
-/// Limited to the simplest groups (no deep nesting). Finds the FIRST
-/// `(...)` group containing a `|` and expands on its alternatives,
-/// recursive on the result.
-fn expand_alternations(pattern: &str) -> Vec<String> {
-    let chars: Vec<char> = pattern.chars().collect();
-    let Some(open) = chars.iter().position(|&c| c == '(') else {
-        return vec![pattern.to_string()];
-    };
+/// The alternatives of `pattern` at its top level: split on the `|`
+/// that sit outside any group and any character class. An escaped
+/// character is taken as written.
+fn split_top_level(pattern: &str) -> Vec<String> {
+    let mut parts = vec![String::new()];
     let mut depth = 0i32;
-    let mut close: Option<usize> = None;
-    for (i, &c) in chars.iter().enumerate().skip(open) {
+    let mut in_class = false;
+    let mut chars = pattern.chars();
+    while let Some(c) = chars.next() {
+        let current = parts.last_mut().expect("never empty");
         match c {
-            '(' => depth += 1,
-            ')' => {
+            '\\' => {
+                current.push(c);
+                if let Some(escaped) = chars.next() {
+                    current.push(escaped);
+                }
+                continue;
+            }
+            '[' if !in_class => in_class = true,
+            ']' if in_class => in_class = false,
+            '(' if !in_class => depth += 1,
+            ')' if !in_class => depth -= 1,
+            '|' if !in_class && depth == 0 => {
+                parts.push(String::new());
+                continue;
+            }
+            _ => {}
+        }
+        current.push(c);
+    }
+    parts
+}
+
+/// The index just past the `)` that closes the group opened at `open`,
+/// skipping escaped characters and character classes; `None` when the
+/// group is never closed.
+fn group_end(chars: &[char], open: usize) -> Option<usize> {
+    let mut depth = 0i32;
+    let mut in_class = false;
+    let mut i = open;
+    while i < chars.len() {
+        match chars[i] {
+            '\\' => i += 1,
+            '[' if !in_class => in_class = true,
+            ']' if in_class => in_class = false,
+            '(' if !in_class => depth += 1,
+            ')' if !in_class => {
                 depth -= 1;
                 if depth == 0 {
-                    close = Some(i);
-                    break;
+                    return Some(i + 1);
                 }
             }
             _ => {}
         }
+        i += 1;
     }
-    let Some(close) = close else {
+    None
+}
+
+/// Expands the alternatives of a regex into one pattern each: the
+/// top-level `a|b` first, then the first group `(...)` and its own
+/// alternatives, recursive on the result. A group followed by `?` or `*`
+/// is optional: it also gives the pattern without it (`parseXml(String)?`
+/// gives `parseXml` and `parseXmlString`); `+` keeps it once.
+///
+/// Deviation from the Audit (ticket #266), which read the first group
+/// only and split its inside on every `|`: a top-level alternative
+/// (`\b(?:child_process|cp)\.exec\s*\(|(?<!\.)\bexec\s*\(`) stayed one
+/// pattern holding `|`, and an optional group kept its `?` as text.
+fn expand_alternations(pattern: &str) -> Vec<String> {
+    let alternatives = split_top_level(pattern);
+    if alternatives.len() > 1 {
+        return alternatives
+            .iter()
+            .flat_map(|alternative| expand_alternations(alternative))
+            .collect();
+    }
+    let chars: Vec<char> = pattern.chars().collect();
+    // The first group opener, outside a character class and not escaped.
+    let mut open = None;
+    let mut in_class = false;
+    let mut i = 0usize;
+    while i < chars.len() {
+        match chars[i] {
+            '\\' => i += 1,
+            '[' if !in_class => in_class = true,
+            ']' if in_class => in_class = false,
+            '(' if !in_class => {
+                open = Some(i);
+                break;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    let Some(open) = open else {
+        return vec![pattern.to_string()];
+    };
+    let Some(close) = group_end(&chars, open) else {
         // Unbalanced parenthesis: leave as-is.
         return vec![pattern.to_string()];
     };
-    let inside: String = chars[open + 1..close].iter().collect();
+    let inside: String = chars[open + 1..close - 1].iter().collect();
     let before: String = chars[..open].iter().collect();
-    let after: String = chars[close + 1..].iter().collect();
-    if !inside.contains('|') {
-        // No alternation in this group: "(x)" -> "x", recurse on the rest.
-        return expand_alternations(&format!("{before}{inside}{after}"));
+    let (optional, after_start) = match chars.get(close) {
+        Some('?') | Some('*') => (true, close + 1),
+        Some('+') => (false, close + 1),
+        _ => (false, close),
+    };
+    let after: String = chars[after_start..].iter().collect();
+    let mut choices = split_top_level(&inside);
+    if optional {
+        choices.push(String::new());
     }
-    let mut out = Vec::new();
-    for alt in inside.split('|') {
-        out.extend(expand_alternations(&format!("{before}{alt}{after}")));
-    }
-    out
+    choices
+        .iter()
+        .flat_map(|choice| expand_alternations(&format!("{before}{choice}{after}")))
+        .collect()
 }
 
 /// Final cleanup pass on a "dotted" pattern: the regex wildcards
@@ -188,7 +298,13 @@ fn expand_alternations(pattern: &str) -> Vec<String> {
 /// dot is meant (`Builders<.*>.Filter.Eq`), and `*`, which does not cross
 /// dots, would no longer match `Builders<T>.Filter.Eq`.
 fn finalize_dotted(pattern: &str) -> String {
-    let p = WORD_WILDCARD_RE.replace_all(pattern, "*").into_owned();
+    // A sink's pattern ends at the `(` of its call (see
+    // `sink_regex_to_dotted_patterns`).
+    let pattern = pattern.split(CALL_PAREN).next().unwrap_or("");
+    let p = NON_BLANK_RUN_RE
+        .replace_all(pattern, ANY_DEPTH.to_string().as_str())
+        .into_owned();
+    let p = WORD_WILDCARD_RE.replace_all(&p, "*").into_owned();
     let p = DOT_WILDCARD_RE.replace_all(&p, "*").into_owned();
     let p = p.replace('?', "");
     let p = MULTI_STAR_RE.replace_all(&p, "*").into_owned();
@@ -197,7 +313,7 @@ fn finalize_dotted(pattern: &str) -> String {
         Some(member_of) => format!("{member_of}{LITERAL_DOT}*"),
         None => p.to_string(),
     };
-    let p = p.replace(LITERAL_DOT, ".");
+    let p = p.replace(LITERAL_DOT, ".").replace(ANY_DEPTH, "**");
     if p.is_empty() || p.chars().all(|c| c == '.' || c == '*') {
         return String::new();
     }
@@ -211,6 +327,37 @@ fn finalize_dotted(pattern: &str) -> String {
 /// "Best-effort" conversion of a DSL regex into a list of "dotted"
 /// patterns. Returns an empty list if the regex is too opaque.
 pub fn regex_to_dotted_patterns(regex_str: &str) -> Vec<String> {
+    to_dotted_patterns(regex_str, ArgumentText::Keep)
+}
+
+/// [`regex_to_dotted_patterns`] for a sink: the pattern ends at the `(`
+/// of the call, so that a regex that also reads the arguments names the
+/// call: `setAttribute\s*\(\s*["'](?:role|admin)` gives `setAttribute`,
+/// `XmlSerializer\s*\(\s*Type\.GetType\s*\(` gives `XmlSerializer`. An
+/// empty call in a chain does not end it (`Runtime\.getRuntime\(\)\.exec`
+/// stays `Runtime.getRuntime.exec`, see `EMPTY_CALL_RE`).
+/// `new\s+ModelAndView\s*\(.*redirect` gives `ModelAndView`. The
+/// arguments stay checked: a sink the data flow reaches is kept only when
+/// its raw regex matches the line (`discard_sinks_failing_raw_regex`).
+/// Deviation from the Audit (ticket #266), which kept the argument text
+/// (`setAttribute["']role`), a name no call has. Sources, sanitizers and
+/// passthroughs keep it: nothing would check their arguments afterwards,
+/// and `file_get_contents\s*\(\s*['"]php://input` cut to
+/// `file_get_contents` would make every call of it a source.
+pub fn sink_regex_to_dotted_patterns(regex_str: &str) -> Vec<String> {
+    to_dotted_patterns(regex_str, ArgumentText::CutAtCall)
+}
+
+/// What [`to_dotted_patterns`] does with the text after the `(` of a call.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ArgumentText {
+    /// Kept, then read as the rest of the name.
+    Keep,
+    /// Dropped: the pattern ends at the call.
+    CutAtCall,
+}
+
+fn to_dotted_patterns(regex_str: &str, arguments: ArgumentText) -> Vec<String> {
     if regex_str.is_empty() {
         return Vec::new();
     }
@@ -226,6 +373,15 @@ pub fn regex_to_dotted_patterns(regex_str: &str) -> Vec<String> {
     // An escaped backslash is a literal one, kept apart from the escapes
     // read below (see `LITERAL_BACKSLASH`).
     let stripped = stripped.replace(r"\\", &LITERAL_BACKSLASH.to_string());
+    let stripped = NON_CAPTURING_GROUP_RE
+        .replace_all(&stripped, "(")
+        .into_owned();
+    let stripped = match arguments {
+        ArgumentText::CutAtCall => EMPTY_CALL_RE
+            .replace_all(&stripped, "")
+            .replace(r"\(", &CALL_PAREN.to_string()),
+        ArgumentText::Keep => stripped,
+    };
     let clean = REGEX_NOISE_RE.replace_all(&stripped, "").into_owned();
     // A literal dot is kept apart from the regex `.` until the wildcards
     // are converted (see `LITERAL_DOT`).
@@ -323,9 +479,15 @@ pub fn has_taint_specs(rule_json: &Value) -> bool {
             .get(key)
             .and_then(|v| v.as_array())
             .is_some_and(|specs| {
-                specs
-                    .iter()
-                    .any(|s| !regex_to_dotted_patterns(json_str(s, "pattern")).is_empty())
+                specs.iter().any(|s| {
+                    let pattern = json_str(s, "pattern");
+                    let dotted = if key == "sinks" {
+                        sink_regex_to_dotted_patterns(pattern)
+                    } else {
+                        regex_to_dotted_patterns(pattern)
+                    };
+                    !dotted.is_empty()
+                })
             })
     };
     converts("sources") && converts("sinks")
@@ -396,7 +558,7 @@ pub fn rule_json_to_specs(rule_json: &Value, lang: &str) -> Option<RuleSpecs> {
             })
             .unwrap_or_default();
         let compiled = safe_compile_regex(regex);
-        for dotted in regex_to_dotted_patterns(regex) {
+        for dotted in sink_regex_to_dotted_patterns(regex) {
             let mut spec = SinkSpec::new(dotted)
                 .with_args(args.clone())
                 .with_line_args(line_args.clone())
@@ -625,16 +787,12 @@ mod tests {
 
     #[test]
     fn test_non_capturing_group_marker_stripped_but_content_kept() {
-        // `(?:` is stripped by the noise filter (non-capturing
-        // group), but its content must remain -- unlike the
-        // lookaround, which disappears entirely along with its
-        // content.
+        // A non-capturing group keeps its content, unlike a lookaround,
+        // which disappears with it. The Audit dropped the `(?:` marker
+        // only and gave `foo).bar`; since ticket #266 the group is read as
+        // a plain group, closing parenthesis included.
         let out = regex_to_dotted_patterns(r"(?:foo)\.bar");
-        assert_eq!(
-            out,
-            vec!["foo).bar".to_string()],
-            "seul le marqueur '(?:' est retiré, la parenthèse fermante et 'foo' restent"
-        );
+        assert_eq!(out, vec!["foo.bar".to_string()]);
     }
 
     #[test]
@@ -868,6 +1026,79 @@ mod tests {
         assert!(specs.sinks[0].args.is_empty());
         assert!(specs.sinks[0].line_args.is_empty());
         assert_eq!(specs.sinks[0].pattern, "Function");
+    }
+
+    #[test]
+    fn test_non_capturing_group_is_expanded() {
+        assert_eq!(
+            regex_to_dotted_patterns(r"\b(?:eval|exec|__import__)\s*\("),
+            vec!["eval", "exec", "__import__"]
+        );
+        assert_eq!(
+            regex_to_dotted_patterns(r"MVEL\s*\.\s*(?:eval|evalToString)\s*\("),
+            vec!["MVEL.eval", "MVEL.evalToString"]
+        );
+    }
+
+    #[test]
+    fn test_optional_group_gives_both_patterns() {
+        assert_eq!(
+            regex_to_dotted_patterns(r"\bparseXml(?:String)?\s*\((?=[^;]*\bnoent\s*:\s*true)"),
+            vec!["parseXmlString", "parseXml"]
+        );
+        // The optional qualifier of a class: the class written alone or
+        // with its package.
+        let patterns = regex_to_dotted_patterns(r"new\s+(?:\S*\.)?File\s*\(");
+        assert_eq!(patterns, vec!["**.File", "File"]);
+        let qualified = compile_glob(&patterns[0]);
+        assert!(qualified.is_match("java.io.File"));
+        assert!(!qualified.is_match("File"));
+        assert!(!qualified.is_match("java.io.FileReader"));
+    }
+
+    #[test]
+    fn test_top_level_alternative_is_split() {
+        assert_eq!(
+            regex_to_dotted_patterns(r"\b(?:child_process|cp)\.exec\s*\(|(?<!\.)\bexec\s*\("),
+            vec!["child_process.exec", "cp.exec", "exec"]
+        );
+        // A `|` inside a group or a character class is not top level.
+        assert_eq!(
+            regex_to_dotted_patterns(r"(a|(b|c))\.run"),
+            vec!["a.run", "b.run", "c.run"]
+        );
+        assert_eq!(regex_to_dotted_patterns(r"run[|]x"), vec!["run[|]x"]);
+    }
+
+    #[test]
+    fn test_sink_pattern_ends_at_its_call() {
+        // The argument text a sink regex reads is left to its raw regex.
+        assert_eq!(
+            sink_regex_to_dotted_patterns(r#"setAttribute\s*\(\s*["'](?:role|admin)["']"#),
+            vec!["setAttribute", "setAttribute"]
+        );
+        assert_eq!(
+            sink_regex_to_dotted_patterns(r"new\s+ModelAndView\s*\(.*redirect"),
+            vec!["ModelAndView"]
+        );
+        assert_eq!(
+            sink_regex_to_dotted_patterns(r"cursor\.execute\s*\("),
+            vec!["cursor.execute"]
+        );
+        // An empty call in a chain is part of the name.
+        assert_eq!(
+            sink_regex_to_dotted_patterns(r"Runtime\.getRuntime\(\)\.exec\s*\("),
+            vec!["Runtime.getRuntime.exec"]
+        );
+        assert_eq!(
+            sink_regex_to_dotted_patterns(r"Anthropic\(\s*\)\.messages\.create\s*\("),
+            vec!["Anthropic.messages.create"]
+        );
+        // A source keeps it: cut, it would name every call.
+        assert_eq!(
+            regex_to_dotted_patterns(r#"file_get_contents\s*\(\s*['"]php://input"#),
+            vec![r#"file_get_contents['"]php://input"#]
+        );
     }
 
     fn compile_glob(pattern: &str) -> super::super::transfer::GlobPattern {
