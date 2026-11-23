@@ -1321,6 +1321,14 @@ enum Command {
         /// Default: the latest scan of the history folder.
         #[arg(long)]
         baseline: Option<PathBuf>,
+        // Shared since ADR-0057 (2026-11-23, ticket #274); private before
+        // (ADR-0041). The `///` text below is the `--help` line.
+        /// Folder of your own rules (`.sca` files), loaded IN ADDITION to
+        /// the delivered rules and filtered on the same languages. Default:
+        /// `~/.codefixture-audit/custom-rules`, which no build or update
+        /// touches. Ignored with `--rules`.
+        #[arg(long)]
+        custom_rules_dir: Option<PathBuf>,
     },
     /// Lists the builtin rules by category (mirrors `--list-rules`).
     ListRules {
@@ -1430,6 +1438,7 @@ fn dispatch(command: Command) -> ExitCode {
             only_category,
             sbom,
             baseline,
+            custom_rules_dir,
         } => run_scan_command(ScanArgs {
             path,
             rules,
@@ -1441,6 +1450,7 @@ fn dispatch(command: Command) -> ExitCode {
             only_category,
             sbom,
             baseline,
+            custom_rules_dir,
         }),
         Command::ListRules { lang, rules } => run_list_rules_command(&lang, rules),
     }
@@ -1622,6 +1632,7 @@ struct ScanArgs {
     only_category: Option<String>,
     sbom: bool,
     baseline: Option<PathBuf>,
+    custom_rules_dir: Option<PathBuf>,
 }
 
 fn run_scan_command(args: ScanArgs) -> ExitCode {
@@ -1636,6 +1647,7 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
         only_category,
         sbom,
         baseline,
+        custom_rules_dir,
     } = args;
     // The shared binary has none of these options: their defaults.
     let extra = ScanExtraArgs::default();
@@ -1725,6 +1737,8 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
     // ADR-0040: `--rules <PATH>`, else `rules.cfpack` next to the
     // executable. A missing pack or a folder without any `.sca` file would
     // scan with no rule at all, so it stops here with the path searched.
+    // `--rules` given: the custom rules folder is left out (ticket #84).
+    let explicit_rules = rules.is_some();
     let rules_path = match resolve_rules_path(rules, &script_locale) {
         Ok(path) => path,
         Err(code) => return code,
@@ -1915,9 +1929,11 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
     let category_overrides =
         codefixture_audit::project::project_config::read_category_overrides_config(&path);
 
-    // Custom rules are read by the private build only (ADR-0041): the
-    // shared binary scans with the delivered pack alone.
-    let custom_rules_dir: Option<PathBuf> = None;
+    // The client's own rules, read by both builds since ADR-0057.
+    let custom_rules_dir = codefixture_audit::rules::custom::resolve_custom_rules_dir(
+        explicit_rules,
+        custom_rules_dir,
+    );
 
     // Default: next to the executable (ticket #87/spec #83).
     // `load_brand_file`

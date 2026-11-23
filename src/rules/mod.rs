@@ -3,6 +3,7 @@
 //! live in `rules/builtin` of the private repository.
 
 pub mod catalog;
+pub mod custom;
 pub mod identity;
 pub mod pack_format;
 pub mod rules_crypto;

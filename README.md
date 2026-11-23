@@ -90,6 +90,7 @@ From the `codefixture-audit-public` folder (on Windows, `.\target\release\codefi
 | Report in French, Spanish or German | `--lang fr`, `--lang es` or `--lang de` |
 | List the rules | `./target/release/codefixture-audit list-rules` |
 | A CycloneDX SBOM of your dependencies | add `--sbom` (see [SBOM export](INSTALLATION.md#sbom-export)) |
+| Add rules of your own | `.sca` files in `~/.codefixture-audit/custom-rules/` (see [Your own rules](INSTALLATION.md#your-own-rules)) |
 | Update the engine | `git pull`, then `cargo build --release` |
 
 When your project declares dependencies (`requirements.txt`, `package.json`, `pom.xml`, `composer.json`, `.csproj`…), their versions are compared with the published vulnerabilities the rules carry, offline: the version a lockfile records as installed (`package-lock.json`, `poetry.lock`, `Pipfile.lock`, `composer.lock`…), else the exact version, else the lowest version a range allows, which the finding states. The packages a lockfile installs besides the declared ones are checked too. A vulnerability that CISA lists as exploited in real attacks (KEV) makes the finding critical, and each CVE shows its EPSS score: the probability that it gets exploited in the next 30 days.

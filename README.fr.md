@@ -90,6 +90,7 @@ Depuis le dossier `codefixture-audit-public` (sous Windows, `.\target\release\co
 | Un rapport en français, espagnol ou allemand | `--lang fr`, `--lang es` ou `--lang de` |
 | Lister les règles | `./target/release/codefixture-audit list-rules` |
 | Un SBOM CycloneDX de vos dépendances | ajoutez `--sbom` (voir [Export SBOM](INSTALLATION.fr.md#export-sbom)) |
+| Ajouter vos propres règles | des fichiers `.sca` dans `~/.codefixture-audit/custom-rules/` (voir [Vos propres règles](INSTALLATION.fr.md#vos-propres-règles)) |
 | Mettre à jour le moteur | `git pull`, puis `cargo build --release` |
 
 Quand votre projet déclare des dépendances (`requirements.txt`, `package.json`, `pom.xml`, `composer.json`, `.csproj`…), leurs versions sont comparées, hors ligne, aux vulnérabilités publiées que portent les règles : la version qu'un fichier de verrouillage indique comme installée (`package-lock.json`, `poetry.lock`, `Pipfile.lock`, `composer.lock`…), sinon la version exacte, sinon la plus petite version qu'autorise un intervalle, que le constat indique. Les paquets qu'un fichier de verrouillage installe en plus des dépendances déclarées sont aussi vérifiés. Une vulnérabilité que la CISA répertorie comme exploitée dans de vraies attaques (KEV) rend le constat critique, et chaque CVE affiche son score EPSS : la probabilité qu'elle soit exploitée dans les 30 prochains jours.

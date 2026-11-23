@@ -383,6 +383,14 @@ En plus du rapport, le moteur écrit `SCA-SBOM-<date>.json` dans le dossier `aud
 
 Le préfixe de fichier `SCA` suit `brand.json` quand vous le personnalisez.
 
+### Vos propres règles
+
+Vous pouvez ajouter vos propres règles, pour une API interne ou une convention de votre code : de simples fichiers `.sca` dans `~/.codefixture-audit/custom-rules/` (`%USERPROFILE%\.codefixture-audit\custom-rules\` sous Windows), rangés par langage (`python/security/ma_regle.sca`). Chaque analyse les charge en plus des règles livrées, pour les langages qu'elle analyse ; `--custom-rules-dir <DOSSIER>` lit un autre dossier à la place. Aucune compilation ni mise à jour ne touche ce dossier.
+
+- Le rapport les liste dans sa section « Règles personnalisées », chacune avec son nombre de constats, et étiquette leurs constats comme les vôtres.
+- Une de vos règles qui porte le langage et le nom d'une règle livrée la remplace, et l'analyse le dit.
+- Une règle qui ne compile pas est nommée dans un avertissement, avec l'erreur, et laissée de côté ; les autres s'exécutent.
+
 ### Déplacer le moteur
 
 Le moteur et `rules.cfpack` sont tout ce dont une analyse a besoin : copiez-les ensemble dans un autre dossier et lancez le moteur depuis n'importe où. Sans le pack à côté de lui, le moteur s'arrête et nomme le fichier qu'il a cherché.

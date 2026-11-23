@@ -383,6 +383,14 @@ Besides the report, the engine writes `SCA-SBOM-<date>.json` into `audit-reports
 
 The file prefix `SCA` follows `brand.json` when you customise it.
 
+### Your own rules
+
+You can add rules of your own, for an in-house API or a convention of your code: plain `.sca` files in `~/.codefixture-audit/custom-rules/` (`%USERPROFILE%\.codefixture-audit\custom-rules\` on Windows), laid out by language (`python/security/my_rule.sca`). Every analysis loads them besides the delivered rules, for the languages it analyses; `--custom-rules-dir <FOLDER>` reads another folder instead. No build or update touches that folder.
+
+- The report lists them in its "Custom Rules" section, each with its number of findings, and labels their findings as yours.
+- A rule of yours with the language and name of a delivered rule replaces it, and the analysis says so.
+- A rule that does not compile is named in a warning, with the error, and left out; the others still run.
+
 ### Moving the engine
 
 The engine and `rules.cfpack` are all an analysis needs: copy them together to another folder and run the engine from anywhere. Without the pack beside it, the engine stops and names the file it looked for.

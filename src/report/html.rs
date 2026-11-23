@@ -110,9 +110,10 @@ fn language_severity_data(findings: &[ReportFinding]) -> Value {
 
 /// Taint chart data — port of `_get_taint_chart_data`.
 /// `builtin_loaded`/`custom_loaded`: `_rule_engine_stats` doesn't
-/// exist on the codefixture-audit side — approximated by the size of the
-/// loaded rule catalog. The chart has one slice for the catalog's rules
-/// (`json_builtin`) and one for the client's (`json_custom`).
+/// exist on the codefixture-audit side — counted on the loaded rule
+/// catalog, the client's rules apart (`"origin": "client"`, ADR-0057).
+/// The chart has one slice for the catalog's rules (`json_builtin`) and
+/// one for the client's (`json_custom`).
 fn taint_chart_data(findings: &[ReportFinding], rule_catalog: &RuleCatalog) -> Value {
     let taint_findings: Vec<&ReportFinding> =
         findings.iter().filter(|f| f.taint_flow.is_some()).collect();
@@ -139,8 +140,8 @@ fn taint_chart_data(findings: &[ReportFinding], rule_catalog: &RuleCatalog) -> V
         "totalFlows": taint_findings.len(),
         "byRule": by_rule,
         "bySource": by_source,
-        "builtin_loaded": rule_catalog.len(),
-        "custom_loaded": 0,
+        "builtin_loaded": rule_catalog.values().filter(|rule| !is_client_rule(rule)).count(),
+        "custom_loaded": rule_catalog.values().filter(|rule| is_client_rule(rule)).count(),
     })
 }
 
@@ -510,33 +511,104 @@ fn render_glossary_html(report_locale: &Value) -> (String, String) {
     (html, title)
 }
 
-/// "Custom rules" section — empty state only: codefixture-audit does not yet
-/// distinguish builtin/custom (`ScanConfig` has only one
-/// `rules_dir`), so `custom_rules` is always empty, like a real
-/// Python scan with no `json_custom` rule loaded.
+/// "Custom rules" section: one card per client rule loaded for the scan
+/// (`"origin": "client"` in the catalog, ADR-0057), with its identity,
+/// severity, language, category, number of findings and risk text, or an
+/// empty state when the scan loaded none. Port of
+/// `report.py::_generate_custom_rules_section`.
 ///
-/// Deliberate deviation from Python (2026-11-15): Audit printed
-/// `./run_audit.py . --create-rule` under the text, a command of the
-/// Python tool. No command of this engine fits instead: `create-rule`
-/// writes catalog rules (private build), and the shared build reads no
-/// custom rule at all (ADR-0041). The empty state only describes them.
-fn render_custom_rules_section(report_locale: &Value) -> String {
-    let body = format!(
-        r#"<div class="custom-rules-empty"><div class="custom-rules-empty-icon">📜</div><p class="custom-rules-empty-title">{}</p><p class="custom-rules-empty-desc">{}</p></div>"#,
-        t(report_locale, "custom_rules_none"),
-        t(report_locale, "custom_rules_none_desc"),
-    );
+/// Deliberate deviations from Python:
+/// - the empty state prints no command: Audit printed
+///   `./run_audit.py . --create-rule`, a command of the Python tool
+///   (2026-11-15);
+/// - findings are counted per rule identity (language and name), not per
+///   name: two client rules of one name in two languages are two cards
+///   (CONTEXT.md, "Rule identity").
+fn render_custom_rules_section(
+    report_locale: &Value,
+    findings: &[ReportFinding],
+    rule_catalog: &RuleCatalog,
+) -> String {
+    let custom_rules: Vec<(&crate::rules::identity::RuleId, &Value)> = rule_catalog
+        .iter()
+        .filter(|(_, rule)| is_client_rule(rule))
+        .collect();
+    let mut findings_by_rule: BTreeMap<crate::rules::identity::RuleId, usize> = BTreeMap::new();
+    for finding in findings.iter().filter(|f| f.rule_source == "json_custom") {
+        *findings_by_rule.entry(finding.rule_id()).or_default() += 1;
+    }
+    let count = custom_rules.len();
+    let count_badge = if count > 0 {
+        format!(r#"<span class="badge badge-info">{count}</span>"#)
+    } else {
+        r#"<span class="badge badge-neutral">0</span>"#.to_string()
+    };
+    let body = if count == 0 {
+        format!(
+            r#"<div class="custom-rules-empty"><div class="custom-rules-empty-icon">📜</div><p class="custom-rules-empty-title">{}</p><p class="custom-rules-empty-desc">{}</p></div>"#,
+            t(report_locale, "custom_rules_none"),
+            t(report_locale, "custom_rules_none_desc"),
+        )
+    } else {
+        let lang = t(report_locale, "locale_code");
+        let cards: String = custom_rules
+            .iter()
+            .map(|(id, rule)| {
+                let severity = rule
+                    .get("severity")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("INFO")
+                    .to_uppercase();
+                let hits = findings_by_rule.get(id).copied().unwrap_or(0);
+                let findings_badge = if hits > 0 {
+                    let class = match severity.as_str() {
+                        "CRITICAL" | "HIGH" => "high",
+                        "MEDIUM" => "medium",
+                        _ => "low",
+                    };
+                    format!(r#"<span class="badge badge-{class}">{hits}</span>"#)
+                } else {
+                    format!(
+                        r#"<span class="badge badge-neutral">{}</span>"#,
+                        t(report_locale, "custom_rules_no_findings")
+                    )
+                };
+                let text = |key: &str| rule.get(key).and_then(|v| v.as_str()).unwrap_or("");
+                let risk = crate::scan::orchestrator::extract_i18n_block(rule, "risk", &lang);
+                let description = if risk.is_empty() {
+                    String::new()
+                } else {
+                    format!(r#"<p class="custom-rule-desc">{}</p>"#, escape(&risk))
+                };
+                format!(
+                    r#"<div class="custom-rule-card"><div class="custom-rule-header"><code class="custom-rule-id">{}</code><span class="sev-tag sev-{}">{}</span><span class="custom-rule-lang">{}</span><span class="custom-rule-cat">{}</span><span class="custom-rule-findings">{}</span></div>{}</div>"#,
+                    escape(text("id")),
+                    severity.to_lowercase(),
+                    escape(&severity),
+                    escape(text("language")),
+                    escape(text("category")),
+                    findings_badge,
+                    description,
+                )
+            })
+            .collect();
+        format!(r#"<div class="custom-rules-list">{cards}</div>"#)
+    };
     load_template("custom-rules-section.html")
         .replace(
             "{{i18n_custom_rules_nav}}",
             &t(report_locale, "custom_rules_nav"),
         )
         .replace("{{i18n_toc}}", &t(report_locale, "toc"))
-        .replace(
-            "{{custom_rules_count_badge}}",
-            r#"<span class="badge badge-neutral">0</span>"#,
-        )
+        .replace("{{custom_rules_count_badge}}", &count_badge)
         .replace("{{custom_rules_body}}", &body)
+}
+
+/// Whether a compiled rule is one of the client's own (ADR-0057): the
+/// catalog marks it `"origin": "client"` when it loads it from the
+/// custom rules folder (`rules::catalog::RuleOrigin`).
+fn is_client_rule(rule: &Value) -> bool {
+    rule.get("origin").and_then(|v| v.as_str()) == Some("client")
 }
 
 /// Removes `<!--DEV_ONLY_DB-->...<!--/DEV_ONLY_DB-->` blocks — in the
@@ -980,7 +1052,7 @@ pub fn generate_html(
     html = html.replace("{{sections_html}}", &sections_html);
     html = html.replace(
         "{{custom_rules_html}}",
-        &render_custom_rules_section(&report_locale),
+        &render_custom_rules_section(&report_locale, findings, ctx.rule_catalog),
     );
 
     // --- unported sections: tests/fixtures/dependencies/database/SLA/git-blame
@@ -1121,6 +1193,85 @@ mod tests {
             rule_source: "json_builtin".to_string(),
             file_scope: None,
         }
+    }
+
+    /// A catalog rule, or a client rule when `client` (ADR-0057).
+    fn catalog_rule(name: &str, severity: &str, client: bool) -> Value {
+        let mut rule = json!({
+            "id": name,
+            "language": "python",
+            "category": "security",
+            "severity": severity,
+            "risk": {"en": format!("Risk of {name}.")},
+        });
+        if client {
+            rule["origin"] = json!("client");
+        }
+        rule
+    }
+
+    fn catalog_of(rules: Vec<Value>) -> RuleCatalog {
+        rules
+            .into_iter()
+            .filter_map(|r| Some((crate::rules::identity::RuleId::of(&r)?, r)))
+            .collect()
+    }
+
+    /// Ticket #274: no client rule loaded, the empty state with a zero
+    /// badge.
+    #[test]
+    fn test_custom_rules_section_without_client_rule_is_empty() {
+        let locale = crate::i18n::load_report_locale("en");
+        let catalog = catalog_of(vec![catalog_rule("eval_usage", "HIGH", false)]);
+        let html = render_custom_rules_section(&locale, &[], &catalog);
+        assert!(html.contains("custom-rules-empty"), "{html}");
+        assert!(html.contains(r#"<span class="badge badge-neutral">0</span>"#));
+        assert!(!html.contains("custom-rule-card"));
+    }
+
+    /// Ticket #274 (port of `_generate_custom_rules_section`): one card
+    /// per client rule, catalog rules left out; the findings of a client
+    /// rule counted, a client rule without finding said so.
+    #[test]
+    fn test_custom_rules_section_lists_each_client_rule_with_its_findings() {
+        let locale = crate::i18n::load_report_locale("en");
+        let catalog = catalog_of(vec![
+            catalog_rule("eval_usage", "HIGH", false),
+            catalog_rule("house_api_call", "MEDIUM", true),
+            catalog_rule("house_secret", "HIGH", true),
+        ]);
+        let mut hit = finding(
+            "security",
+            "MEDIUM",
+            "house_api_call",
+            "House API",
+            "app.py",
+        );
+        hit.rule_source = "json_custom".to_string();
+        let catalog_hit = finding("security", "HIGH", "eval_usage", "Eval", "app.py");
+        let html = render_custom_rules_section(&locale, &[hit.clone(), hit, catalog_hit], &catalog);
+        assert!(
+            html.contains(r#"<span class="badge badge-info">2</span>"#),
+            "{html}"
+        );
+        assert_eq!(html.matches("custom-rule-card").count(), 2);
+        assert!(!html.contains("eval_usage"));
+        assert!(html.contains("house_api_call"));
+        assert!(html.contains(r#"<span class="badge badge-medium">2</span>"#));
+        assert!(html.contains("No findings on this project"));
+        assert!(html.contains("Risk of house_secret."));
+    }
+
+    /// Ticket #274: the taint chart counts the client's rules apart.
+    #[test]
+    fn test_taint_chart_counts_client_rules_apart() {
+        let catalog = catalog_of(vec![
+            catalog_rule("eval_usage", "HIGH", false),
+            catalog_rule("house_api_call", "MEDIUM", true),
+        ]);
+        let data = taint_chart_data(&[], &catalog);
+        assert_eq!(data["builtin_loaded"], 1);
+        assert_eq!(data["custom_loaded"], 1);
     }
 
     /// Ticket #222: the "Dependencies" card leads to the dependency
