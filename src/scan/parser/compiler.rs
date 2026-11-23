@@ -5,7 +5,7 @@
 //! identical to the format produced by the existing `.json` files in
 //! `sca/rules/builtin/`.
 
-use super::model::{MatchBlock, RuleNode};
+use super::model::{MatchBlock, RuleNode, SinkArguments};
 use serde_json::{Map, Value, json};
 
 pub fn compile_to_json(node: &RuleNode) -> Value {
@@ -133,8 +133,14 @@ pub fn compile_to_json(node: &RuleNode) -> Value {
             .map(|s| match s.arg_index {
                 // Written by the rule: the dataflow path and the line layer
                 // both check only this argument (ticket #221).
-                Some(index) => {
+                Some(SinkArguments::Index(index)) => {
                     json!({"pattern": s.pattern, "arg_index": index, "arg_explicit": true})
+                }
+                // `arg_index=all`: an empty `args` list, which the loader
+                // reads as every argument, for the dataflow path and the
+                // line layer alike (ticket #258).
+                Some(SinkArguments::All) => {
+                    json!({"pattern": s.pattern, "args": [], "arg_explicit": true})
                 }
                 // Not written: argument 0 for the dataflow path, the whole
                 // call for the line layer, as before.

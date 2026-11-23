@@ -68,17 +68,29 @@ pub struct SourceSpec {
     pub line_number: usize,
 }
 
+/// The arguments of a sink the rule names with `arg_index=`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SinkArguments {
+    /// `arg_index=<n>`: the one argument (0-based) that carries the danger
+    /// (ticket #221).
+    Index(usize),
+    /// `arg_index=all`: every argument carries the danger. Written on a
+    /// constructor whose dangerous argument is not always the first:
+    /// `new Cookie(name, value)`, `new Function("x", body)` (ticket #258).
+    All,
+}
+
 /// A `sink` line of a data-flow rule: the regular expression of the
-/// dangerous call, and the argument the rule names with `arg_index=<n>`.
+/// dangerous call, and the arguments the rule names with `arg_index=`.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SinkSpec {
     pub pattern: String,
-    /// The argument (0-based) that carries the danger, when the rule
-    /// writes `arg_index=<n>`: the only one both the dataflow path and the
-    /// line layer check (ticket #221). `None` when not written: the
-    /// dataflow path checks argument 0 and the line layer the whole call,
-    /// as before the option was a decision of the rule.
-    pub arg_index: Option<usize>,
+    /// The arguments that carry the danger, when the rule writes
+    /// `arg_index=`: the only ones both the dataflow path and the line
+    /// layer check (ticket #221). `None` when not written: the dataflow
+    /// path checks argument 0 and the line layer the whole call, as before
+    /// the option was a decision of the rule.
+    pub arg_index: Option<SinkArguments>,
     pub line_number: usize,
 }
 

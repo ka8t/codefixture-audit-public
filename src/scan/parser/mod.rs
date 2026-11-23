@@ -430,10 +430,11 @@ impl<'a> DslParser<'a> {
     }
 
     /// Parses a `sink` line: the regular expression, then its only option,
-    /// `arg_index=<n>`. An unknown option or an index that is not a
-    /// non-negative integer is an error naming the line: before ticket
-    /// #221 both were dropped silently, an index read as 0, which made a
-    /// typo in the option indistinguishable from its absence.
+    /// `arg_index=<n>` or `arg_index=all` (ticket #258). An unknown option
+    /// or a value that is neither a non-negative integer nor `all` is an
+    /// error naming the line: before ticket #221 both were dropped
+    /// silently, an index read as 0, which made a typo in the option
+    /// indistinguishable from its absence.
     fn parse_sink(&mut self) -> PResult<SinkSpec> {
         let ln = self.line().number;
         let (text, kvs) = self.parse_raw_with_kvs();
@@ -451,13 +452,19 @@ impl<'a> DslParser<'a> {
                     self.filename,
                 ));
             }
-            arg_index = Some(value.parse::<usize>().map_err(|_| {
-                DslSyntaxError::new(
-                    format!("'arg_index' doit être un entier positif ou nul, trouvé : '{value}'"),
-                    ln,
-                    self.filename,
-                )
-            })?);
+            arg_index = Some(if value == "all" {
+                SinkArguments::All
+            } else {
+                SinkArguments::Index(value.parse::<usize>().map_err(|_| {
+                    DslSyntaxError::new(
+                        format!(
+                            "'arg_index' doit être un entier positif ou nul ou 'all', trouvé : '{value}'"
+                        ),
+                        ln,
+                        self.filename,
+                    )
+                })?)
+            });
         }
         Ok(SinkSpec {
             pattern: text,
@@ -919,6 +926,17 @@ mod tests {
         let rules = compile_sca_to_json(&default, "javascript/security/t.sca").unwrap();
         assert_eq!(rules[0]["sinks"][0]["arg_index"], 0);
         assert!(rules[0]["sinks"][0].get("arg_explicit").is_none());
+    }
+
+    /// `arg_index=all` gives an empty `args` list, every argument, written
+    /// by the rule (ticket #258).
+    #[test]
+    fn test_sink_arg_index_all_names_every_argument() {
+        let all = TAINT_RULE.replace("SINK_LINE", "sink    new\\s+Function\\s*\\(  arg_index=all");
+        let rules = compile_sca_to_json(&all, "javascript/security/t.sca").unwrap();
+        assert_eq!(rules[0]["sinks"][0]["args"], serde_json::json!([]));
+        assert!(rules[0]["sinks"][0].get("arg_index").is_none());
+        assert_eq!(rules[0]["sinks"][0]["arg_explicit"], true);
     }
 
     /// An index that is not a non-negative integer, or an unknown option,

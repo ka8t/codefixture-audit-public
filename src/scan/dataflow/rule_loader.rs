@@ -55,6 +55,20 @@ static MULTI_STAR_RE: LazyLock<Regex> =
 /// of `event.*`. A control character never appears in a rule regex.
 const LITERAL_DOT: char = '\u{1}';
 
+/// Stand-in for an escaped backslash (`\\` in the regex) while the other
+/// escapes are read, turned into one `\` at the end of
+/// [`regex_to_dotted_patterns`]. PHP writes a namespaced class with it
+/// (`Twig\Environment`), and the PHP conversion names `new
+/// Twig\Environment(...)` with that text. Deviation from the Audit (ticket
+/// #258), which kept both characters: `Twig\\Environment` named no call.
+const LITERAL_BACKSLASH: char = '\u{2}';
+
+/// The `new` keyword followed by blanks, at the start of an alternative:
+/// `new\s+File\s*\(`, `(new\s+A|new\s+B)`, `\bnew URL\s*\(`. Captures what
+/// precedes it, so that only the keyword and its blanks are dropped.
+static CONSTRUCTOR_KEYWORD_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(^|[|(:]|\\b)new(?:\\s[+*]| +)").expect("regex statique valide"));
+
 /// Entirely strips lookaround groups `(?=...)`, `(?!...)`,
 /// `(?<=...)`, `(?<!...)` (including balanced parentheses), not just
 /// the opening marker — a lookaround carries a constraint with no
@@ -201,6 +215,17 @@ pub fn regex_to_dotted_patterns(regex_str: &str) -> Vec<String> {
         return Vec::new();
     }
     let stripped = strip_lookaround_groups(regex_str);
+    // `new X(...)` is named after its class by every conversion: Java and
+    // C# `type_to_rhs` (`File`, `java.io.File`), the JavaScript
+    // `constructor` field (`URL`, `foo.Bar`), the PHP class name
+    // (`Twig\Environment`). The keyword is dropped so that the pattern names
+    // that class. Deviation from the Audit (ticket #258): removing only the
+    // blanks gave `newFile`, a name no call has, and those sinks, sanitizers
+    // and passthroughs were read by the line layer alone.
+    let stripped = CONSTRUCTOR_KEYWORD_RE.replace_all(&stripped, "$1");
+    // An escaped backslash is a literal one, kept apart from the escapes
+    // read below (see `LITERAL_BACKSLASH`).
+    let stripped = stripped.replace(r"\\", &LITERAL_BACKSLASH.to_string());
     let clean = REGEX_NOISE_RE.replace_all(&stripped, "").into_owned();
     // A literal dot is kept apart from the regex `.` until the wildcards
     // are converted (see `LITERAL_DOT`).
@@ -225,7 +250,7 @@ pub fn regex_to_dotted_patterns(regex_str: &str) -> Vec<String> {
     expand_alternations(&clean)
         .into_iter()
         .filter_map(|p| {
-            let f = finalize_dotted(&p);
+            let f = finalize_dotted(&p).replace(LITERAL_BACKSLASH, "\\");
             if f.is_empty() { None } else { Some(f) }
         })
         .collect()
@@ -785,6 +810,64 @@ mod tests {
             vec!["Builders<*>.Filter.Eq"]
         );
         assert_eq!(regex_to_dotted_patterns(r"\->query\("), vec!["**.query"]);
+    }
+
+    #[test]
+    fn test_constructor_pattern_names_its_class() {
+        // `new X(...)` is named `X` by the conversions: the keyword goes,
+        // with the blanks after it, whatever their spelling.
+        assert_eq!(regex_to_dotted_patterns(r"new\s+File\s*\("), vec!["File"]);
+        assert_eq!(regex_to_dotted_patterns(r"new URL\s*\("), vec!["URL"]);
+        assert_eq!(
+            regex_to_dotted_patterns(r"\bnew\s+Function\s*\("),
+            vec!["Function"]
+        );
+        assert_eq!(
+            regex_to_dotted_patterns(r"(new\s+FileStream|new\s+StreamReader)\s*\("),
+            vec!["FileStream", "StreamReader"]
+        );
+        assert_eq!(
+            regex_to_dotted_patterns(r"new\s+ModelAndView\s*\(.*redirect"),
+            vec!["ModelAndView*redirect"]
+        );
+    }
+
+    #[test]
+    fn test_new_inside_a_name_is_kept() {
+        // Only the keyword at the start of an alternative is dropped.
+        assert_eq!(
+            regex_to_dotted_patterns(r"renew\s+Lease"),
+            vec!["renewLease"]
+        );
+        assert_eq!(
+            regex_to_dotted_patterns(r"newInstance\s*\("),
+            vec!["newInstance"]
+        );
+        assert_eq!(regex_to_dotted_patterns(r"\.renew\s*\("), vec!["**.renew"]);
+    }
+
+    #[test]
+    fn test_escaped_backslash_is_a_php_namespace_separator() {
+        // The PHP conversion names `new Twig\Environment(...)`
+        // `Twig\Environment`: the pattern carries one backslash.
+        let patterns = regex_to_dotted_patterns(r"Twig\\Environment\s*\(");
+        assert_eq!(patterns, vec![r"Twig\Environment"]);
+        assert!(compile_glob(&patterns[0]).is_match(r"Twig\Environment"));
+    }
+
+    #[test]
+    fn test_sink_with_every_argument_checks_them_all() {
+        // `arg_index=all` compiles to an empty `args` list: the dataflow
+        // path and the line layer both read every argument (ticket #258).
+        let rule = serde_json::json!({
+            "id": "t",
+            "sources": [{"pattern": r"req\.query", "kind": "http"}],
+            "sinks": [{"pattern": r"new\s+Function\s*\(", "args": [], "arg_explicit": true}],
+        });
+        let specs = rule_json_to_specs(&rule, "javascript").expect("taint specs");
+        assert!(specs.sinks[0].args.is_empty());
+        assert!(specs.sinks[0].line_args.is_empty());
+        assert_eq!(specs.sinks[0].pattern, "Function");
     }
 
     fn compile_glob(pattern: &str) -> super::super::transfer::GlobPattern {
