@@ -39,6 +39,38 @@ pub const RULE_LANGUAGES: [&str; 8] = [
     "yaml",
 ];
 
+/// Why a rule file or a pack was left out of a scan.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RuleLoadError {
+    /// The file does not compile: a compiler message, translated in the
+    /// console's language when shown ([`RuleLoadError::render`], ticket
+    /// #279).
+    Compile(crate::scan::parser::lexer::DslSyntaxError),
+    /// The file or the pack could not be read or opened. The reason comes
+    /// from the file system or `pack_format`, in English.
+    Read(String),
+}
+
+impl RuleLoadError {
+    /// The reason in the language of `locale` (a console translation).
+    pub fn render(&self, locale: &serde_json::Value) -> String {
+        match self {
+            RuleLoadError::Compile(error) => error.render(locale),
+            RuleLoadError::Read(reason) => reason.clone(),
+        }
+    }
+}
+
+/// In English (see `DslSyntaxError`'s `Display`).
+impl std::fmt::Display for RuleLoadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RuleLoadError::Compile(error) => write!(f, "{error}"),
+            RuleLoadError::Read(reason) => f.write_str(reason),
+        }
+    }
+}
+
 /// Where a rule comes from, written as `"origin"` on each compiled rule so
 /// the report can tell the catalog's rules from the client's own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -97,7 +129,7 @@ pub struct LoadedRules {
     pub files_available: usize,
     /// The pack or files that could not be read or opened, with the
     /// reason. One unreadable file never stops the others.
-    pub errors: Vec<(PathBuf, String)>,
+    pub errors: Vec<(PathBuf, RuleLoadError)>,
 }
 
 /// The counts of a [`LoadedRules`], without the rule sources: what the
@@ -237,7 +269,9 @@ fn load_rule_pack(path: &Path, languages: &[String], origin: RuleOrigin) -> Load
     let files = match opened {
         Ok((_, files)) => files,
         Err(reason) => {
-            loaded.errors.push((path.to_path_buf(), reason));
+            loaded
+                .errors
+                .push((path.to_path_buf(), RuleLoadError::Read(reason)));
             return loaded;
         }
     };
@@ -279,9 +313,10 @@ fn load_rule_folder(dir: &Path, languages: &[String], origin: RuleOrigin) -> Loa
                 content,
                 origin,
             }),
-            Err(e) => loaded
-                .errors
-                .push((path, format!("unreadable rule file: {e}"))),
+            Err(e) => loaded.errors.push((
+                path,
+                RuleLoadError::Read(format!("unreadable rule file: {e}")),
+            )),
         }
     }
     loaded
@@ -324,7 +359,7 @@ pub struct RuleRegistry {
     /// Position of each identity in `rules`.
     index: std::collections::BTreeMap<RuleId, usize>,
     conflicts: Vec<RuleConflict>,
-    errors: Vec<(PathBuf, String)>,
+    errors: Vec<(PathBuf, RuleLoadError)>,
 }
 
 /// A rule of the registry, with what the conflict messages need.
@@ -384,7 +419,7 @@ impl RuleRegistry {
                 }
                 Err(e) => self
                     .errors
-                    .push((PathBuf::from(&file.source_name), e.to_string())),
+                    .push((PathBuf::from(&file.source_name), RuleLoadError::Compile(e))),
             }
         }
     }
@@ -424,7 +459,7 @@ impl RuleRegistry {
     ) -> (
         Vec<serde_json::Value>,
         Vec<RuleConflict>,
-        Vec<(PathBuf, String)>,
+        Vec<(PathBuf, RuleLoadError)>,
     ) {
         let rules = self.rules.into_iter().map(|r| r.json).collect();
         (rules, self.conflicts, self.errors)
@@ -542,7 +577,7 @@ mod tests {
     ) -> (
         Vec<serde_json::Value>,
         Vec<RuleConflict>,
-        Vec<(PathBuf, String)>,
+        Vec<(PathBuf, RuleLoadError)>,
     ) {
         let mut registry = RuleRegistry::default();
         for source in sources {
@@ -797,7 +832,7 @@ mod tests {
                 let loaded = load_rules(&dir.join(name), &python, RuleOrigin::Builtin);
                 assert!(loaded.files.is_empty());
                 assert_eq!(loaded.errors.len(), 1);
-                loaded.errors[0].1.clone()
+                loaded.errors[0].1.to_string()
             })
             .collect();
         std::fs::remove_dir_all(&dir).ok();

@@ -2086,7 +2086,7 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
         emit_warning(
             &codefixture_audit::i18n::t(&script_locale, "scan_rule_skipped")
                 .replace("{path}", &rule_path.display().to_string())
-                .replace("{error}", &err.to_string()),
+                .replace("{error}", &err.render(&script_locale)),
         );
     }
     // Rules of one identity met twice (`RuleRegistry`): a client rule

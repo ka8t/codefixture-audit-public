@@ -2,6 +2,7 @@
 //! `Audit/sca/dsl/validator.py`.
 
 use super::compiler::text_to_regex;
+use super::messages::{DslMessage, keys};
 use super::model::{MatchBlock, RuleNode};
 
 pub const VALID_LANGUAGES: &[&str] = &[
@@ -43,72 +44,71 @@ fn valid_id(id: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
 }
 
-pub fn validate_rule(node: &RuleNode) -> Vec<String> {
+/// The problems of a parsed rule, as compiler messages (ticket #279):
+/// empty when the rule is valid.
+pub fn validate_rule(node: &RuleNode) -> Vec<DslMessage> {
     let mut errors = Vec::new();
 
     if node.id.is_empty() {
-        errors.push("Identifiant de regle manquant".to_string());
+        errors.push(DslMessage::new(keys::ID_MISSING));
     } else if !valid_id(&node.id) {
-        errors.push(format!(
-            "Identifiant invalide : '{}' (attendu : [a-z0-9_]+)",
-            node.id
-        ));
+        errors.push(DslMessage::new(keys::ID_INVALID).with("id", node.id.clone()));
     }
 
     if node.language.is_empty() {
-        errors.push("Langage manquant".to_string());
+        errors.push(DslMessage::new(keys::LANGUAGE_MISSING));
     } else if !VALID_LANGUAGES.contains(&node.language.as_str()) {
-        errors.push(format!("Langage inconnu : '{}'", node.language));
+        errors
+            .push(DslMessage::new(keys::LANGUAGE_UNKNOWN).with("language", node.language.clone()));
     }
 
     if !node.category.is_empty() && !VALID_CATEGORIES.contains(&node.category.as_str()) {
-        errors.push(format!("Categorie inconnue : '{}'", node.category));
+        errors
+            .push(DslMessage::new(keys::CATEGORY_UNKNOWN).with("category", node.category.clone()));
     }
 
     if node.severity.is_empty() {
-        errors.push("Severite manquante".to_string());
+        errors.push(DslMessage::new(keys::SEVERITY_MISSING));
     } else if !VALID_SEVERITIES.contains(&node.severity.as_str()) {
-        errors.push(format!("Severite inconnue : '{}'", node.severity));
+        errors
+            .push(DslMessage::new(keys::SEVERITY_UNKNOWN).with("severity", node.severity.clone()));
     }
 
     if !node.mode.is_empty() && !VALID_MODES_DSL.contains(&node.mode.as_str()) {
-        errors.push(format!("Mode inconnu : '{}'", node.mode));
+        errors.push(DslMessage::new(keys::MODE_UNKNOWN).with("mode", node.mode.clone()));
     }
 
     if !(0..=100).contains(&node.confidence) {
-        errors.push(format!(
-            "Confidence hors plage : {} (attendu : 0-100)",
-            node.confidence
-        ));
+        errors.push(
+            DslMessage::new(keys::CONFIDENCE_OUT_OF_RANGE)
+                .with("confidence", node.confidence.to_string()),
+        );
     }
 
     if !node.mode.is_empty() {
         let mode = node.mode.as_str();
         if (mode == "regex" || mode == "regex+taint") && node.match_blocks.is_empty() {
-            errors.push(format!("Mode '{mode}' requiert au moins un bloc 'match'"));
+            errors.push(DslMessage::new(keys::MODE_NEEDS_MATCH).with("mode", mode));
         }
         if mode == "taint" || mode == "regex+taint" {
             if node.sources.is_empty() {
-                errors.push(format!("Mode '{mode}' requiert au moins une source"));
+                errors.push(DslMessage::new(keys::MODE_NEEDS_SOURCE).with("mode", mode));
             }
             if node.sinks.is_empty() {
-                errors.push(format!("Mode '{mode}' requiert au moins un sink"));
+                errors.push(DslMessage::new(keys::MODE_NEEDS_SINK).with("mode", mode));
             }
         }
         if mode == "ast" && node.match_blocks.is_empty() {
-            errors.push("Mode 'ast' requiert un bloc 'match ast'".to_string());
+            errors.push(DslMessage::new(keys::AST_NEEDS_BLOCK));
         }
         if mode == "file_contains"
             && node.match_blocks.is_empty()
             && node.file_conditions.is_empty()
         {
-            errors.push(
-                "Mode 'file_contains' requiert un bloc 'match file_contains' ou 'requires' (has/not_has)"
-                    .to_string(),
-            );
+            errors.push(DslMessage::new(keys::FILE_CONTAINS_NEEDS_BLOCK));
         }
         if mode == "python_hook" && node.hook.is_empty() {
-            errors.push("Mode 'python_hook' requiert un 'hook'".to_string());
+            errors.push(DslMessage::new(keys::PYTHON_HOOK_NEEDS_HOOK));
         }
     } else {
         let has_content = !node.match_blocks.is_empty()
@@ -117,10 +117,7 @@ pub fn validate_rule(node: &RuleNode) -> Vec<String> {
             || !node.sinks.is_empty()
             || !node.hook.is_empty();
         if !has_content {
-            errors.push(
-                "La regle doit contenir au moins un bloc 'match', 'requires' (has/not_has), 'taint', ou 'hook'"
-                    .to_string(),
-            );
+            errors.push(DslMessage::new(keys::RULE_NEEDS_DETECTION));
         }
     }
 
@@ -129,19 +126,20 @@ pub fn validate_rule(node: &RuleNode) -> Vec<String> {
     validate_taint_patterns(node, &mut errors);
 
     if !VALID_TIERS.contains(&node.license.min_tier.as_str()) {
-        errors.push(format!("Tier inconnu : '{}'", node.license.min_tier));
+        errors
+            .push(DslMessage::new(keys::TIER_UNKNOWN).with("tier", node.license.min_tier.clone()));
     }
 
     for src in &node.sources {
         if !VALID_SOURCE_KINDS.contains(&src.kind.as_str()) {
-            errors.push(format!("Kind de source inconnu : '{}'", src.kind));
+            errors.push(DslMessage::new(keys::SOURCE_KIND_UNKNOWN).with("kind", src.kind.clone()));
         }
     }
 
     errors
 }
 
-fn validate_regex_blocks(node: &RuleNode, errors: &mut Vec<String>) {
+fn validate_regex_blocks(node: &RuleNode, errors: &mut Vec<DslMessage>) {
     for block in &node.match_blocks {
         match block {
             MatchBlock::Regex(b) => {
@@ -190,7 +188,7 @@ fn validate_regex_blocks(node: &RuleNode, errors: &mut Vec<String>) {
     }
 }
 
-fn validate_file_conditions(node: &RuleNode, errors: &mut Vec<String>) {
+fn validate_file_conditions(node: &RuleNode, errors: &mut Vec<DslMessage>) {
     for fc in &node.file_conditions {
         for p in &fc.has_patterns {
             try_compile(p, "requires has", errors);
@@ -201,7 +199,7 @@ fn validate_file_conditions(node: &RuleNode, errors: &mut Vec<String>) {
     }
 }
 
-fn validate_taint_patterns(node: &RuleNode, errors: &mut Vec<String>) {
+fn validate_taint_patterns(node: &RuleNode, errors: &mut Vec<DslMessage>) {
     for src in &node.sources {
         try_compile(&src.pattern, "source", errors);
     }
@@ -218,11 +216,15 @@ fn validate_taint_patterns(node: &RuleNode, errors: &mut Vec<String>) {
 /// Python's `re`, not by the standard `regex` crate) — confirmed
 /// empirically against the corpus of 703 builtin rules (Decision #2),
 /// where `regex` wrongly rejected ~30 rules.
-fn try_compile(pattern: &str, field_name: &str, errors: &mut Vec<String>) {
+fn try_compile(pattern: &str, field_name: &str, errors: &mut Vec<DslMessage>) {
     if pattern.is_empty() {
         return;
     }
     if let Err(e) = fancy_regex::Regex::new(pattern) {
-        errors.push(format!("Regex invalide dans {field_name} : {e}"));
+        errors.push(
+            DslMessage::new(keys::REGEX_INVALID)
+                .with("field", field_name)
+                .with("error", e.to_string()),
+        );
     }
 }

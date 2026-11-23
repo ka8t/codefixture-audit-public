@@ -13,10 +13,12 @@
 
 pub mod compiler;
 pub mod lexer;
+pub mod messages;
 pub mod model;
 pub mod validator;
 
 use lexer::{DslLexer, DslSyntaxError, Line};
+use messages::{DslMessage, keys};
 use model::*;
 use std::collections::HashSet;
 
@@ -50,7 +52,9 @@ impl<'a> DslParser<'a> {
             if kw == "rule" {
                 rules.push(self.parse_rule()?);
             } else {
-                return Err(self.err(&format!("Mot-clé 'rule' attendu, trouvé : '{kw}'")));
+                return Err(self.err(
+                    DslMessage::new(keys::RULE_KEYWORD_EXPECTED).with("found", kw.to_string()),
+                ));
             }
         }
         Ok(rules)
@@ -74,7 +78,7 @@ impl<'a> DslParser<'a> {
         self.pos >= self.lines.len()
     }
 
-    fn err(&self, msg: &str) -> DslSyntaxError {
+    fn err(&self, msg: DslMessage) -> DslSyntaxError {
         let num = self.lines.get(self.pos).map(|l| l.number).unwrap_or(0);
         DslSyntaxError::new(msg, num, self.filename)
     }
@@ -88,7 +92,9 @@ impl<'a> DslParser<'a> {
         let tokens = &line.tokens[1..];
         if tokens.is_empty() {
             let kw = line.tokens[0].value.clone();
-            return Err(self.err(&format!("Valeur manquante après '{kw}'")));
+            return Err(
+                self.err(DslMessage::new(keys::VALUE_MISSING).with("keyword", kw.to_string()))
+            );
         }
         let result = tokens
             .iter()
@@ -114,7 +120,7 @@ impl<'a> DslParser<'a> {
         self.advance();
         if rest.is_empty() {
             return Err(DslSyntaxError::new(
-                format!("Valeur manquante après '{kw}'"),
+                DslMessage::new(keys::VALUE_MISSING).with("keyword", kw.to_string()),
                 line_number,
                 self.filename,
             ));
@@ -164,7 +170,7 @@ impl<'a> DslParser<'a> {
         let line = self.line();
         let tokens = &line.tokens;
         if tokens.len() < 2 {
-            return Err(self.err("Identifiant de règle manquant après 'rule'"));
+            return Err(self.err(DslMessage::new(keys::RULE_ID_MISSING)));
         }
         let rule_id = tokens[1].value.clone();
         let line_number = line.number;
@@ -186,7 +192,7 @@ impl<'a> DslParser<'a> {
                     let val = self.parse_value()?;
                     node.confidence = val
                         .parse()
-                        .map_err(|_| self.err("'confidence' doit être un entier"))?;
+                        .map_err(|_| self.err(DslMessage::new(keys::CONFIDENCE_NOT_INTEGER)))?;
                 }
                 "mode" => node.mode = self.parse_value()?,
                 "match" => node.match_blocks.push(self.parse_match_block()?),
@@ -219,11 +225,15 @@ impl<'a> DslParser<'a> {
                     RequiresResult::FileCondition(fc) => node.file_conditions.push(fc),
                 },
                 "hook" => node.hook = self.parse_value()?,
-                _ => return Err(self.err(&format!("Mot-clé inconnu dans une règle : '{kw}'"))),
+                _ => {
+                    return Err(self.err(
+                        DslMessage::new(keys::UNKNOWN_RULE_KEYWORD).with("keyword", kw.to_string()),
+                    ));
+                }
             }
         }
 
-        Err(self.err("Bloc 'rule' non fermé (manque 'end')"))
+        Err(self.err(DslMessage::new(keys::BLOCK_NOT_CLOSED).with("block", "rule")))
     }
 
     // --- Match blocks ---
@@ -243,7 +253,7 @@ impl<'a> DslParser<'a> {
                     self.parse_match_file_contains(ln)?,
                 )),
                 other => Err(DslSyntaxError::new(
-                    format!("Type de match inconnu : '{other}'"),
+                    DslMessage::new(keys::UNKNOWN_MATCH_TYPE).with("type", other),
                     ln,
                     self.filename,
                 )),
@@ -284,9 +294,11 @@ impl<'a> DslParser<'a> {
             if let Some(slot) = slot
                 && !seen.insert(slot)
             {
-                return Err(self.err(&format!(
-                    "« {kw} » est donné deux fois dans le même bloc 'match' : la seconde valeur remplacerait la première. Écrivez un seul « {slot} » par bloc, ou un bloc 'match' par motif."
-                )));
+                return Err(self.err(
+                    DslMessage::new(keys::REPEATED_IN_MATCH)
+                        .with("keyword", kw.to_string())
+                        .with("slot", slot),
+                ));
             }
             if matches!(kw.as_str(), "pattern-not" | "text-not") {
                 let is_text = kw == "text-not";
@@ -320,10 +332,15 @@ impl<'a> DslParser<'a> {
                 "pattern-not-inside" => {
                     block.pattern_not_inside = self.parse_raw_after_keyword()?
                 }
-                _ => return Err(self.err(&format!("Mot-cle inconnu dans match : '{kw}'"))),
+                _ => {
+                    return Err(self.err(
+                        DslMessage::new(keys::UNKNOWN_MATCH_KEYWORD)
+                            .with("keyword", kw.to_string()),
+                    ));
+                }
             }
         }
-        Err(self.err("Bloc 'match' non ferme (manque 'end')"))
+        Err(self.err(DslMessage::new(keys::BLOCK_NOT_CLOSED).with("block", "match")))
     }
 
     fn parse_match_ast(&mut self, start_line: usize) -> PResult<MatchAstBlock> {
@@ -383,13 +400,13 @@ impl<'a> DslParser<'a> {
                     in_pattern = false;
                 }
             } else {
-                return Err(self.err(&format!(
-                    "Mot-clé 'pattern' attendu dans match ast, trouvé : '{kw}'"
-                )));
+                return Err(self.err(
+                    DslMessage::new(keys::AST_PATTERN_EXPECTED).with("found", kw.to_string()),
+                ));
             }
         }
 
-        Err(self.err("Bloc 'match ast' non fermé (manque 'end')"))
+        Err(self.err(DslMessage::new(keys::BLOCK_NOT_CLOSED).with("block", "match ast")))
     }
 
     fn parse_match_file_contains(&mut self, start_line: usize) -> PResult<MatchFileContainsBlock> {
@@ -405,13 +422,14 @@ impl<'a> DslParser<'a> {
                 "not_has" => block.not_has_patterns.push(self.parse_raw_after_keyword()?),
                 "scope" => block.scope = self.parse_value()?,
                 _ => {
-                    return Err(self.err(&format!(
-                        "Mot-clé inconnu dans match file_contains : '{kw}'"
-                    )));
+                    return Err(self.err(
+                        DslMessage::new(keys::UNKNOWN_FILE_CONTAINS_KEYWORD)
+                            .with("keyword", kw.to_string()),
+                    ));
                 }
             }
         }
-        Err(self.err("Bloc 'match file_contains' non fermé (manque 'end')"))
+        Err(self.err(DslMessage::new(keys::BLOCK_NOT_CLOSED).with("block", "match file_contains")))
     }
 
     // --- Taint elements ---
@@ -445,9 +463,8 @@ impl<'a> DslParser<'a> {
             let value = &kvs[key];
             if key != "arg_index" {
                 return Err(DslSyntaxError::new(
-                    format!(
-                        "Option inconnue sur un sink : '{key}={value}' (seule 'arg_index' existe)"
-                    ),
+                    DslMessage::new(keys::UNKNOWN_SINK_OPTION)
+                        .with("option", format!("{key}={value}")),
                     ln,
                     self.filename,
                 ));
@@ -457,9 +474,7 @@ impl<'a> DslParser<'a> {
             } else {
                 SinkArguments::Index(value.parse::<usize>().map_err(|_| {
                     DslSyntaxError::new(
-                        format!(
-                            "'arg_index' doit être un entier positif ou nul ou 'all', trouvé : '{value}'"
-                        ),
+                        DslMessage::new(keys::BAD_ARG_INDEX).with("value", value.to_string()),
                         ln,
                         self.filename,
                     )
@@ -510,9 +525,9 @@ impl<'a> DslParser<'a> {
             let tokens = self.line().tokens.clone();
             let lang_code = tokens[0].value.trim_end_matches(':').to_string();
             if tokens.len() < 2 {
-                return Err(self.err(&format!(
-                    "Texte manquant après le code langue '{lang_code}'"
-                )));
+                return Err(self.err(
+                    DslMessage::new(keys::TEXT_MISSING_AFTER_LANGUAGE).with("language", lang_code),
+                ));
             }
             // The text as written after `<lang>:`, from the full line.
             // Deliberate deviation from `parser.py::_parse_i18n_block`,
@@ -537,7 +552,7 @@ impl<'a> DslParser<'a> {
             self.advance();
         }
 
-        Err(self.err("Bloc i18n non fermé (manque 'end')"))
+        Err(self.err(DslMessage::new(keys::I18N_BLOCK_NOT_CLOSED)))
     }
 
     /// Raw text block (fix_before/fix_after)...end. Uses
@@ -566,7 +581,7 @@ impl<'a> DslParser<'a> {
             raw_lines.push((line.indent, line.raw_content.clone()));
             self.advance();
         }
-        Err(self.err("Bloc texte non fermé (manque 'end')"))
+        Err(self.err(DslMessage::new(keys::TEXT_BLOCK_NOT_CLOSED)))
     }
 
     fn parse_metadata_block(&mut self) -> PResult<MetadataBlock> {
@@ -614,11 +629,15 @@ impl<'a> DslParser<'a> {
                 "manifest_hash" => block.manifest_hash = self.parse_value()?,
                 "org_id" => block.org_id = self.parse_value()?,
                 "signature" => block.signature = self.parse_value()?,
-                _ => return Err(self.err(&format!("Clé metadata inconnue : '{kw}'"))),
+                _ => {
+                    return Err(self.err(
+                        DslMessage::new(keys::UNKNOWN_METADATA_KEY).with("key", kw.to_string()),
+                    ));
+                }
             }
         }
 
-        Err(self.err("Bloc 'metadata' non fermé (manque 'end')"))
+        Err(self.err(DslMessage::new(keys::BLOCK_NOT_CLOSED).with("block", "metadata")))
     }
 
     fn rest_of_line_values(&self) -> Vec<String> {
@@ -652,11 +671,15 @@ impl<'a> DslParser<'a> {
                     let val = self.parse_value()?;
                     block.demo_fallback = val.trim().to_lowercase() == "true";
                 }
-                _ => return Err(self.err(&format!("Clé requires inconnue : '{kw}'"))),
+                _ => {
+                    return Err(self.err(
+                        DslMessage::new(keys::UNKNOWN_REQUIRES_KEY).with("key", kw.to_string()),
+                    ));
+                }
             }
         }
 
-        Err(self.err("Bloc 'requires' non fermé (manque 'end')"))
+        Err(self.err(DslMessage::new(keys::BLOCK_NOT_CLOSED).with("block", "requires")))
     }
 
     /// Automatically detects the `requires` block type: license
@@ -761,11 +784,16 @@ impl<'a> DslParser<'a> {
                         .push(rest_after_first_word(&line.raw_content));
                     self.advance();
                 }
-                _ => return Err(self.err(&format!("Clé requires fichier inconnue : '{kw}'"))),
+                _ => {
+                    return Err(self.err(
+                        DslMessage::new(keys::UNKNOWN_REQUIRES_FILE_KEY)
+                            .with("key", kw.to_string()),
+                    ));
+                }
             }
         }
 
-        Err(self.err("Bloc 'requires' fichier non fermé (manque 'end')"))
+        Err(self.err(DslMessage::new(keys::REQUIRES_FILE_BLOCK_NOT_CLOSED)))
     }
 }
 
@@ -834,10 +862,11 @@ pub fn compile_sca_to_json(source: &str, filename: &str) -> PResult<Vec<serde_js
         let errors = validator::validate_rule(&rule);
         if !errors.is_empty() {
             return Err(DslSyntaxError::new(
-                format!("Règle '{}' invalide : {}", rule.id, errors.join("; ")),
+                DslMessage::new(keys::RULE_INVALID).with("rule", rule.id.clone()),
                 rule.line_number,
                 filename,
-            ));
+            )
+            .with_details(errors));
         }
         results.push(compiler::compile_to_json(&rule));
     }
@@ -882,6 +911,39 @@ mod tests {
         assert_eq!(rules[0]["patterns"][0]["pattern-not"], "(?i)safe");
     }
 
+    /// Ticket #279: a compiler error is shown in the console's language,
+    /// with its place; `Display` gives English. A refused rule lists its
+    /// problems in that language too.
+    #[test]
+    fn test_a_compile_error_is_shown_in_the_console_language() {
+        let unclosed =
+            compile_sca_to_json("rule r\n  language  python\n", "python/r.sca").unwrap_err();
+        // At the end of the file the line is past the last one: no number,
+        // and no empty `::` (before ticket #279, `python/r.sca:: …`).
+        assert_eq!(
+            unclosed.to_string(),
+            "python/r.sca: Block 'rule' not closed (missing 'end')"
+        );
+        let french = crate::i18n::load_script_locale("fr");
+        assert_eq!(
+            unclosed.render(&french),
+            "python/r.sca: Bloc 'rule' non fermé (manque 'end')"
+        );
+        let refused = compile_sca_to_json(
+            "rule r\n  language  cobol\n  severity  HIGH\n  match\n    pattern  x\n  end\nend\n",
+            "r.sca",
+        )
+        .unwrap_err();
+        assert_eq!(
+            refused.render(&french),
+            "r.sca:1: Règle 'r' invalide : Langage inconnu : 'cobol'"
+        );
+        assert_eq!(
+            refused.to_string(),
+            "r.sca:1: Rule 'r' is invalid: Unknown language: 'cobol'"
+        );
+    }
+
     /// Any other keyword given twice in one block is an error naming it.
     #[test]
     fn test_other_repeated_keyword_is_an_error() {
@@ -893,7 +955,7 @@ mod tests {
             let error = compile_sca_to_json(&rule_with_match(body), "python/security/r.sca")
                 .unwrap_err()
                 .to_string();
-            assert!(error.contains("deux fois"), "{body}: {error}");
+            assert!(error.contains("is given twice"), "{body}: {error}");
         }
     }
 
@@ -946,15 +1008,15 @@ mod tests {
         for (line, expected) in [
             (
                 "sink    \\.query\\s*\\(  arg_index=first",
-                "'arg_index' doit être un entier",
+                "'arg_index' must be a whole number",
             ),
             (
                 "sink    \\.query\\s*\\(  arg_index=-1",
-                "'arg_index' doit être un entier",
+                "'arg_index' must be a whole number",
             ),
             (
                 "sink    \\.query\\s*\\(  arg=0",
-                "Option inconnue sur un sink : 'arg=0'",
+                "Unknown option on a sink: 'arg=0'",
             ),
         ] {
             let rule = TAINT_RULE.replace("SINK_LINE", line);

@@ -7,6 +7,10 @@
 
 use std::fmt;
 
+use serde_json::Value;
+
+use super::messages::{DslMessage, ENGLISH, keys};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TokenType {
     Word,
@@ -53,48 +57,77 @@ pub struct Line {
     pub full_content: String,
 }
 
+/// An error of the rule compiler, at a place of a `.sca` file. The message
+/// is a key of the console translations with its values (ticket #279):
+/// [`DslSyntaxError::render`] gives it in the console's language,
+/// `Display` in English.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DslSyntaxError {
-    pub message: String,
+    pub message: DslMessage,
+    /// The problems a rule was refused for (`dsl.rule_invalid`), joined
+    /// with `; ` into the `{errors}` placeholder of `message`. Empty for
+    /// the other messages.
+    pub details: Vec<DslMessage>,
     pub line: usize,
     pub col: usize,
     pub filename: String,
 }
 
-impl fmt::Display for DslSyntaxError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut loc = String::new();
-        if !self.filename.is_empty() {
-            loc.push_str(&self.filename);
-            loc.push(':');
-        }
-        if self.line != 0 {
-            loc.push_str(&self.line.to_string());
-        }
-        if self.col != 0 {
-            loc.push(':');
-            loc.push_str(&self.col.to_string());
-        }
-        if loc.is_empty() {
-            write!(f, "{}", self.message)
-        } else {
-            write!(f, "{}: {}", loc, self.message)
-        }
-    }
-}
-
-impl std::error::Error for DslSyntaxError {}
-
 impl DslSyntaxError {
-    pub fn new(message: impl Into<String>, line: usize, filename: &str) -> Self {
+    pub fn new(message: DslMessage, line: usize, filename: &str) -> Self {
         DslSyntaxError {
-            message: message.into(),
+            message,
+            details: Vec::new(),
             line,
             col: 0,
             filename: filename.to_string(),
         }
     }
+
+    /// The problems a refused rule has (see `details`).
+    pub fn with_details(mut self, details: Vec<DslMessage>) -> Self {
+        self.details = details;
+        self
+    }
+
+    /// The error in the language of `locale` (a console translation,
+    /// `i18n::load_script_locale`), preceded by its place:
+    /// `file:line:column: message`.
+    pub fn render(&self, locale: &Value) -> String {
+        let mut text = self.message.render(locale);
+        if !self.details.is_empty() {
+            let details: Vec<String> = self.details.iter().map(|d| d.render(locale)).collect();
+            text = text.replace("{errors}", &details.join("; "));
+        }
+        // `file:line:column`, each part when known. Before ticket #279 an
+        // unknown line left `file:` followed by `: `, read `file:: …`.
+        let mut place = self.filename.clone();
+        for number in [self.line, self.col] {
+            if number == 0 {
+                break;
+            }
+            if !place.is_empty() {
+                place.push(':');
+            }
+            place.push_str(&number.to_string());
+        }
+        if place.is_empty() {
+            text
+        } else {
+            format!("{place}: {text}")
+        }
+    }
 }
+
+/// In English: the error as a program reads it (logs, tests, the AI's
+/// feedback). The console shows [`DslSyntaxError::render`] instead.
+impl fmt::Display for DslSyntaxError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.render(&ENGLISH))
+    }
+}
+
+impl std::error::Error for DslSyntaxError {}
 
 /// Reproduces `_KV_PATTERN = re.compile(r'^([a-z_][a-z0-9_]*)=(\S+)$')`
 /// without a regex dependency (the pattern is simple, a manual
@@ -304,7 +337,11 @@ fn read_string(
         value.push(ch);
         pos += 1;
     }
-    Err(DslSyntaxError::new("Chaîne non fermée", line_num, ""))
+    Err(DslSyntaxError::new(
+        DslMessage::new(keys::STRING_NOT_CLOSED),
+        line_num,
+        "",
+    ))
 }
 
 fn read_word(chars: &[char], pos: usize, line_num: usize) -> (Token, usize) {

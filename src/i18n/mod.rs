@@ -186,7 +186,9 @@ mod tests {
     /// Ticket #244: the French console messages call a finding a
     /// "constat", as the French report and documentation do, and a match
     /// a "correspondance": the English words are left in no message text
-    /// (the `{findings}` placeholders and the keys are not text).
+    /// (the `{findings}` placeholders and the keys are not text, nor a
+    /// keyword of the rule language quoted in a compiler message, `'match'`,
+    /// ticket #279).
     #[test]
     fn test_french_script_messages_use_no_english_finding_word() {
         fn texts<'a>(value: &'a Value, out: &mut Vec<&'a str>) {
@@ -200,7 +202,7 @@ mod tests {
         let locale = load_script_locale("fr");
         let mut all = Vec::new();
         texts(&locale, &mut all);
-        let placeholder = regex::Regex::new(r"\{[^}]*\}").unwrap();
+        let placeholder = regex::Regex::new(r"\{[^}]*\}|'[^']*'").unwrap();
         let english = regex::Regex::new(r"(?i)\b(findings?|match(es)?)\b").unwrap();
         let left: Vec<&str> = all
             .into_iter()

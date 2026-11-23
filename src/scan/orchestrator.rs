@@ -552,7 +552,7 @@ pub struct ScanReport {
     /// error message) — does not interrupt the scan, mirrors the
     /// robustness of `compute_file_summaries` on the Python side (a broken
     /// rule doesn't stop the others).
-    pub rule_errors: Vec<(PathBuf, String)>,
+    pub rule_errors: Vec<(PathBuf, crate::rules::catalog::RuleLoadError)>,
     /// Rules of one identity met twice while loading (a client rule
     /// replacing a catalog rule, a rule defined twice in one source):
     /// printed by the CLI, so no rule is left out without a word.
@@ -1929,7 +1929,7 @@ pub fn run_scan(config: &ScanConfig) -> ScanReport {
     // same identity (`RuleRegistry`).
     let mut rule_sources = Vec::new();
     let mut registry = crate::rules::catalog::RuleRegistry::default();
-    let mut rule_errors: Vec<(PathBuf, String)> = Vec::new();
+    let mut rule_errors: Vec<(PathBuf, crate::rules::catalog::RuleLoadError)> = Vec::new();
     let mut load_source = |path: &Path, origin: crate::rules::catalog::RuleOrigin| {
         let mut loaded = crate::rules::catalog::load_rules(path, &rule_languages, origin);
         registry.add_source(&loaded, &rule_languages);
