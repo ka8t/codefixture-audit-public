@@ -2,8 +2,12 @@
 //! reads an optional `brand.json` file and supplies the values that
 //! replace the "CodeFixture" defaults hardcoded in `main.rs`.
 //!
-//! The file sits in the same location as `custom-rules/`, resolved the same
-//! way — cf. `main.rs`. Missing
+//! The file sits next to the executable (`<engine folder>/brand.json`), or
+//! at the path given by `--brand-file` in the private build — cf.
+//! `run_scan_command` in `main.rs`. It is NOT in the custom rules folder
+//! (`~/.codefixture-audit/custom-rules`, ADR-0039): the two locations
+//! differed from the start, and this comment said otherwise until
+//! 2026-11-23. Missing
 //! file, invalid JSON, or an unexpected schema: silent fallback to
 //! the "CodeFixture" defaults (no blocking error), same philosophy as
 //! `custom_rules_dir`/`advisories` — an optional mechanism must
