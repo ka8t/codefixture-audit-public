@@ -81,6 +81,8 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
 `build-essential` brings the C compiler the build needs: without it, step 4 stops on `linker 'cc' not found`. On another distribution, install its C compiler package (`gcc`), `git` and `curl`.
 
+Do not use the `cargo` and `rustc` packages of your distribution: Ubuntu 24.04 ships Rust 1.75, and the engine needs Rust 1.89 or later. If they are installed, remove them first with `sudo apt remove cargo rustc`: they sit in `/usr/bin` and would run instead of the Rust that rustup installs.
+
 **Windows**, in **PowerShell**:
 
 ```powershell
@@ -98,7 +100,7 @@ git --version
 cargo --version
 ```
 
-Each command prints a version number. If one says "command not found", reopen the window again; on Windows, restart the session.
+Each command prints a version number. `cargo --version` must print 1.89 or later: an older version comes from another installation of Rust (`which -a cargo` lists them); remove it, then run `rustup update stable`. If one says "command not found", reopen the window again; on Windows, restart the session.
 
 ## Step 3: download the repository
 
@@ -393,6 +395,7 @@ flowchart TD
     P -- "cargo: command not found" --> A1["Close and reopen the terminal,<br/>on Windows, restart the session"]
     P -- "linker 'cc' not found (Linux)" --> A2["sudo apt install build-essential"]
     P -- "linker 'link.exe' not found (Windows)" --> A3["Run the third winget line of step 2"]
+    P -- "feature edition2024 is required,<br/>or rustc is not supported" --> A8["Rust older than 1.89:<br/>sudo apt remove cargo rustc,<br/>rustup update stable"]
     P -- "the engine names a missing rules.cfpack" --> A4["cargo build --release"]
     P -- "dependencies never checked" --> A5["No --quick, the project must<br/>declare them (pom.xml, package.json…)"]
     P -- "a language never checked" --> A6["Add it to languages<br/>in audit.config.json"]
@@ -404,6 +407,7 @@ flowchart TD
 | `cargo: command not found` | close and reopen the terminal (step 2); on Windows, restart the session |
 | `linker 'cc' not found` (Linux) | the C compiler is missing: install `build-essential` (step 2) |
 | `linker 'link.exe' not found` (Windows) | the C++ build tools are missing: run the third `winget` line of step 2 |
+| `feature edition2024 is required`, or `rustc … is not supported` | Rust is older than 1.89: remove your distribution's Rust (`sudo apt remove cargo rustc`), then run `rustup update stable` (step 2) |
 | the engine stops and names a missing `rules.cfpack` | run `cargo build --release` again: it puts the pack back next to the engine |
 | dependencies are never checked | the project declares none in a file the engine reads (`requirements.txt`, `package.json`, `pom.xml`, `composer.json`, `.csproj`…), or `--quick` was given |
 | a language of your project is never checked | add it to `languages` in `audit.config.json` (step 7) |

@@ -81,6 +81,8 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
 `build-essential` apporte le compilateur C dont la compilation a besoin : sans lui, l'étape 4 s'arrête sur `linker 'cc' not found`. Sur une autre distribution, installez son paquet de compilateur C (`gcc`), `git` et `curl`.
 
+N'utilisez pas les paquets `cargo` et `rustc` de votre distribution : Ubuntu 24.04 fournit Rust 1.75, et le moteur demande Rust 1.89 ou plus récent. S'ils sont installés, retirez-les d'abord avec `sudo apt remove cargo rustc` : ils sont dans `/usr/bin` et passeraient avant le Rust qu'installe rustup.
+
 **Windows**, dans **PowerShell** :
 
 ```powershell
@@ -98,7 +100,7 @@ git --version
 cargo --version
 ```
 
-Chaque commande affiche un numéro de version. Si l'une répond « command not found », rouvrez encore la fenêtre ; sous Windows, redémarrez la session.
+Chaque commande affiche un numéro de version. `cargo --version` doit afficher 1.89 ou plus : une version plus ancienne vient d'une autre installation de Rust (`which -a cargo` les liste) ; retirez-la, puis lancez `rustup update stable`. Si l'une répond « command not found », rouvrez encore la fenêtre ; sous Windows, redémarrez la session.
 
 ## Étape 3 : télécharger le dépôt
 
@@ -393,6 +395,7 @@ flowchart TD
     P -- "cargo: command not found" --> A1["Fermez et rouvrez le terminal,<br/>sous Windows, redémarrez la session"]
     P -- "linker 'cc' not found (Linux)" --> A2["sudo apt install build-essential"]
     P -- "linker 'link.exe' not found (Windows)" --> A3["Exécutez la troisième ligne winget de l'étape 2"]
+    P -- "feature edition2024 is required,<br/>ou rustc is not supported" --> A8["Rust plus ancien que 1.89 :<br/>sudo apt remove cargo rustc,<br/>rustup update stable"]
     P -- "le moteur signale un rules.cfpack absent" --> A4["cargo build --release"]
     P -- "dépendances jamais vérifiées" --> A5["Pas de --quick, et le projet doit<br/>les déclarer (pom.xml, package.json…)"]
     P -- "un langage jamais vérifié" --> A6["Ajoutez-le à languages<br/>dans audit.config.json"]
@@ -404,6 +407,7 @@ flowchart TD
 | `cargo: command not found` | fermez et rouvrez le terminal (étape 2) ; sous Windows, redémarrez la session |
 | `linker 'cc' not found` (Linux) | le compilateur C manque : installez `build-essential` (étape 2) |
 | `linker 'link.exe' not found` (Windows) | les outils de compilation C++ manquent : exécutez la troisième ligne `winget` de l'étape 2 |
+| `feature edition2024 is required`, ou `rustc … is not supported` | Rust est plus ancien que 1.89 : retirez le Rust de votre distribution (`sudo apt remove cargo rustc`), puis lancez `rustup update stable` (étape 2) |
 | le moteur s'arrête et signale un `rules.cfpack` absent | relancez `cargo build --release` : la commande remet le pack à côté du moteur |
 | les dépendances ne sont jamais vérifiées | le projet n'en déclare aucune dans un fichier que lit le moteur (`requirements.txt`, `package.json`, `pom.xml`, `composer.json`, `.csproj`…), ou `--quick` a été donné |
 | un langage de votre projet n'est jamais vérifié | ajoutez-le à `languages` dans `audit.config.json` (étape 7) |

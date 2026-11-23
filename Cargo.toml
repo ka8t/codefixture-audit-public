@@ -2,6 +2,11 @@
 name = "codefixture-audit"
 version = "0.1.0"
 edition = "2024"
+# Oldest Rust that builds this crate: edition 2024 needs 1.85, and the
+# dependencies need up to 1.89 (`rusqlite`). Older Cargo, such as the 1.75 of
+# Ubuntu's `cargo` package, stops on the edition before reading this field;
+# the installation guides say so (ticket #265).
+rust-version = "1.89"
 
 [dependencies]
 base64 = "0.23.1"
