@@ -308,7 +308,7 @@ fn read_rules_or_exit(
         emit_error(
             &codefixture_audit::i18n::t(script_locale, "rules_open_error")
                 .replace("{path}", &path.display().to_string())
-                .replace("{error}", &error),
+                .replace("{error}", &error.render(script_locale)),
         );
         ExitCode::from(2)
     })
@@ -496,9 +496,10 @@ fn with_default_excludes(project_excludes: Vec<String>) -> Vec<String> {
 /// why the dependencies were not compared with published vulnerabilities.
 fn version_rules_line(
     status: &codefixture_audit::scan::orchestrator::VersionRulesStatus,
-    say: impl Fn(&str) -> String,
+    script_locale: &serde_json::Value,
 ) -> (bool, String) {
     use codefixture_audit::scan::orchestrator::VersionRulesStatus;
+    let say = |key: &str| codefixture_audit::i18n::t(script_locale, key);
     match status {
         VersionRulesStatus::Read {
             pack,
@@ -523,7 +524,7 @@ fn version_rules_line(
         VersionRulesStatus::Missing => (true, say("scan_version_rules_missing")),
         VersionRulesStatus::Unreadable { error } => (
             true,
-            say("scan_version_rules_unreadable").replace("{error}", error),
+            say("scan_version_rules_unreadable").replace("{error}", &error.render(script_locale)),
         ),
     }
 }
@@ -793,7 +794,6 @@ mod tests {
     fn test_version_rules_line_names_the_pack_or_says_not_checked() {
         use codefixture_audit::scan::orchestrator::VersionRulesStatus;
         let en = codefixture_audit::i18n::load_script_locale("en");
-        let say = |k: &str| codefixture_audit::i18n::t(&en, k);
         let (warning, line) = version_rules_line(
             &VersionRulesStatus::Read {
                 pack: PathBuf::from("/x/rules.cfpack"),
@@ -801,7 +801,7 @@ mod tests {
                 counts: vec![("PyPI".into(), 12), ("npm".into(), 30)],
                 sources: vec![],
             },
-            say,
+            &en,
         );
         assert!(!warning);
         assert!(
@@ -811,19 +811,53 @@ mod tests {
                 && line.contains("42"),
             "{line}"
         );
-        let (warning, line) = version_rules_line(&VersionRulesStatus::Missing, say);
+        let (warning, line) = version_rules_line(&VersionRulesStatus::Missing, &en);
         assert!(
             warning && line.contains("not checked") && !line.contains("cfdb"),
             "{line}"
         );
         let (warning, line) = version_rules_line(
             &VersionRulesStatus::Unreadable {
-                error: "bad magic".into(),
+                error: codefixture_audit::rules::pack_format::PackError::new(
+                    codefixture_audit::rules::pack_format::keys::CORRUPT,
+                ),
             },
-            say,
+            &en,
         );
         assert!(
-            warning && line.contains("bad magic") && line.contains("not checked"),
+            warning && line.contains("rule pack is corrupt") && line.contains("not checked"),
+            "{line}"
+        );
+    }
+
+    /// Ticket #280: unreadable version rules are named on a French console
+    /// in French, the reason included: one of the pack, one of its
+    /// advisory container.
+    #[test]
+    fn test_unreadable_version_rules_are_named_in_the_console_language() {
+        use codefixture_audit::scan::orchestrator::VersionRulesStatus;
+        let fr = codefixture_audit::i18n::load_script_locale("fr");
+        let corrupt = VersionRulesStatus::Unreadable {
+            error: codefixture_audit::rules::pack_format::PackError::new(
+                codefixture_audit::rules::pack_format::keys::CORRUPT,
+            ),
+        };
+        let (warning, line) = version_rules_line(&corrupt, &fr);
+        assert!(warning);
+        assert_eq!(
+            line,
+            "Règles de version du pack inutilisables (pack de règles corrompu ou modifié) : les dépendances n'ont pas été comparées aux vulnérabilités publiées."
+        );
+        let not_a_database = VersionRulesStatus::Unreadable {
+            error: codefixture_audit::project::advisory_file::decode(
+                Path::new("rules.cfpack"),
+                b"garbage".to_vec(),
+            )
+            .unwrap_err(),
+        };
+        let (_, line) = version_rules_line(&not_a_database, &fr);
+        assert!(
+            line.contains("rules.cfpack : ce fichier n'est pas une base de vulnérabilités (cfdb)"),
             "{line}"
         );
     }
@@ -2278,9 +2312,7 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
     // the dependencies were not checked, so that no vulnerable dependency
     // reads as "none".
     if let Some(status) = &report.version_rules {
-        let (warning, line) = version_rules_line(status, |key| {
-            codefixture_audit::i18n::t(&script_locale, key)
-        });
+        let (warning, line) = version_rules_line(status, &script_locale);
         if warning {
             emit_warning(&format!("[codefixture-audit] {line}"));
         } else {

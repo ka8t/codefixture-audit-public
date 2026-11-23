@@ -21,7 +21,7 @@
 use std::path::{Path, PathBuf};
 
 use super::identity::RuleId;
-use super::pack_format::{self, PACK_FILE_NAME};
+use super::pack_format::{self, PACK_FILE_NAME, PackError};
 
 pub use super::pack_format::RuleSource;
 
@@ -46,9 +46,10 @@ pub enum RuleLoadError {
     /// console's language when shown ([`RuleLoadError::render`], ticket
     /// #279).
     Compile(crate::scan::parser::lexer::DslSyntaxError),
-    /// The file or the pack could not be read or opened. The reason comes
-    /// from the file system or `pack_format`, in English.
-    Read(String),
+    /// The file or the pack could not be read or opened: a reason of
+    /// `pack_format`, translated in the console's language when shown
+    /// (ticket #280).
+    Read(PackError),
 }
 
 impl RuleLoadError {
@@ -56,7 +57,7 @@ impl RuleLoadError {
     pub fn render(&self, locale: &serde_json::Value) -> String {
         match self {
             RuleLoadError::Compile(error) => error.render(locale),
-            RuleLoadError::Read(reason) => reason.clone(),
+            RuleLoadError::Read(reason) => reason.render(locale),
         }
     }
 }
@@ -66,7 +67,7 @@ impl std::fmt::Display for RuleLoadError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             RuleLoadError::Compile(error) => write!(f, "{error}"),
-            RuleLoadError::Read(reason) => f.write_str(reason),
+            RuleLoadError::Read(reason) => write!(f, "{reason}"),
         }
     }
 }
@@ -234,11 +235,11 @@ pub fn read_rule_sources(dir: &Path) -> Vec<RuleSource> {
 /// Every rule file of a pack or a folder, every language, sorted by path:
 /// what `list-rules` and `rules diff` read. `Err` if the pack cannot be
 /// opened or the path is neither a pack nor a folder.
-pub fn read_all_rule_sources(path: &Path) -> Result<Vec<RuleSource>, String> {
+pub fn read_all_rule_sources(path: &Path) -> Result<Vec<RuleSource>, PackError> {
     if path.is_dir() {
         return pack_format::collect_sca_sources(path);
     }
-    let bytes = std::fs::read(path).map_err(|e| format!("unreadable rule pack: {e}"))?;
+    let bytes = std::fs::read(path).map_err(|e| pack_format::unreadable_pack(&e))?;
     pack_format::open_pack(&bytes).map(|(_, files)| files)
 }
 
@@ -264,7 +265,7 @@ fn load_rule_pack(path: &Path, languages: &[String], origin: RuleOrigin) -> Load
         errors: Vec::new(),
     };
     let opened = std::fs::read(path)
-        .map_err(|e| format!("unreadable rule pack: {e}"))
+        .map_err(|e| pack_format::unreadable_pack(&e))
         .and_then(|bytes| pack_format::open_pack(&bytes));
     let files = match opened {
         Ok((_, files)) => files,
@@ -315,7 +316,10 @@ fn load_rule_folder(dir: &Path, languages: &[String], origin: RuleOrigin) -> Loa
             }),
             Err(e) => loaded.errors.push((
                 path,
-                RuleLoadError::Read(format!("unreadable rule file: {e}")),
+                RuleLoadError::Read(
+                    PackError::new(pack_format::keys::UNREADABLE_RULE_FILE)
+                        .with("error", e.to_string()),
+                ),
             )),
         }
     }
@@ -839,6 +843,52 @@ mod tests {
         assert!(reasons[0].contains("corrupt"), "{reasons:?}");
         assert!(reasons[1].contains("needs key"), "{reasons:?}");
         assert!(reasons[2].contains("unreadable"), "{reasons:?}");
+    }
+
+    /// Ticket #280: the reasons a pack or a rule file cannot be read are
+    /// shown in the console's language, here French.
+    #[test]
+    fn test_read_errors_are_rendered_in_the_console_language() {
+        let dir = temp_dir("read_errors_fr");
+        let files = vec![("python/r.sca".to_string(), RULE.to_string())];
+        let mut corrupt = pack_format::write_pack("builtin", &files, None);
+        let last = corrupt.len() - 1;
+        corrupt[last] ^= 0xFF;
+        std::fs::write(dir.join("corrupt.cfpack"), corrupt).unwrap();
+        // Not UTF-8: `read_to_string` refuses it on every system.
+        let folder = dir.join("folder");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("bad.sca"), [0xFFu8, 0xFE, 0x00]).unwrap();
+        let python = langs(&["python"]);
+        let french = crate::i18n::load_script_locale("fr");
+
+        let reason = |path: &Path| {
+            let loaded = load_rules(path, &python, RuleOrigin::Builtin);
+            assert_eq!(loaded.errors.len(), 1, "{:?}", loaded.errors);
+            loaded.errors[0].1.render(&french)
+        };
+        let corrupt_reason = reason(&dir.join("corrupt.cfpack"));
+        let missing_reason = reason(&dir.join("missing.cfpack"));
+        let file_reason = reason(&folder);
+        let unreadable_file = load_rules(&folder, &python, RuleOrigin::Builtin);
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert_eq!(corrupt_reason, "pack de règles corrompu ou modifié");
+        assert!(
+            missing_reason.starts_with("pack de règles illisible : "),
+            "{missing_reason}"
+        );
+        assert!(
+            file_reason.starts_with("fichier de règles illisible : "),
+            "{file_reason}"
+        );
+        assert!(
+            unreadable_file.errors[0]
+                .1
+                .to_string()
+                .starts_with("unreadable rule file: "),
+            "English by Display"
+        );
     }
 
     #[test]

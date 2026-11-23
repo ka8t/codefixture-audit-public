@@ -35,6 +35,11 @@
 //! creation date is the newest OSV `modified` date of the data, not the
 //! time of writing, and every gzip member has a zero time and no file
 //! name. Not encrypted: the data is public.
+//!
+//! A file that cannot be read gives a `PackError` (ticket #280): a key
+//! of the `advisory_file` group of the console translations and its
+//! values, shown in the console's language (`rules list`, the scan's
+//! version rules line), in English by `Display` (the editor's tool).
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -42,6 +47,70 @@ use std::path::{Path, PathBuf};
 use flate2::Compression;
 use flate2::read::GzDecoder;
 use serde::{Deserialize, Serialize};
+
+use crate::rules::pack_format::PackError;
+
+/// The keys of the reasons a database cannot be read, in the
+/// `advisory_file` group of the console translations
+/// (`resources/locales/script/*.json`). The English text is given above
+/// each one; `{path}` is the database file or the pack that carries it.
+pub mod keys {
+    /// {path} ({ecosystem}): {error}
+    pub const ECOSYSTEM_INVALID: &str = "advisory_file.ecosystem_invalid";
+    /// {path}: {ecosystem} lies outside the file
+    pub const ECOSYSTEM_OUTSIDE: &str = "advisory_file.ecosystem_outside";
+    /// {path}: {ecosystem}: decompressed data exceeds {cap} bytes
+    pub const ECOSYSTEM_TOO_LARGE: &str = "advisory_file.ecosystem_too_large";
+    /// {path}: {ecosystem}: {error}
+    pub const ECOSYSTEM_UNREADABLE: &str = "advisory_file.ecosystem_unreadable";
+    /// {path} ({ecosystem}): format {format} not supported by this engine (expected {expected})
+    pub const ECOSYSTEM_UNSUPPORTED_FORMAT: &str = "advisory_file.ecosystem_unsupported_format";
+    /// {path}: header format {format} not supported
+    pub const HEADER_FORMAT_UNSUPPORTED: &str = "advisory_file.header_format_unsupported";
+    /// {path}: invalid header: {error}
+    pub const INVALID_HEADER: &str = "advisory_file.invalid_header";
+    /// {path}: advisory database in the former .sadb format, which this engine no longer reads: rebuild it as a .cfdb database (ADR-0052)
+    pub const LEGACY_FORMAT: &str = "advisory_file.legacy_format";
+    /// {path}: not an advisory database (cfdb) file
+    pub const NOT_A_DATABASE: &str = "advisory_file.not_a_database";
+    /// {path} (table {table}): {error}
+    pub const TABLE_INVALID: &str = "advisory_file.table_invalid";
+    /// {path}: table {table} lies outside the file
+    pub const TABLE_OUTSIDE: &str = "advisory_file.table_outside";
+    /// {path}: table {table}: decompressed data exceeds {cap} bytes
+    pub const TABLE_TOO_LARGE: &str = "advisory_file.table_too_large";
+    /// {path}: table {table}: {error}
+    pub const TABLE_UNREADABLE: &str = "advisory_file.table_unreadable";
+    /// {path} (table {table}): format {format} not supported by this engine (expected {expected})
+    pub const TABLE_UNSUPPORTED_FORMAT: &str = "advisory_file.table_unsupported_format";
+    /// {path}: truncated header
+    pub const TRUNCATED_HEADER: &str = "advisory_file.truncated_header";
+    /// {path}: {error}
+    pub const UNREADABLE: &str = "advisory_file.unreadable";
+    /// {path}: format {format} not supported by this engine (expected {expected})
+    pub const UNSUPPORTED_FORMAT: &str = "advisory_file.unsupported_format";
+
+    /// Every key, checked against the four translations by a test.
+    pub const ALL: &[&str] = &[
+        ECOSYSTEM_INVALID,
+        ECOSYSTEM_OUTSIDE,
+        ECOSYSTEM_TOO_LARGE,
+        ECOSYSTEM_UNREADABLE,
+        ECOSYSTEM_UNSUPPORTED_FORMAT,
+        HEADER_FORMAT_UNSUPPORTED,
+        INVALID_HEADER,
+        LEGACY_FORMAT,
+        NOT_A_DATABASE,
+        TABLE_INVALID,
+        TABLE_OUTSIDE,
+        TABLE_TOO_LARGE,
+        TABLE_UNREADABLE,
+        TABLE_UNSUPPORTED_FORMAT,
+        TRUNCATED_HEADER,
+        UNREADABLE,
+        UNSUPPORTED_FORMAT,
+    ];
+}
 
 /// First bytes of every database file (`CFDB`, for CodeFixture database,
 /// since ADR-0052).
@@ -72,19 +141,49 @@ const MAX_HEADER_BYTES: u32 = 1 << 20;
 /// the file. Same intent as [`MAX_HEADER_BYTES`].
 const MAX_ECOSYSTEM_BYTES: u64 = 1 << 30;
 
+/// Why a gzip member could not be decompressed ([`decompress_capped`]):
+/// the caller turns it into the reason naming the member.
+#[derive(Debug, PartialEq)]
+enum DecompressError {
+    /// Larger than the cap once decompressed.
+    TooLarge,
+    /// Not a valid gzip member: the decoder's message.
+    Corrupt(String),
+}
+
 /// Decompresses `member` (one gzip member), refusing anything larger than
 /// `cap` bytes once decompressed. Reads one byte past `cap` so that an
 /// over-the-cap stream is detected rather than silently truncated.
-fn decompress_capped(member: &[u8], cap: u64) -> Result<Vec<u8>, String> {
+fn decompress_capped(member: &[u8], cap: u64) -> Result<Vec<u8>, DecompressError> {
     let mut out = Vec::new();
     GzDecoder::new(member)
         .take(cap + 1)
         .read_to_end(&mut out)
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| DecompressError::Corrupt(e.to_string()))?;
     if out.len() as u64 > cap {
-        return Err(format!("decompressed data exceeds {cap} bytes"));
+        return Err(DecompressError::TooLarge);
     }
     Ok(out)
+}
+
+/// The reason of a member (an ecosystem or a table) that could not be
+/// decompressed: `name_arg` is the placeholder naming it.
+fn member_error(
+    path: &Path,
+    (name_arg, name): (&'static str, &str),
+    error: DecompressError,
+    too_large: &'static str,
+    unreadable: &'static str,
+) -> PackError {
+    let base = |key| {
+        PackError::new(key)
+            .with("path", path.display().to_string())
+            .with(name_arg, name)
+    };
+    match error {
+        DecompressError::TooLarge => base(too_large).with("cap", MAX_ECOSYSTEM_BYTES.to_string()),
+        DecompressError::Corrupt(error) => base(unreadable).with("error", error),
+    }
 }
 
 /// The clear JSON header.
@@ -195,7 +294,7 @@ pub struct DatabaseFile {
 impl DatabaseFile {
     /// The uncompressed JSON of `ecosystem`, `None` when the file does
     /// not hold it.
-    pub fn ecosystem_json(&self, ecosystem: &str) -> Option<Result<Vec<u8>, String>> {
+    pub fn ecosystem_json(&self, ecosystem: &str) -> Option<Result<Vec<u8>, PackError>> {
         let entry = self
             .header
             .ecosystems
@@ -204,33 +303,41 @@ impl DatabaseFile {
         let start = entry.offset as usize;
         let end = start.checked_add(entry.length as usize)?;
         let Some(member) = self.body.get(start..end) else {
-            return Some(Err(format!(
-                "{}: {ecosystem} lies outside the file",
-                self.path.display()
-            )));
+            return Some(Err(PackError::new(keys::ECOSYSTEM_OUTSIDE)
+                .with("path", self.path.display().to_string())
+                .with("ecosystem", ecosystem)));
         };
-        Some(
-            decompress_capped(member, MAX_ECOSYSTEM_BYTES)
-                .map_err(|e| format!("{}: {ecosystem}: {e}", self.path.display())),
-        )
+        Some(decompress_capped(member, MAX_ECOSYSTEM_BYTES).map_err(|e| {
+            member_error(
+                &self.path,
+                ("ecosystem", ecosystem),
+                e,
+                keys::ECOSYSTEM_TOO_LARGE,
+                keys::ECOSYSTEM_UNREADABLE,
+            )
+        }))
     }
 
     /// The uncompressed JSON of the table `name` (`kev`, `epss`), `None`
     /// when the file does not hold it.
-    pub fn table_json(&self, name: &str) -> Option<Result<Vec<u8>, String>> {
+    pub fn table_json(&self, name: &str) -> Option<Result<Vec<u8>, PackError>> {
         let entry = self.header.tables.iter().find(|t| t.name == name)?;
         let start = entry.offset as usize;
         let end = start.checked_add(entry.length as usize)?;
         let Some(member) = self.body.get(start..end) else {
-            return Some(Err(format!(
-                "{}: table {name} lies outside the file",
-                self.path.display()
-            )));
+            return Some(Err(PackError::new(keys::TABLE_OUTSIDE)
+                .with("path", self.path.display().to_string())
+                .with("table", name)));
         };
-        Some(
-            decompress_capped(member, MAX_ECOSYSTEM_BYTES)
-                .map_err(|e| format!("{}: table {name}: {e}", self.path.display())),
-        )
+        Some(decompress_capped(member, MAX_ECOSYSTEM_BYTES).map_err(|e| {
+            member_error(
+                &self.path,
+                ("table", name),
+                e,
+                keys::TABLE_TOO_LARGE,
+                keys::TABLE_UNREADABLE,
+            )
+        }))
     }
 }
 
@@ -322,34 +429,29 @@ pub fn write(path: &Path, contents: &Contents<'_>) -> std::io::Result<()> {
 }
 
 /// Parses database bytes read from `path` (named in the errors).
-pub fn decode(path: &Path, bytes: Vec<u8>) -> Result<DatabaseFile, String> {
-    let fail = |what: &str| format!("{}: {what}", path.display());
+pub fn decode(path: &Path, bytes: Vec<u8>) -> Result<DatabaseFile, PackError> {
+    let fail = |key| PackError::new(key).with("path", path.display().to_string());
     if bytes.starts_with(LEGACY_MAGIC) {
-        return Err(fail(
-            "advisory database in the former .sadb format, which this engine no longer reads: rebuild it as a .cfdb database (ADR-0052)",
-        ));
+        return Err(fail(keys::LEGACY_FORMAT));
     }
     if bytes.len() < 12 || &bytes[..4] != MAGIC {
-        return Err(fail("not an advisory database (cfdb) file"));
+        return Err(fail(keys::NOT_A_DATABASE));
     }
     let format = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
     if format != FORMAT_VERSION {
-        return Err(fail(&format!(
-            "format {format} not supported by this engine (expected {FORMAT_VERSION})"
-        )));
+        return Err(fail(keys::UNSUPPORTED_FORMAT)
+            .with("format", format.to_string())
+            .with("expected", FORMAT_VERSION.to_string()));
     }
     let header_len = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
     if header_len > MAX_HEADER_BYTES || 12 + header_len as usize > bytes.len() {
-        return Err(fail("truncated header"));
+        return Err(fail(keys::TRUNCATED_HEADER));
     }
     let header_end = 12 + header_len as usize;
     let header: Header = serde_json::from_slice(&bytes[12..header_end])
-        .map_err(|e| fail(&format!("invalid header: {e}")))?;
+        .map_err(|e| fail(keys::INVALID_HEADER).with("error", e.to_string()))?;
     if header.format != FORMAT_VERSION {
-        return Err(fail(&format!(
-            "header format {} not supported",
-            header.format
-        )));
+        return Err(fail(keys::HEADER_FORMAT_UNSUPPORTED).with("format", header.format.to_string()));
     }
     Ok(DatabaseFile {
         path: path.to_path_buf(),
@@ -359,11 +461,13 @@ pub fn decode(path: &Path, bytes: Vec<u8>) -> Result<DatabaseFile, String> {
 }
 
 /// Reads the database at `path`. `Ok(None)` when there is no file.
-pub fn read(path: &Path) -> Result<Option<DatabaseFile>, String> {
+pub fn read(path: &Path) -> Result<Option<DatabaseFile>, PackError> {
     match std::fs::read(path) {
         Ok(bytes) => decode(path, bytes).map(Some),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(format!("{}: {e}", path.display())),
+        Err(e) => Err(PackError::new(keys::UNREADABLE)
+            .with("path", path.display().to_string())
+            .with("error", e.to_string())),
     }
 }
 
@@ -434,7 +538,7 @@ mod tests {
         let good = encode(&plain("OSV", &[payload("PyPI", 1, "2026-01-01T00:00:00Z")])).unwrap();
         let mut newer = good.clone();
         newer[4..8].copy_from_slice(&2u32.to_le_bytes());
-        let err = decode(Path::new("db.cfdb"), newer).unwrap_err();
+        let err = decode(Path::new("db.cfdb"), newer).unwrap_err().to_string();
         assert!(err.contains("db.cfdb") && err.contains("format 2"), "{err}");
         assert!(decode(Path::new("x"), b"{\"format\":1}".to_vec()).is_err());
         assert!(decode(Path::new("x"), good[..14].to_vec()).is_err());
@@ -452,7 +556,9 @@ mod tests {
     fn test_former_sadb_database_is_refused_with_a_clear_reason() {
         let mut old = encode(&plain("OSV", &[payload("PyPI", 1, "2026-01-01T00:00:00Z")])).unwrap();
         old[..4].copy_from_slice(b"SADB");
-        let err = decode(Path::new("advisories.sadb"), old).unwrap_err();
+        let err = decode(Path::new("advisories.sadb"), old)
+            .unwrap_err()
+            .to_string();
         assert!(
             err.contains("former .sadb format") && err.contains(".cfdb"),
             "{err}"
@@ -473,9 +579,78 @@ mod tests {
         assert!(member.len() < 100, "a bomb-like ratio: tiny compressed");
         // Under a tiny cap: refused rather than expanded.
         let err = decompress_capped(&member, 100).unwrap_err();
-        assert!(err.contains("exceeds"), "{err}");
+        assert_eq!(err, DecompressError::TooLarge);
         // Under a generous cap: read back exactly.
         assert_eq!(decompress_capped(&member, 1 << 20).unwrap(), plain);
+    }
+
+    /// The placeholders of a translated text, sorted.
+    fn placeholders(text: &str) -> Vec<String> {
+        let mut found: Vec<String> = text
+            .split('{')
+            .skip(1)
+            .filter_map(|rest| rest.split_once('}').map(|(name, _)| name.to_string()))
+            .collect();
+        found.sort();
+        found
+    }
+
+    /// Ticket #280: every key has a text in the four languages, with the
+    /// placeholders of the English one; the group holds no other key.
+    #[test]
+    fn test_every_database_error_is_translated_with_its_placeholders() {
+        let english = crate::i18n::load_script_locale("en");
+        for lang in ["en", "fr", "es", "de"] {
+            let locale = crate::i18n::load_script_locale(lang);
+            let group = locale["advisory_file"].as_object().expect("group");
+            assert_eq!(group.len(), keys::ALL.len(), "{lang}");
+            for key in keys::ALL {
+                let text = crate::i18n::get_nested(&locale, key)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_else(|| panic!("{lang}: {key} missing"));
+                let english_text = crate::i18n::get_nested(&english, key)
+                    .and_then(|v| v.as_str())
+                    .unwrap();
+                assert_eq!(
+                    placeholders(text),
+                    placeholders(english_text),
+                    "{lang}: {key}"
+                );
+            }
+        }
+    }
+
+    /// Ticket #280: a database that cannot be decoded is named in the
+    /// console's language, here French.
+    #[test]
+    fn test_decode_error_is_rendered_in_the_console_language() {
+        let french = crate::i18n::load_script_locale("fr");
+        let error = decode(Path::new("x.cfdb"), b"not a database".to_vec()).unwrap_err();
+        assert_eq!(
+            error.render(&french),
+            "x.cfdb : ce fichier n'est pas une base de vulnérabilités (cfdb)"
+        );
+        assert_eq!(
+            error.to_string(),
+            "x.cfdb: not an advisory database (cfdb) file"
+        );
+        let good = encode(&plain("OSV", &[payload("PyPI", 1, "2026-01-01T00:00:00Z")])).unwrap();
+        let mut cut = good.clone();
+        cut.truncate(good.len() - 5);
+        let db = decode(Path::new("x.cfdb"), cut).unwrap();
+        let member = db.ecosystem_json("PyPI").unwrap().unwrap_err();
+        assert_eq!(member.render(&french), "x.cfdb : PyPI est hors du fichier");
+        // A member in place whose bytes are not gzip.
+        let mut broken = good.clone();
+        let last = broken.len() - 1;
+        broken[last - 8..=last].fill(0);
+        let db = decode(Path::new("x.cfdb"), broken).unwrap();
+        let member = db.ecosystem_json("PyPI").unwrap().unwrap_err();
+        assert!(
+            member.render(&french).starts_with("x.cfdb : PyPI : "),
+            "{}",
+            member.render(&french)
+        );
     }
 
     #[test]

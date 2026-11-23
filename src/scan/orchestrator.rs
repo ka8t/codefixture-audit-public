@@ -694,8 +694,11 @@ pub enum VersionRulesStatus {
     /// of plain rules: dependencies were not checked against published
     /// vulnerabilities.
     Missing,
-    /// Version rules that could not be opened, with why.
-    Unreadable { error: String },
+    /// Version rules that could not be opened, with why: translated in
+    /// the console's language when shown (ticket #280).
+    Unreadable {
+        error: crate::rules::pack_format::PackError,
+    },
 }
 
 /// Opens the version rules of the rule pack at `path` (ADR-0043): the
@@ -703,15 +706,34 @@ pub enum VersionRulesStatus {
 /// rules carries none.
 fn read_version_rules(
     path: &Path,
-) -> Result<Option<crate::project::advisory_file::DatabaseFile>, String> {
+) -> Result<Option<crate::project::advisory_file::DatabaseFile>, crate::rules::pack_format::PackError>
+{
     if !path.is_file() {
         return Ok(None);
     }
-    let bytes = std::fs::read(path).map_err(|e| format!("unreadable rule pack: {e}"))?;
+    let bytes = std::fs::read(path).map_err(|e| crate::rules::pack_format::unreadable_pack(&e))?;
     match crate::rules::pack_format::open_version_rules(&bytes)? {
         Some(container) => crate::project::advisory_file::decode(path, container).map(Some),
         None => Ok(None),
     }
+}
+
+/// The console line of a version rules file skipped by the scan
+/// (`scan_version_rules_skipped`), in the language of `script_locale`,
+/// English without one (ticket #280).
+fn version_rules_skipped_line(
+    error: &crate::rules::pack_format::PackError,
+    script_locale: Option<&serde_json::Value>,
+) -> String {
+    let english;
+    let locale = match script_locale {
+        Some(locale) => locale,
+        None => {
+            english = crate::i18n::load_script_locale("en");
+            &english
+        }
+    };
+    crate::i18n::t(locale, "scan_version_rules_skipped").replace("{error}", &error.render(locale))
 }
 
 /// Texts of the dependency findings (`unpinned_dependency`,
@@ -755,11 +777,14 @@ impl DependencyTexts {
 /// depend on them.
 /// The texts follow the report language (`texts`, ticket #189); the
 /// advisory identifiers and OSV summaries stay as published, in English.
+/// The lines about unreadable files follow the console language
+/// (`script_locale`, ticket #280), English without one.
 fn vulnerable_dependency_findings(
     file: &crate::project::advisory_file::DatabaseFile,
     deps: &[crate::project::dependencies::Dependency],
     root: &Path,
     texts: &DependencyTexts,
+    script_locale: Option<&serde_json::Value>,
 ) -> Vec<ReportFinding> {
     use crate::project::advisories;
 
@@ -767,7 +792,10 @@ fn vulnerable_dependency_findings(
         deps.iter().map(|d| d.ecosystem.clone()).collect();
     let (db, errors) = advisories::load(file, &ecosystems);
     for error in errors {
-        eprintln!("[codefixture-audit] version rules skipped: {error}");
+        eprintln!(
+            "[codefixture-audit] {}",
+            version_rules_skipped_line(&error, script_locale)
+        );
     }
     let rank = |s: &str| match s {
         "CRITICAL" => 4,
@@ -2285,7 +2313,13 @@ pub fn run_scan(config: &ScanConfig) -> ScanReport {
                         .collect(),
                 };
                 (
-                    vulnerable_dependency_findings(&file, &all_deps, &config.root, &texts),
+                    vulnerable_dependency_findings(
+                        &file,
+                        &all_deps,
+                        &config.root,
+                        &texts,
+                        config.script_locale.as_ref(),
+                    ),
                     status,
                 )
             }
@@ -4442,6 +4476,59 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Ticket #280: version rules that cannot be used give a reason shown
+    /// in the console's language: an altered version rules section (the
+    /// pack) or a section that is not an advisory database (its
+    /// container); a skipped file is named the same way.
+    #[test]
+    fn test_unreadable_version_rules_reason_follows_the_console_language() {
+        use crate::rules::pack_format;
+        let french = crate::i18n::load_script_locale("fr");
+        let dir = std::env::temp_dir().join(format!("cfa-version-rules-fr-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let files = vec![("python/r.sca".to_string(), "rule r\nend\n".to_string())];
+        // The version rules section is the last one: its last byte is
+        // part of its authentication tag.
+        let mut altered = pack_format::write_pack("builtin", &files, Some(b"CFDB-garbage"));
+        let last = altered.len() - 1;
+        altered[last] ^= 0xFF;
+        let altered_path = dir.join("altered.cfpack");
+        std::fs::write(&altered_path, altered).unwrap();
+        let garbage_path = dir.join("garbage.cfpack");
+        std::fs::write(
+            &garbage_path,
+            pack_format::write_pack("builtin", &files, Some(b"not a database")),
+        )
+        .unwrap();
+        let altered_reason = read_version_rules(&altered_path).unwrap_err();
+        let garbage_reason = read_version_rules(&garbage_path).unwrap_err();
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert_eq!(
+            altered_reason.render(&french),
+            "pack de règles corrompu ou modifié"
+        );
+        assert_eq!(
+            garbage_reason.render(&french),
+            format!(
+                "{} : ce fichier n'est pas une base de vulnérabilités (cfdb)",
+                garbage_path.display()
+            )
+        );
+        assert_eq!(
+            version_rules_skipped_line(&garbage_reason, Some(&french)),
+            format!(
+                "règles de version ignorées : {} : ce fichier n'est pas une base de vulnérabilités (cfdb)",
+                garbage_path.display()
+            )
+        );
+        assert!(
+            version_rules_skipped_line(&garbage_reason, None)
+                .starts_with("version rules skipped: "),
+            "English without a console language"
+        );
     }
 
     /// Ticket #48: `ScanConfig::script_locale` translates the phase

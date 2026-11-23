@@ -43,9 +43,18 @@
 //!
 //! Shared with `build.rs` (included there with `#[path]`), which writes
 //! the pack of `rules/builtin` next to the compiled binary: this module
-//! only uses `super::rules_crypto`, `serde_json`, `sha2` and `std`.
+//! only uses `super::rules_crypto`, `serde_json`, `sha2`, `std` and the
+//! English console translation (`include_str!`, [`PackError`]).
+//!
+//! A pack or rule folder that cannot be read gives a [`PackError`]: a key
+//! of the console translations (group `pack`) and the values of its
+//! placeholders, translated when it is shown (ticket #280), like the rule
+//! compiler's messages (`scan::parser::messages`, ticket #279). Before
+//! ticket #280 the reasons were English strings whatever the console
+//! language: « Règle ignorée (…) : unreadable rule file: … ».
 
 use std::path::Path;
+use std::sync::LazyLock;
 
 use sha2::{Digest, Sha256};
 
@@ -104,6 +113,139 @@ const SECTION_OVERHEAD: usize = 12 + 16;
 /// One rule file of a pack: path relative to the catalog root (for
 /// example `python/security/eval.sca`) and its `.sca` source.
 pub type RuleSource = (String, String);
+
+/// The keys of the reasons a pack or a rule folder cannot be read, in the
+/// `pack` group of the console translations
+/// (`resources/locales/script/*.json`). The English text is given above
+/// each one.
+pub mod keys {
+    /// cannot read {path}: {error}
+    pub const CANNOT_READ: &str = "pack.cannot_read";
+    /// rule pack content does not match its header
+    pub const CONTENT_MISMATCH: &str = "pack.content_mismatch";
+    /// rule pack is corrupt or was altered
+    pub const CORRUPT: &str = "pack.corrupt";
+    /// invalid rule pack content: {error}
+    pub const INVALID_CONTENT: &str = "pack.invalid_content";
+    /// invalid rule pack header: {error}
+    pub const INVALID_HEADER: &str = "pack.invalid_header";
+    /// rule pack in the former .scapack format, which this engine no longer reads: use a .cfpack pack built for this engine
+    pub const LEGACY_FORMAT: &str = "pack.legacy_format";
+    /// invalid rule pack header: missing "{field}"
+    pub const MISSING_FIELD: &str = "pack.missing_field";
+    /// rule pack needs key {key}, this engine only has the demo key {demo_key} (ADR-0040)
+    pub const NEEDS_KEY: &str = "pack.needs_key";
+    /// not a rule pack (unknown file signature)
+    pub const NOT_A_PACK: &str = "pack.not_a_pack";
+    /// truncated rule pack (header)
+    pub const TRUNCATED_HEADER: &str = "pack.truncated_header";
+    /// truncated rule pack (no header length)
+    pub const TRUNCATED_HEADER_LENGTH: &str = "pack.truncated_header_length";
+    /// truncated rule pack (sections)
+    pub const TRUNCATED_SECTIONS: &str = "pack.truncated_sections";
+    /// unreadable rule pack: {error}
+    pub const UNREADABLE_PACK: &str = "pack.unreadable_pack";
+    /// unreadable rule file: {error} (a plain `.sca` file, `rules::catalog`)
+    pub const UNREADABLE_RULE_FILE: &str = "pack.unreadable_rule_file";
+    /// unsupported rule pack format {format}, expected {expected}
+    pub const UNSUPPORTED_FORMAT: &str = "pack.unsupported_format";
+
+    /// Every key, checked against the four translations by a test.
+    pub const ALL: &[&str] = &[
+        CANNOT_READ,
+        CONTENT_MISMATCH,
+        CORRUPT,
+        INVALID_CONTENT,
+        INVALID_HEADER,
+        LEGACY_FORMAT,
+        MISSING_FIELD,
+        NEEDS_KEY,
+        NOT_A_PACK,
+        TRUNCATED_HEADER,
+        TRUNCATED_HEADER_LENGTH,
+        TRUNCATED_SECTIONS,
+        UNREADABLE_PACK,
+        UNREADABLE_RULE_FILE,
+        UNSUPPORTED_FORMAT,
+    ];
+}
+
+/// Why a pack or a rule folder could not be read (ticket #280): a key of
+/// [`keys`] and the values of its `{placeholders}`. [`PackError::render`]
+/// gives it in the console's language, `Display` in English.
+///
+/// Also the reason of an advisory container that cannot be read (the
+/// version rules a pack carries, `project::advisory_file`), with the keys
+/// of its own group: one type for every reason a rule source gives.
+///
+/// The same shape as `DslMessage` (ticket #279) but its own type: this
+/// module is compiled into `build.rs`, which has neither the parser nor
+/// `crate::i18n`. A value taken from the system (`{error}` of a file that
+/// cannot be read) stays in the system's words.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackError {
+    /// The translation key, one of [`keys`].
+    pub key: &'static str,
+    /// The value of each placeholder, by name.
+    pub args: Vec<(&'static str, String)>,
+}
+
+impl PackError {
+    /// A reason without placeholder.
+    pub fn new(key: &'static str) -> Self {
+        PackError {
+            key,
+            args: Vec::new(),
+        }
+    }
+
+    /// Adds the value of placeholder `{name}`.
+    pub fn with(mut self, name: &'static str, value: impl Into<String>) -> Self {
+        self.args.push((name, value.into()));
+        self
+    }
+
+    /// The reason in the language of `locale` (a console translation,
+    /// `i18n::load_script_locale`). A key missing from `locale` falls
+    /// back to English, then to the key itself, as `i18n::t` does; a test
+    /// checks that the four languages have every key.
+    pub fn render(&self, locale: &serde_json::Value) -> String {
+        let template = translation(locale, self.key)
+            .or_else(|| translation(&ENGLISH, self.key))
+            .unwrap_or(self.key);
+        self.args
+            .iter()
+            .fold(template.to_string(), |text, (name, value)| {
+                text.replace(&format!("{{{name}}}"), value)
+            })
+    }
+}
+
+/// In English, for the callers without a console language (`build.rs`,
+/// tests).
+impl std::fmt::Display for PackError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.render(&ENGLISH))
+    }
+}
+
+/// The text of the dotted key `key` in a translation, `None` when it is
+/// missing or empty. `crate::i18n::get_nested` cannot be used here (see
+/// [`PackError`]).
+fn translation<'a>(locale: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+    key.split('.')
+        .try_fold(locale, |node, part| node.get(part))
+        .and_then(|value| value.as_str())
+        .filter(|text| !text.is_empty())
+}
+
+/// The English console translation, read once: the language of
+/// `Display`. Embedded by path from this file, so `build.rs` reads the
+/// same file.
+static ENGLISH: LazyLock<serde_json::Value> = LazyLock::new(|| {
+    serde_json::from_str(include_str!("../../resources/locales/script/en.json"))
+        .expect("embedded English console translation")
+});
 
 /// Clear header of a pack.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -222,10 +364,10 @@ fn open_section(
     section: &[u8],
     blob: &[u8],
     key: &[u8; 32],
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, PackError> {
     let aad = [header_bytes, section].concat();
     rules_crypto::decrypt_bytes_with_aad(blob, &aad, key)
-        .ok_or_else(|| "rule pack is corrupt or was altered".to_string())
+        .ok_or_else(|| PackError::new(keys::CORRUPT))
 }
 
 /// A pack split into its parts: header, raw header bytes (the associated
@@ -241,48 +383,52 @@ struct PackParts<'a> {
 /// JSON): the header and the offset where the sections start. Only the
 /// first bytes of a pack are needed, so a scan can tell whether a pack
 /// carries version rules without reading or decrypting it.
-fn parse_header(bytes: &[u8]) -> Result<(PackHeader, usize), String> {
+fn parse_header(bytes: &[u8]) -> Result<(PackHeader, usize), PackError> {
     if LEGACY_MAGICS
         .iter()
         .any(|magic| bytes.starts_with(magic.as_slice()))
     {
-        return Err(
-            "rule pack in the former .scapack format, which this engine no longer reads: use a .cfpack pack built for this engine"
-                .to_string(),
-        );
+        return Err(PackError::new(keys::LEGACY_FORMAT));
     }
     let rest = bytes
         .strip_prefix(MAGIC.as_slice())
-        .ok_or_else(|| "not a rule pack (unknown file signature)".to_string())?;
+        .ok_or_else(|| PackError::new(keys::NOT_A_PACK))?;
     if rest.len() < 4 {
-        return Err("truncated rule pack (no header length)".to_string());
+        return Err(PackError::new(keys::TRUNCATED_HEADER_LENGTH));
     }
     let (len_bytes, rest) = rest.split_at(4);
     let header_len = u32::from_le_bytes(len_bytes.try_into().expect("4 bytes")) as usize;
     if header_len > MAX_HEADER_LEN || header_len > rest.len() {
-        return Err("truncated rule pack (header)".to_string());
+        return Err(PackError::new(keys::TRUNCATED_HEADER));
     }
     let header: serde_json::Value = serde_json::from_slice(&rest[..header_len])
-        .map_err(|e| format!("invalid rule pack header: {e}"))?;
-    let format = header.get("format").and_then(|v| v.as_u64());
-    if format != Some(FORMAT_VERSION) {
-        return Err(format!(
-            "unsupported rule pack format {format:?}, expected {FORMAT_VERSION}"
-        ));
+        .map_err(|e| PackError::new(keys::INVALID_HEADER).with("error", e.to_string()))?;
+    // A missing `format` is named like any other missing field; a present
+    // one is shown as written in the header (`1`, `"2"`). Until ticket
+    // #280 both were shown as a Rust `Option` (`None`, `Some(1)`).
+    match header.get("format") {
+        None => return Err(PackError::new(keys::MISSING_FIELD).with("field", "format")),
+        Some(format) if format.as_u64() != Some(FORMAT_VERSION) => {
+            return Err(PackError::new(keys::UNSUPPORTED_FORMAT)
+                .with("format", format.to_string())
+                .with("expected", FORMAT_VERSION.to_string()));
+        }
+        Some(_) => {}
     }
+    let missing = |key: &str| PackError::new(keys::MISSING_FIELD).with("field", key);
     let text = |key: &str| {
         header
             .get(key)
             .and_then(|v| v.as_str())
             .map(String::from)
-            .ok_or_else(|| format!("invalid rule pack header: missing \"{key}\""))
+            .ok_or_else(|| missing(key))
     };
     let number = |key: &str| {
         header
             .get(key)
             .and_then(|v| v.as_u64())
             .map(|n| n as usize)
-            .ok_or_else(|| format!("invalid rule pack header: missing \"{key}\""))
+            .ok_or_else(|| missing(key))
     };
     let parsed = PackHeader {
         name: text("name")?,
@@ -296,13 +442,13 @@ fn parse_header(bytes: &[u8]) -> Result<(PackHeader, usize), String> {
 
 /// Splits a pack into its parts. `Err` with a short reason if the file is
 /// not a pack, is truncated, or is in a format this engine does not read.
-fn split_pack(bytes: &[u8]) -> Result<PackParts<'_>, String> {
+fn split_pack(bytes: &[u8]) -> Result<PackParts<'_>, PackError> {
     let (parsed, body_start) = parse_header(bytes)?;
     let header_bytes = &bytes[MAGIC.len() + 4..body_start];
     let body = &bytes[body_start..];
     // The two sections fill the rest of the file exactly.
     if parsed.rules_bytes.checked_add(parsed.version_rules_bytes) != Some(body.len()) {
-        return Err("truncated rule pack (sections)".to_string());
+        return Err(PackError::new(keys::TRUNCATED_SECTIONS));
     }
     let (rules, version_rules) = body.split_at(parsed.rules_bytes);
     Ok(PackParts {
@@ -315,20 +461,18 @@ fn split_pack(bytes: &[u8]) -> Result<PackParts<'_>, String> {
 
 /// Checks that the pack is meant for the demo key, the only one this
 /// engine has.
-fn demo_key_for(header: &PackHeader) -> Result<[u8; 32], String> {
+fn demo_key_for(header: &PackHeader) -> Result<[u8; 32], PackError> {
     let key = demo_key();
     if header.key_fingerprint != key_fingerprint(&key) {
-        return Err(format!(
-            "rule pack needs key {}, this engine only has the demo key {} (ADR-0040)",
-            header.key_fingerprint,
-            key_fingerprint(&key)
-        ));
+        return Err(PackError::new(keys::NEEDS_KEY)
+            .with("key", header.key_fingerprint.clone())
+            .with("demo_key", key_fingerprint(&key)));
     }
     Ok(key)
 }
 
 /// Reads only the clear header of a pack, without decrypting it.
-pub fn read_header(bytes: &[u8]) -> Result<PackHeader, String> {
+pub fn read_header(bytes: &[u8]) -> Result<PackHeader, PackError> {
     split_pack(bytes).map(|parts| parts.header)
 }
 
@@ -336,35 +480,41 @@ pub fn read_header(bytes: &[u8]) -> Result<PackHeader, String> {
 /// bytes only: what a scan checks before deciding whether its
 /// dependencies phase runs (ADR-0043). The sections are not read, so a
 /// truncated pack is only reported when it is opened.
-pub fn read_header_from_file(path: &Path) -> Result<PackHeader, String> {
+pub fn read_header_from_file(path: &Path) -> Result<PackHeader, PackError> {
     use std::io::Read;
-    let file = std::fs::File::open(path).map_err(|e| format!("unreadable rule pack: {e}"))?;
+    let file = std::fs::File::open(path).map_err(|e| unreadable_pack(&e))?;
     let mut prefix = Vec::new();
     file.take((MAGIC.len() + 4 + MAX_HEADER_LEN) as u64)
         .read_to_end(&mut prefix)
-        .map_err(|e| format!("unreadable rule pack: {e}"))?;
+        .map_err(|e| unreadable_pack(&e))?;
     parse_header(&prefix).map(|(header, _)| header)
+}
+
+/// The reason of a pack file the system cannot read: `{error}` is the
+/// system's message.
+pub fn unreadable_pack(error: &std::io::Error) -> PackError {
+    PackError::new(keys::UNREADABLE_PACK).with("error", error.to_string())
 }
 
 /// Opens the rules section of a pack with the demo key: its header and
 /// its rule files. `Err` if the file is not a valid pack, if it needs
 /// another key (a client pack of ADR-0037), or if any byte of the header
 /// or of the section was altered. The version rules are not decrypted.
-pub fn open_pack(bytes: &[u8]) -> Result<(PackHeader, Vec<RuleSource>), String> {
+pub fn open_pack(bytes: &[u8]) -> Result<(PackHeader, Vec<RuleSource>), PackError> {
     let parts = split_pack(bytes)?;
     let key = demo_key_for(&parts.header)?;
     let plain = open_section(parts.header_bytes, RULES_SECTION, parts.rules, &key)?;
-    let files: Vec<RuleSource> =
-        serde_json::from_slice(&plain).map_err(|e| format!("invalid rule pack content: {e}"))?;
+    let files: Vec<RuleSource> = serde_json::from_slice(&plain)
+        .map_err(|e| PackError::new(keys::INVALID_CONTENT).with("error", e.to_string()))?;
     if files.len() != parts.header.rule_files {
-        return Err("rule pack content does not match its header".to_string());
+        return Err(PackError::new(keys::CONTENT_MISMATCH));
     }
     Ok((parts.header, files))
 }
 
 /// Decrypts the version rules section of a pack (ADR-0043): the bytes of
 /// its advisory container, `Ok(None)` when the pack carries none.
-pub fn open_version_rules(bytes: &[u8]) -> Result<Option<Vec<u8>>, String> {
+pub fn open_version_rules(bytes: &[u8]) -> Result<Option<Vec<u8>>, PackError> {
     let parts = split_pack(bytes)?;
     if !parts.header.has_version_rules() {
         return Ok(None);
@@ -383,8 +533,8 @@ pub fn open_version_rules(bytes: &[u8]) -> Result<Option<Vec<u8>>, String> {
 /// separators, source)` pairs sorted by path. Used by `build.rs` to pack
 /// `rules/builtin` and by `codefixture-audit rules pack`. A missing `root` gives
 /// an empty list; an unreadable file is an error naming it.
-pub fn collect_sca_sources(root: &Path) -> Result<Vec<RuleSource>, String> {
-    fn walk(root: &Path, dir: &Path, out: &mut Vec<RuleSource>) -> Result<(), String> {
+pub fn collect_sca_sources(root: &Path) -> Result<Vec<RuleSource>, PackError> {
+    fn walk(root: &Path, dir: &Path, out: &mut Vec<RuleSource>) -> Result<(), PackError> {
         let Ok(read_dir) = std::fs::read_dir(dir) else {
             return Ok(());
         };
@@ -405,8 +555,11 @@ pub fn collect_sca_sources(root: &Path) -> Result<Vec<RuleSource>, String> {
                     .expect("the file comes from root")
                     .to_string_lossy()
                     .replace('\\', "/");
-                let content = std::fs::read_to_string(&path)
-                    .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+                let content = std::fs::read_to_string(&path).map_err(|e| {
+                    PackError::new(keys::CANNOT_READ)
+                        .with("path", path.display().to_string())
+                        .with("error", e.to_string())
+                })?;
                 out.push((rel, content));
             }
         }
@@ -511,6 +664,94 @@ pub fn diff_rule_sources(before: &[RuleSource], after: &[RuleSource]) -> RuleDif
 mod tests {
     use super::*;
 
+    /// The placeholders of a translated text, sorted.
+    fn placeholders(text: &str) -> Vec<String> {
+        let mut found: Vec<String> = text
+            .split('{')
+            .skip(1)
+            .filter_map(|rest| rest.split_once('}').map(|(name, _)| name.to_string()))
+            .collect();
+        found.sort();
+        found
+    }
+
+    /// Ticket #280: every key has a text in the four languages, with the
+    /// placeholders of the English one; the `pack` group holds no other
+    /// key.
+    #[test]
+    fn test_every_pack_error_is_translated_with_its_placeholders() {
+        let english = crate::i18n::load_script_locale("en");
+        for lang in ["en", "fr", "es", "de"] {
+            let locale = crate::i18n::load_script_locale(lang);
+            let group = locale["pack"].as_object().expect("pack group");
+            assert_eq!(group.len(), keys::ALL.len(), "{lang}");
+            for key in keys::ALL {
+                let text =
+                    translation(&locale, key).unwrap_or_else(|| panic!("{lang}: {key} missing"));
+                let english_text = translation(&english, key).unwrap();
+                assert_eq!(
+                    placeholders(text),
+                    placeholders(english_text),
+                    "{lang}: {key}"
+                );
+            }
+        }
+    }
+
+    /// Ticket #280: a reason is shown in the console's language, in
+    /// English by `Display`, and falls back to English for a key a
+    /// translation lacks.
+    #[test]
+    fn test_pack_error_is_rendered_in_the_console_language() {
+        let french = crate::i18n::load_script_locale("fr");
+        let other = write_pack_with_key("client", &sample(), None, &[9u8; 32]);
+        let error = open_pack(&other).unwrap_err();
+        let demo = key_fingerprint(&demo_key());
+        let client = key_fingerprint(&[9u8; 32]);
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "rule pack needs key {client}, this engine only has the demo key {demo} (ADR-0040)"
+            )
+        );
+        assert_eq!(
+            error.render(&french),
+            format!(
+                "le pack de règles demande la clé {client}, ce moteur n'a que la clé de démonstration {demo} (ADR-0040)"
+            )
+        );
+        assert_eq!(
+            open_pack(b"nothing").unwrap_err().render(&french),
+            "ce fichier n'est pas un pack de règles (signature inconnue)"
+        );
+        assert_eq!(
+            PackError::new(keys::CORRUPT).render(&serde_json::json!({})),
+            "rule pack is corrupt or was altered"
+        );
+    }
+
+    /// A header without `format` names the missing field; one of another
+    /// format shows the value as written.
+    #[test]
+    fn test_header_format_is_named_when_missing_or_unsupported() {
+        let with_header = |header: &str| {
+            let mut bytes = MAGIC.to_vec();
+            bytes.extend_from_slice(&(header.len() as u32).to_le_bytes());
+            bytes.extend_from_slice(header.as_bytes());
+            bytes
+        };
+        assert_eq!(
+            read_header(&with_header("{}")).unwrap_err().to_string(),
+            "invalid rule pack header: missing \"format\""
+        );
+        assert_eq!(
+            read_header(&with_header("{\"format\":1}"))
+                .unwrap_err()
+                .to_string(),
+            "unsupported rule pack format 1, expected 2"
+        );
+    }
+
     fn sample() -> Vec<RuleSource> {
         vec![
             ("python/b.sca".to_string(), "rule b\nend\n".to_string()),
@@ -561,16 +802,36 @@ mod tests {
         let pack = write_pack("demo", &sample(), None);
 
         let other = write_pack_with_key("client", &sample(), None, &[7u8; 32]);
-        assert!(open_pack(&other).unwrap_err().contains("needs key"));
+        assert!(
+            open_pack(&other)
+                .unwrap_err()
+                .to_string()
+                .contains("needs key")
+        );
 
         let mut corrupt = pack.clone();
         let last = corrupt.len() - 1;
         corrupt[last] ^= 0xFF;
-        assert!(open_pack(&corrupt).unwrap_err().contains("corrupt"));
+        assert!(
+            open_pack(&corrupt)
+                .unwrap_err()
+                .to_string()
+                .contains("corrupt")
+        );
 
-        assert!(open_pack(&pack[..10]).unwrap_err().contains("truncated"));
+        assert!(
+            open_pack(&pack[..10])
+                .unwrap_err()
+                .to_string()
+                .contains("truncated")
+        );
         let not_a_pack = open_pack(b"rule x\nend\n");
-        assert!(not_a_pack.unwrap_err().contains("not a rule pack"));
+        assert!(
+            not_a_pack
+                .unwrap_err()
+                .to_string()
+                .contains("not a rule pack")
+        );
     }
 
     /// The header is authenticated: raising the declared rule count (same
@@ -583,7 +844,12 @@ mod tests {
             .position(|w| w == b"\"rule_files\":2")
             .expect("count in header");
         bytes[pos + b"\"rule_files\":".len()] = b'3';
-        assert!(open_pack(&bytes).unwrap_err().contains("corrupt"));
+        assert!(
+            open_pack(&bytes)
+                .unwrap_err()
+                .to_string()
+                .contains("corrupt")
+        );
     }
 
     /// A pack of the former `.scapack` name, format 1 (ADR-0040, signed
@@ -597,7 +863,7 @@ mod tests {
             let mut bytes = magic.to_vec();
             bytes.extend_from_slice(&(header.len() as u32).to_le_bytes());
             bytes.extend_from_slice(header.as_bytes());
-            let err = read_header(&bytes).unwrap_err();
+            let err = read_header(&bytes).unwrap_err().to_string();
             assert!(err.contains(".scapack") && err.contains(".cfpack"), "{err}");
         }
     }
@@ -750,12 +1016,14 @@ mod tests {
         assert!(
             open_version_rules(&corrupt)
                 .unwrap_err()
+                .to_string()
                 .contains("corrupt")
         );
         assert!(open_pack(&corrupt).is_ok(), "the rules section is intact");
         assert!(
             open_version_rules(&pack[..pack.len() - 1])
                 .unwrap_err()
+                .to_string()
                 .contains("truncated")
         );
     }

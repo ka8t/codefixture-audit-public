@@ -30,7 +30,9 @@ use std::sync::Arc;
 
 use serde::Deserialize;
 
+use crate::project::advisory_file::keys;
 use crate::project::dependencies::{Dependency, VersionSource};
+use crate::rules::pack_format::PackError;
 
 /// File layout version this engine understands — must match
 /// `FORMAT_VERSION` in `tools/codefixture-audit-advisories/src/format.rs`.
@@ -169,12 +171,12 @@ pub struct VulnerableDependency {
 /// Loads the `ecosystems` held by the database `file`
 /// (`advisory_file.rs`). An ecosystem the file does not hold is skipped
 /// (never updated); one that cannot be decompressed or parsed, or whose
-/// payload format is unknown, is returned as an error message, and the
-/// others are still loaded.
+/// payload format is unknown, is returned as a reason translated when
+/// shown (ticket #280), and the others are still loaded.
 pub fn load(
     file: &crate::project::advisory_file::DatabaseFile,
     ecosystems: &BTreeSet<String>,
-) -> (AdvisoryDb, Vec<String>) {
+) -> (AdvisoryDb, Vec<PackError>) {
     let mut db = AdvisoryDb::default();
     let mut errors = Vec::new();
     let kev: BTreeMap<String, Exploited> = load_table(file, "kev", &mut errors);
@@ -188,19 +190,24 @@ pub fn load(
                 continue;
             }
         };
-        let label = format!("{} ({ecosystem})", file.path.display());
+        let reason = |key| {
+            PackError::new(key)
+                .with("path", file.path.display().to_string())
+                .with("ecosystem", ecosystem.clone())
+        };
         let parsed: EcosystemFile = match serde_json::from_slice(&content) {
             Ok(f) => f,
             Err(e) => {
-                errors.push(format!("{label}: {e}"));
+                errors.push(reason(keys::ECOSYSTEM_INVALID).with("error", e.to_string()));
                 continue;
             }
         };
         if parsed.format != FORMAT_VERSION {
-            errors.push(format!(
-                "{label}: format {} not supported by this engine (expected {FORMAT_VERSION})",
-                parsed.format
-            ));
+            errors.push(
+                reason(keys::ECOSYSTEM_UNSUPPORTED_FORMAT)
+                    .with("format", parsed.format.to_string())
+                    .with("expected", FORMAT_VERSION.to_string()),
+            );
             continue;
         }
         for mut advisory in parsed.advisories {
@@ -232,7 +239,7 @@ pub fn load(
 fn load_table<T: serde::de::DeserializeOwned>(
     file: &crate::project::advisory_file::DatabaseFile,
     name: &str,
-    errors: &mut Vec<String>,
+    errors: &mut Vec<PackError>,
 ) -> BTreeMap<String, T> {
     let content = match file.table_json(name) {
         None => return BTreeMap::new(),
@@ -242,18 +249,23 @@ fn load_table<T: serde::de::DeserializeOwned>(
             return BTreeMap::new();
         }
     };
-    let label = format!("{} (table {name})", file.path.display());
+    let reason = |key| {
+        PackError::new(key)
+            .with("path", file.path.display().to_string())
+            .with("table", name)
+    };
     match serde_json::from_slice::<CveTable<T>>(&content) {
         Ok(table) if table.format == FORMAT_VERSION => table.cves,
         Ok(table) => {
-            errors.push(format!(
-                "{label}: format {} not supported by this engine (expected {FORMAT_VERSION})",
-                table.format
-            ));
+            errors.push(
+                reason(keys::TABLE_UNSUPPORTED_FORMAT)
+                    .with("format", table.format.to_string())
+                    .with("expected", FORMAT_VERSION.to_string()),
+            );
             BTreeMap::new()
         }
         Err(e) => {
-            errors.push(format!("{label}: {e}"));
+            errors.push(reason(keys::TABLE_INVALID).with("error", e.to_string()));
             BTreeMap::new()
         }
     }
@@ -880,7 +892,8 @@ mod tests {
         let broken = db_file_with_tables(&[("npm", json)], &[("kev", r#"{"format":9,"cves":{}}"#)]);
         let (db, errors) = load(&broken, &npm);
         assert!(
-            errors[0].contains("table kev") && errors[0].contains("format 9"),
+            errors[0].to_string().contains("table kev")
+                && errors[0].to_string().contains("format 9"),
             "{errors:?}"
         );
         assert_eq!(
@@ -918,7 +931,7 @@ mod tests {
         let wanted = BTreeSet::from(["Maven".to_string(), "NuGet".to_string()]);
         let (db, errors) = load(&file, &wanted);
         assert_eq!(errors.len(), 1);
-        assert!(errors[0].contains("format 99"));
+        assert!(errors[0].to_string().contains("format 99"));
         assert!(db.loaded_ecosystems.is_empty());
     }
 
