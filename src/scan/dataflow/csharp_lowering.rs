@@ -378,8 +378,12 @@ impl<'src> CSharpLowerer<'src> {
             return self.lower_assignment_expression(expr);
         }
 
-        // Fallback: unknown expression → Const(None), safe (propagates nothing).
-        Rhs::Const(ConstValue::None)
+        // Fallback: unknown expression → `Opaque`, no taint and no known
+        // value. Ticket #253, deliberate deviation from the Audit, which
+        // returns `Const(None)` here: the constant pass (§9) read a
+        // condition it did not model as `None`, always false, and dropped
+        // the body of the `if` (C# `if (user is not null)`).
+        Rhs::Opaque
     }
 
     fn lower_invocation(&mut self, expr: Node<'src>) -> Rhs {
@@ -429,12 +433,12 @@ impl<'src> CSharpLowerer<'src> {
     /// element expected.
     fn lower_bracketed_argument(&mut self, arg_list: Option<Node<'src>>) -> Rhs {
         let Some(arg_list) = arg_list else {
-            return Rhs::Const(ConstValue::None);
+            return Rhs::Opaque;
         };
         let first = arg_list.named_children(&mut arg_list.walk()).next();
         match first {
             Some(a) => self.lower_wrapped_argument(a),
-            None => Rhs::Const(ConstValue::None),
+            None => Rhs::Opaque,
         }
     }
 
@@ -502,10 +506,10 @@ impl<'src> CSharpLowerer<'src> {
     fn lower_prefix_unary(&mut self, expr: Node<'src>) -> Rhs {
         let operand_node = expr.named_children(&mut expr.walk()).next();
         let Some(operand_node) = operand_node else {
-            return Rhs::Const(ConstValue::None);
+            return Rhs::Opaque;
         };
         let Some(op_child) = expr.child(0) else {
-            return Rhs::Const(ConstValue::None);
+            return Rhs::Opaque;
         };
         let op_text = self.text(op_child);
         if op_text == "++" || op_text == "--" {
@@ -531,7 +535,7 @@ impl<'src> CSharpLowerer<'src> {
     fn lower_postfix_unary(&mut self, expr: Node<'src>) -> Rhs {
         let operand_node = expr.named_children(&mut expr.walk()).next();
         let Some(operand_node) = operand_node else {
-            return Rhs::Const(ConstValue::None);
+            return Rhs::Opaque;
         };
         let last_child = {
             let count = expr.child_count();
@@ -542,7 +546,7 @@ impl<'src> CSharpLowerer<'src> {
             }
         };
         let Some(op_child) = last_child else {
-            return Rhs::Const(ConstValue::None);
+            return Rhs::Opaque;
         };
         let op_text = self.text(op_child);
         let symbol = if op_text.starts_with("++") { "+" } else { "-" };

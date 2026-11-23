@@ -320,8 +320,12 @@ impl<'src> JsLowerer<'src> {
             return self.lower_expr(inner);
         }
 
-        // Fallback: unknown expression → Const(None), safe (propagates nothing).
-        Rhs::Const(ConstValue::None)
+        // Fallback: unknown expression → `Opaque`, no taint and no known
+        // value. Ticket #253, deliberate deviation from the Audit, which
+        // returns `Const(None)` here: the constant pass (§9) read a
+        // condition it did not model as `None`, always false, and dropped
+        // the body of the `if` (C# `if (user is not null)`).
+        Rhs::Opaque
     }
 
     /// Array literal element, with or without `...spread`.
@@ -483,7 +487,7 @@ impl<'src> JsLowerer<'src> {
     fn lower_update_expression(&mut self, expr: Node<'src>) -> Rhs {
         let operand_node = expr.child_by_field_name("argument");
         let Some(operand_node) = operand_node else {
-            return Rhs::Const(ConstValue::None);
+            return Rhs::Opaque;
         };
         let op_symbol = if self.text(expr).contains("++") {
             "+"

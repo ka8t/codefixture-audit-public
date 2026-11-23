@@ -643,7 +643,9 @@ impl<'tree, 'src> PhpCfgBuilder<'tree, 'src> {
 
     fn switch_case_condition(case_node: Node<'tree>) -> Option<Node<'tree>> {
         let value = case_node.child_by_field_name("value")?;
-        const LITERAL_KINDS: [&str; 5] = ["integer", "string", "true", "false", "null"];
+        // tree-sitter-php names its literals `integer`, `float`, `string`,
+        // `boolean` (for `true` and `false`, ticket #253) and `null`.
+        const LITERAL_KINDS: [&str; 5] = ["integer", "float", "string", "boolean", "null"];
         if LITERAL_KINDS.contains(&value.kind()) {
             Some(value)
         } else {

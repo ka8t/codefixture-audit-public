@@ -75,6 +75,14 @@ pub enum Rhs {
         then: Box<Rhs>,
         orelse: Box<Rhs>,
     },
+    /// An expression the lowering does not model (a C# `x is not null`
+    /// pattern, a Python comprehension, a malformed node): it carries no
+    /// taint and has no known value. Ticket #253, deliberate deviation
+    /// from the Audit, whose lowerings return `Const(None)` here: the
+    /// constant pass (§9) then read the condition `if (user is not null)`
+    /// as `None`, always false, marked the TRUE edge dead, and the body of
+    /// the `if` was never analysed.
+    Opaque,
 }
 
 /// LHS (Left-Hand Side) — assignable locations.
@@ -301,6 +309,7 @@ fn rhs_variant_name(rhs: &Rhs) -> &'static str {
         Rhs::LambdaRef { .. } => "LambdaRef",
         Rhs::Star { .. } => "Star",
         Rhs::IfExp { .. } => "IfExp",
+        Rhs::Opaque => "Opaque",
     }
 }
 
@@ -311,6 +320,7 @@ fn rhs_variant_name(rhs: &Rhs) -> &'static str {
 pub fn pretty_rhs(rhs: &Rhs) -> String {
     match rhs {
         Rhs::Const(v) => repr_const(v),
+        Rhs::Opaque => "<opaque>".to_string(),
         Rhs::VarRef(name) => name.clone(),
         Rhs::AttrRef { base, attr } => format!("{}.{attr}", pretty_rhs(base)),
         Rhs::SubscriptRef { base, key } => format!("{}[{}]", pretty_rhs(base), pretty_rhs(key)),

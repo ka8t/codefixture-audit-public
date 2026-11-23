@@ -1167,6 +1167,9 @@ pub fn eval_rhs(
             )
         }
         Rhs::LambdaRef { .. } => Taint::Clean,
+        // Ticket #253: an expression the lowering does not model carries
+        // no taint, as the `Const(None)` it replaces.
+        Rhs::Opaque => Taint::Clean,
         Rhs::CallRef {
             callee,
             args,

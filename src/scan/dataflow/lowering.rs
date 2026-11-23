@@ -315,10 +315,11 @@ impl<'src> Lowerer<'src> {
                     .map(|n| self.lower_expr(n))
                     .unwrap_or(Rhs::Const(ConstValue::None))
             }
-            // Comprehensions, yield, other rare forms: safe opaque
-            // fallback (does not propagate taint) — not covered in
-            // this pass, cf. module docstring.
-            _ => Rhs::Const(ConstValue::None),
+            // Comprehensions, yield, other rare forms: opaque fallback,
+            // no taint and no known value (ticket #253: the Audit returns
+            // `Const(None)`, which the constant pass reads as false, so a
+            // condition such as `if [x for x in xs]:` lost its body).
+            _ => Rhs::Opaque,
         }
     }
 
@@ -718,7 +719,8 @@ impl<'src> Lowerer<'src> {
         match target.kind() {
             "identifier" => Rhs::VarRef(self.text(target)),
             "attribute" | "subscript" => self.lower_expr(target),
-            _ => Rhs::Const(ConstValue::None),
+            // A target the lowering does not model (ticket #253).
+            _ => Rhs::Opaque,
         }
     }
 

@@ -144,11 +144,14 @@ impl<'src> PhpLowerer<'src> {
         if t == "integer" || t == "float" {
             return Rhs::Const(parse_php_numeric(&self.text(expr)));
         }
-        if t == "true" {
-            return Rhs::Const(ConstValue::Bool(true));
-        }
-        if t == "false" {
-            return Rhs::Const(ConstValue::Bool(false));
+        // `true`/`false` (any case: `TRUE`, `False`) are one `boolean` node in
+        // tree-sitter-php; there is no `true` or `false` node. Before ticket
+        // #253 they fell to the fallback, whose `Const(None)` the constant
+        // pass read as false: `$ok = true; if ($ok) { ... }` lost its body.
+        if t == "boolean" {
+            return Rhs::Const(ConstValue::Bool(
+                self.text(expr).eq_ignore_ascii_case("true"),
+            ));
         }
         if t == "null" {
             return Rhs::Const(ConstValue::None);
@@ -314,8 +317,12 @@ impl<'src> PhpLowerer<'src> {
             return self.lower_assignment_expression(expr, &base_op);
         }
 
-        // Fallback: unknown expression → Const(None), safe (propagates nothing).
-        Rhs::Const(ConstValue::None)
+        // Fallback: unknown expression → `Opaque`, no taint and no known
+        // value. Ticket #253, deliberate deviation from the Audit, which
+        // returns `Const(None)` here: the constant pass (§9) read a
+        // condition it did not model as `None`, always false, and dropped
+        // the body of the `if` (C# `if (user is not null)`).
+        Rhs::Opaque
     }
 
     fn emit_call(&mut self, callee: Rhs, args: Vec<Rhs>, at: Node<'src>) -> Rhs {
@@ -443,7 +450,7 @@ impl<'src> PhpLowerer<'src> {
     fn lower_update_expression(&mut self, expr: Node<'src>) -> Rhs {
         let operand_node = expr.child_by_field_name("argument");
         let Some(operand_node) = operand_node else {
-            return Rhs::Const(ConstValue::None);
+            return Rhs::Opaque;
         };
         let op_symbol = if self.text(expr).contains("++") {
             "+"
@@ -1272,6 +1279,35 @@ mod tests {
             }
         });
         assert!(has_binop_with_var);
+    }
+
+    /// Ticket #253: `true`/`false` are one `boolean` node, in any case.
+    #[test]
+    fn test_boolean_literal() {
+        for (source, value) in [
+            ("$x = true;", true),
+            ("$x = FALSE;", false),
+            ("$x = True;", true),
+        ] {
+            let ir = lower(source);
+            let a = assigns(&ir);
+            let IrStmt::Assign { rhs, .. } = a[0] else {
+                panic!()
+            };
+            assert_eq!(*rhs, Rhs::Const(ConstValue::Bool(value)), "{source}");
+        }
+    }
+
+    /// Ticket #253: an expression the lowering does not model is `Opaque`
+    /// (no known value), not `Const(None)`.
+    #[test]
+    fn test_unmodeled_expression_is_opaque() {
+        let ir = lower("$x = `ls`;");
+        let a = assigns(&ir);
+        let IrStmt::Assign { rhs, .. } = a[0] else {
+            panic!()
+        };
+        assert_eq!(*rhs, Rhs::Opaque);
     }
 
     #[test]

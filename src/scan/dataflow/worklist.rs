@@ -848,6 +848,24 @@ mod tests {
         assert!(dead.contains(&(branch_id, true_edge.dst)));
     }
 
+    /// Ticket #253: a condition the lowering does not model (here a list
+    /// comprehension) has no known value, so no edge of its branch is dead.
+    /// It used to be lowered to `Const(None)`, read as false: the TRUE edge
+    /// was marked dead and the body never analysed.
+    #[test]
+    fn test_dead_edges_unmodeled_condition_none_dead() {
+        let (tree, src) = build("if [f for f in files]:\n    a()\nelse:\n    b()\n");
+        let cfg = build_cfg(&tree, &src);
+        let mut node_ir = lower_all_nodes(&cfg, &src);
+        let dead = compute_dead_edges(&cfg, &mut node_ir, &src);
+        assert!(dead.is_empty());
+        // The same through a variable: `ok = [...]` gives `ok` no value.
+        let (tree, src) = build("ok = [f for f in files]\nif ok:\n    a()\n");
+        let cfg = build_cfg(&tree, &src);
+        let mut node_ir = lower_all_nodes(&cfg, &src);
+        assert!(compute_dead_edges(&cfg, &mut node_ir, &src).is_empty());
+    }
+
     #[test]
     fn test_dead_edges_unknown_condition_none_dead() {
         let (tree, src) = build("if param:\n    a()\nelse:\n    b()\n");
