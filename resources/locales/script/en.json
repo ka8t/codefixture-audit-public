@@ -453,5 +453,6 @@
   "scan_memory_limit": "Limit set with --max-memory: {limit} GB.",
   "decimal_separator": ".",
   "scan_memory_machine": "This machine has {available} GB available of {total} GB.",
-  "scan_memory_stop_limit": "Stopped before reading the files: this analysis is expected to take about {estimate} GB of memory, more than the {limit} GB allowed with --max-memory."
+  "scan_memory_stop_limit": "Stopped before reading the files: this analysis is expected to take about {estimate} GB of memory, more than the {limit} GB allowed with --max-memory.",
+  "scan_memory_fewer_rules": "To fit in memory, {rules} data flow rule(s) run at a time instead of {max}: the analysis takes longer."
 }

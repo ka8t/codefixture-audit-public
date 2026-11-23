@@ -1535,6 +1535,13 @@ fn memory_lines(
         None => {}
     }
     lines.extend(limit);
+    if memory.rules_at_once < memory.max_rules_at_once {
+        lines.push(
+            say("scan_memory_fewer_rules")
+                .replace("{rules}", &memory.rules_at_once.to_string())
+                .replace("{max}", &memory.max_rules_at_once.to_string()),
+        );
+    }
     lines
 }
 

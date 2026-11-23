@@ -453,5 +453,6 @@
   "scan_memory_limit": "Plafond fixé par --max-memory : {limit} Go.",
   "decimal_separator": ",",
   "scan_memory_machine": "Cette machine a {available} Go disponibles sur {total} Go.",
-  "scan_memory_stop_limit": "Arrêt avant la lecture des fichiers : cette analyse devrait prendre environ {estimate} Go de mémoire, plus que les {limit} Go autorisés par --max-memory."
+  "scan_memory_stop_limit": "Arrêt avant la lecture des fichiers : cette analyse devrait prendre environ {estimate} Go de mémoire, plus que les {limit} Go autorisés par --max-memory.",
+  "scan_memory_fewer_rules": "Pour tenir en mémoire, {rules} règle(s) de suivi de données tournent à la fois au lieu de {max} : l'analyse prend plus de temps."
 }

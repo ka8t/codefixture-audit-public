@@ -396,7 +396,7 @@ Vous pouvez ajouter vos propres règles, pour une API interne ou une convention 
 
 Chaque analyse affiche la mémoire qu'elle prévoit, par exemple `Mémoire : environ 10,3 Go prévus.`, puis ce que la machine a de disponible. L'estimation est faite avant de lire le moindre fichier, d'après la taille des fichiers : environ 50 fois les sources des langages dont les données sont suivies (Python, Java, JavaScript, PHP, C#), 6 fois les autres.
 
-Quand l'estimation dépasse la mémoire disponible, l'analyse s'arrête aussitôt, avec le code de sortie 2 et sans rapport, et dit pourquoi, quelles sources elle aurait lues, et quoi faire :
+Quand la mémoire est juste, l'analyse fait d'abord tourner moins de règles de suivi de données à la fois : elle prend alors moins de mémoire et plus de temps (jusqu'à la moitié en plus environ), et le dit (`Pour tenir en mémoire, 2 règle(s) de suivi de données tournent à la fois au lieu de 4`). Quand l'estimation dépasse encore la mémoire disponible avec une seule règle à la fois, l'analyse s'arrête aussitôt, avec le code de sortie 2 et sans rapport, et dit pourquoi, quelles sources elle aurait lues, et quoi faire :
 
 - analyser le projet module par module (chaque sous-dossier à part) ;
 - écarter des dossiers avec `paths.exclude` dans `audit.config.json` (code généré, tests, copies de bibliothèques) ;

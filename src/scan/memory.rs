@@ -151,8 +151,11 @@ pub struct MemoryEstimate {
     pub bytes: u64,
     /// The sources it was estimated from, largest first.
     pub sources: Vec<LanguageSources>,
-    /// Taint rules run at the same time.
+    /// Taint rules run at the same time, chosen by [`plan`].
     pub rules_at_once: usize,
+    /// Taint rules the machine's threads would run at the same time (half
+    /// of them): `rules_at_once` is lower when memory is short.
+    pub max_rules_at_once: usize,
     /// The machine's memory, `None` when this system does not tell.
     pub system: Option<SystemMemory>,
     /// The most memory the user lets the scan take (`--max-memory`), in
@@ -201,9 +204,79 @@ pub fn estimate_bytes(sources: &[LanguageSources], rules_at_once: usize) -> u64 
     })
 }
 
+/// The memory plan of a scan of `sources` (ticket #281, step 2): the most
+/// taint rules at a time, from `max_rules_at_once` down to one, whose
+/// estimate fits in what the scan may take ([`MemoryEstimate::allowed`]).
+/// Each rule at a time keeps its function summaries for the whole project
+/// ([`PER_EXTRA_RULE_FACTOR`]): fewer rules at a time take less memory and
+/// more time. When even one rule at a time does not fit, the plan keeps
+/// one and its estimate, which does not fit: the scan stops.
+pub fn plan(
+    sources: Vec<LanguageSources>,
+    max_rules_at_once: usize,
+    system: Option<SystemMemory>,
+    limit: Option<u64>,
+) -> MemoryEstimate {
+    let max_rules_at_once = max_rules_at_once.max(1);
+    let mut estimate = MemoryEstimate {
+        bytes: 0,
+        sources,
+        rules_at_once: 1,
+        max_rules_at_once,
+        system,
+        limit,
+    };
+    let allowed = estimate.allowed();
+    let rules_at_once = (1..=max_rules_at_once)
+        .rev()
+        .find(|rules| {
+            allowed.is_none_or(|allowed| estimate_bytes(&estimate.sources, *rules) <= allowed)
+        })
+        .unwrap_or(1);
+    estimate.rules_at_once = rules_at_once;
+    estimate.bytes = estimate_bytes(&estimate.sources, rules_at_once);
+    estimate
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const GIB: u64 = 1024 * 1024 * 1024;
+
+    /// Fewer rules at a time when memory is short; the most the threads
+    /// allow when it is not; one, which does not fit, when even one is too
+    /// much.
+    #[test]
+    fn test_plan_runs_fewer_rules_at_once_when_memory_is_short() {
+        let juliet = || vec![sources("java", 253, true)];
+        let machine = |available_gb: u64| {
+            Some(SystemMemory {
+                total: 32 * GIB,
+                available: available_gb * GIB,
+            })
+        };
+        let roomy = plan(juliet(), 4, machine(20), None);
+        assert_eq!((roomy.rules_at_once, roomy.fits()), (4, Some(true)));
+        let short = plan(juliet(), 4, machine(11), None);
+        assert_eq!(short.max_rules_at_once, 4);
+        assert!(
+            short.rules_at_once < 4 && short.rules_at_once >= 1,
+            "{short:?}"
+        );
+        assert_eq!(short.fits(), Some(true));
+        let too_small = plan(juliet(), 4, machine(5), None);
+        assert_eq!(
+            (too_small.rules_at_once, too_small.fits()),
+            (1, Some(false))
+        );
+        // Nothing bounds it: the threads decide.
+        let unknown = plan(juliet(), 4, None, None);
+        assert_eq!((unknown.rules_at_once, unknown.fits()), (4, None));
+        // The limit counts as the available memory.
+        let limited = plan(juliet(), 4, machine(20), Some(11 * GIB));
+        assert!(limited.rules_at_once < 4 && limited.fits() == Some(true));
+    }
 
     fn sources(language: &str, mb: u64, followed: bool) -> LanguageSources {
         LanguageSources {
@@ -246,6 +319,7 @@ mod tests {
             bytes: 10 * 1024 * 1024 * 1024,
             sources: Vec::new(),
             rules_at_once: 4,
+            max_rules_at_once: 4,
             limit: None,
             system: Some(SystemMemory {
                 total: 16 * 1024 * 1024 * 1024,

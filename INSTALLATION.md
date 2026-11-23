@@ -396,7 +396,7 @@ You can add rules of your own, for an in-house API or a convention of your code:
 
 Every analysis prints the memory it expects, for example `Memory: about 10.3 GB expected.`, then what the machine has available. The estimate is made before any file is read, from the size of the files: about 50 times the sources of the languages whose data is followed (Python, Java, JavaScript, PHP, C#), 6 times the others.
 
-When the estimate is above the memory available, the analysis stops at once, with exit code 2 and no report, and says why, which sources it would have read, and what to do:
+When memory is short, the analysis first runs fewer data flow rules at a time: it then takes less memory and more time (up to about half as long again), and says so (`To fit in memory, 2 data flow rule(s) run at a time instead of 4`). When the estimate is still above the memory available with one rule at a time, the analysis stops at once, with exit code 2 and no report, and says why, which sources it would have read, and what to do:
 
 - analyse the project one module at a time (each sub-folder on its own);
 - leave folders out with `paths.exclude` in `audit.config.json` (generated code, tests, copies of libraries);

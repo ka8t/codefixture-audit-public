@@ -118,7 +118,8 @@ pub(super) trait TaintLanguage<'a>: Sync + Sized {
     ) -> TaintFindings;
 }
 
-/// Number of rules a taint pass runs at the same time (ticket #247): half
+/// Most rules a taint pass runs at the same time (ticket #247), fewer when
+/// memory is short (`scan::memory::plan`, ticket #281): half
 /// the threads of the pool, at least one. A rule keeps the summaries of
 /// every function of the project until its files are analysed: with every
 /// rule of a pass at once, the 22 Java rules on the 46,793 files of the
@@ -416,7 +417,7 @@ fn cached_rule_runs<'a, L: TaintLanguage<'a>>(
             });
             Some((per_file, base_specs.rule_id.clone(), state, analysed))
         };
-    let runs = run_in_lanes(rule_jsons, all_specs, rule_lanes(), run_rule);
+    let runs = run_in_lanes(rule_jsons, all_specs, context.rules_at_once, run_rule);
 
     let mut per_rule = Vec::with_capacity(runs.len());
     let mut states = Vec::new();

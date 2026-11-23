@@ -453,5 +453,6 @@
   "scan_memory_limit": "Límite fijado con --max-memory: {limit} GB.",
   "decimal_separator": ",",
   "scan_memory_machine": "Esta máquina tiene {available} GB disponibles de {total} GB.",
-  "scan_memory_stop_limit": "Detenido antes de leer los archivos: este análisis debería ocupar unos {estimate} GB de memoria, más que los {limit} GB permitidos con --max-memory."
+  "scan_memory_stop_limit": "Detenido antes de leer los archivos: este análisis debería ocupar unos {estimate} GB de memoria, más que los {limit} GB permitidos con --max-memory.",
+  "scan_memory_fewer_rules": "Para caber en memoria, se ejecutan {rules} regla(s) de flujo de datos a la vez en lugar de {max}: el análisis tarda más."
 }

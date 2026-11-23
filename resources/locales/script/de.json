@@ -453,5 +453,6 @@
   "scan_memory_limit": "Mit --max-memory gesetzte Grenze: {limit} GB.",
   "decimal_separator": ",",
   "scan_memory_machine": "Dieser Rechner hat {available} GB von {total} GB verfügbar.",
-  "scan_memory_stop_limit": "Vor dem Lesen der Dateien angehalten: Diese Analyse braucht voraussichtlich etwa {estimate} GB Speicher, mehr als die mit --max-memory erlaubten {limit} GB."
+  "scan_memory_stop_limit": "Vor dem Lesen der Dateien angehalten: Diese Analyse braucht voraussichtlich etwa {estimate} GB Speicher, mehr als die mit --max-memory erlaubten {limit} GB.",
+  "scan_memory_fewer_rules": "Damit der Speicher reicht, laufen {rules} statt {max} Datenfluss-Regel(n) gleichzeitig: Die Analyse dauert länger."
 }

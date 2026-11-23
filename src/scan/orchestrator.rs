@@ -1531,6 +1531,9 @@ struct PassContext<'s> {
     /// Each rule's own findings, before any merge, when the scan keeps
     /// them (`ScanConfig::keep_rule_findings`, ticket #242).
     rule_findings: Option<&'s mut Vec<ReportFinding>>,
+    /// Taint rules a pass runs at the same time, chosen for the memory
+    /// available (`scan::memory::plan`, ticket #281).
+    rules_at_once: usize,
 }
 
 /// What phase A made of one discovered file.
@@ -2161,6 +2164,7 @@ pub fn run_scan(config: &ScanConfig) -> ScanReport {
         findings: &mut all_findings,
         cache_stats: &mut cache_stats,
         rule_findings: config.keep_rule_findings.then_some(&mut rule_findings),
+        rules_at_once: memory.rules_at_once,
     };
 
     // Phase B — the pattern rules, one file at a time (`patterns`).
@@ -2494,7 +2498,7 @@ fn estimate_scan_memory(
     tree_languages: &[SourceLanguage],
     limit: Option<u64>,
 ) -> crate::scan::memory::MemoryEstimate {
-    use crate::scan::memory::{LanguageSources, MemoryEstimate, estimate_bytes, system_memory};
+    use crate::scan::memory::{LanguageSources, system_memory};
     let mut by_language: BTreeMap<(String, bool), u64> = BTreeMap::new();
     for file in files {
         let Some(language) = SourceLanguage::from_path(file) else {
@@ -2515,14 +2519,7 @@ fn estimate_scan_memory(
         })
         .collect();
     sources.sort_by(|a, b| b.bytes.cmp(&a.bytes).then(a.language.cmp(&b.language)));
-    let rules_at_once = taint::rule_lanes();
-    MemoryEstimate {
-        bytes: estimate_bytes(&sources, rules_at_once),
-        sources,
-        rules_at_once,
-        system: system_memory(),
-        limit,
-    }
+    crate::scan::memory::plan(sources, taint::rule_lanes(), system_memory(), limit)
 }
 
 /// Rule-id prefixes of the data-flow dependent (injection) families —

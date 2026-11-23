@@ -325,6 +325,7 @@ mod tests {
             findings: &mut findings,
             cache_stats: &mut cache_stats,
             rule_findings: None,
+            rules_at_once: 1,
         };
         run_pattern_pass(&parsed, rules, &mut context);
         PassRun {
