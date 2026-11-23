@@ -222,6 +222,32 @@ pub enum SkippedDirKind {
     Documentation,
 }
 
+thread_local! {
+    /// The phase the debug log gives the lines of a walk on this thread
+    /// (ticket #282): [`traced_as`] sets it, `discovery` by default.
+    static WALK_PHASE: std::cell::Cell<&'static str> = const { std::cell::Cell::new("discovery") };
+}
+
+/// The phase of the walk running on this thread, for its debug log lines.
+fn walk_phase() -> &'static str {
+    WALK_PHASE.with(std::cell::Cell::get)
+}
+
+/// Runs `walk` with its debug log lines under `phase` (ticket #282). The
+/// same project is walked more than once by one command: the
+/// unchanged-project check (`scan::unchanged`, ADR-0050) walks it before
+/// the scan, the dependency phase looks for manifests. Each walk keeps its
+/// own lines, named by its phase (`discovery_unchanged_check`,
+/// `discovery_manifests`, `discovery` for the scan itself), so that a
+/// reader of the log does not take one walk for the scan's. The walk runs
+/// on the calling thread, which the thread-local follows.
+pub fn traced_as<T>(phase: &'static str, walk: impl FnOnce() -> T) -> T {
+    let previous = WALK_PHASE.with(|cell| cell.replace(phase));
+    let result = walk();
+    WALK_PHASE.with(|cell| cell.set(previous));
+    result
+}
+
 /// A folder skipped by the walk: its path and why.
 pub type SkippedDir = (PathBuf, SkippedDirKind);
 
@@ -369,6 +395,7 @@ fn consider_file(filepath: &Path, root: &Path, config: &FileDiscoveryConfig, wal
             .iter()
             .any(|name| filename.eq_ignore_ascii_case(name));
         if !matches_extension && !matches_filename {
+            crate::debug_log!(walk_phase(), "file_not_source path={:?}", filepath);
             return;
         }
     }
@@ -378,10 +405,25 @@ fn consider_file(filepath: &Path, root: &Path, config: &FileDiscoveryConfig, wal
         .to_string_lossy()
         .replace('\\', "/");
     if walk.excludes.is_excluded(&rel_path, &filename) {
+        crate::debug_log!(
+            walk_phase(),
+            "file_excluded path={rel_path:?} reason=exclude_pattern"
+        );
         return;
     }
     if walk.seen.insert(dedup_key(filepath)) {
+        crate::debug_log!(
+            walk_phase(),
+            "file_kept path={rel_path:?} bytes={}",
+            std::fs::metadata(filepath)
+                .map_or_else(|e| format!("unreadable:{e}"), |m| m.len().to_string())
+        );
         walk.files.push(filepath.to_path_buf());
+    } else {
+        crate::debug_log!(
+            walk_phase(),
+            "file_already_kept path={rel_path:?} reason=same_file_reached_twice"
+        );
     }
 }
 
@@ -442,8 +484,16 @@ pub(crate) fn classify_entry(entry: &std::fs::DirEntry) -> WalkEntry {
 }
 
 fn walk_dir(dir: &Path, root: &Path, config: &FileDiscoveryConfig, walk: &mut Walk) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) => {
+            crate::debug_log!(
+                walk_phase(),
+                "dir_unreadable path={dir:?} error={:?}",
+                error.to_string()
+            );
+            return;
+        }
     };
     let mut subdirs = Vec::new();
     let mut filepaths = Vec::new();
@@ -451,9 +501,21 @@ fn walk_dir(dir: &Path, root: &Path, config: &FileDiscoveryConfig, walk: &mut Wa
         match classify_entry(&entry) {
             WalkEntry::Dir => subdirs.push(entry.path()),
             WalkEntry::File => filepaths.push(entry.path()),
-            WalkEntry::Skip => {}
+            WalkEntry::Skip => {
+                crate::debug_log!(
+                    walk_phase(),
+                    "entry_skipped path={:?} reason=link_to_folder_or_broken_link",
+                    entry.path()
+                );
+            }
         }
     }
+    crate::debug_log!(
+        walk_phase(),
+        "dir path={dir:?} files={} subdirs={}",
+        filepaths.len(),
+        subdirs.len()
+    );
 
     // Sort first (ticket #102, found via the first-ever Linux CI run):
     // `read_dir` order is filesystem-dependent (readdir() gives no
@@ -473,12 +535,20 @@ fn walk_dir(dir: &Path, root: &Path, config: &FileDiscoveryConfig, walk: &mut Wa
                 .unwrap_or(d)
                 .to_string_lossy()
                 .replace('\\', "/");
-            !walk.prune_excludes.matches_any_exclude(&rel)
+            let pruned = walk.prune_excludes.matches_any_exclude(&rel);
+            if pruned {
+                crate::debug_log!(
+                    walk_phase(),
+                    "dir_skipped path={rel:?} reason=exclude_pattern"
+                );
+            }
+            !pruned
         });
     }
     if config.skip_non_project_dirs {
         subdirs.retain(|d| match non_project_dir_kind(d) {
             Some(kind) => {
+                crate::debug_log!(walk_phase(), "dir_skipped path={d:?} reason={kind:?}");
                 // Overlapping start paths meet a folder twice: list it once.
                 if !walk.skipped.iter().any(|(path, _)| path == d) {
                     walk.skipped.push((d.clone(), kind));

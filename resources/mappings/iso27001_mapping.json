@@ -492,6 +492,7 @@
     "quadratic_uniqueness_check_in_loop": ["A.8.6"],
     "race_condition_financial":       ["A.8.28"],
     "razor_html_raw":                 ["A.8.28", "A.8.26"],
+    "blazor_markup_string":           ["A.8.28", "A.8.26"],
     "redis_eval_injection_js":        ["A.8.28", "A.8.26"],
     "redis_eval_injection_python":    ["A.8.28", "A.8.26"],
     "redos_nested_quantifier":        ["A.8.6"],

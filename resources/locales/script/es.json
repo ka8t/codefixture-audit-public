@@ -491,5 +491,7 @@
     "truncated_header": "{path}: cabecera truncada",
     "unreadable": "{path}: {error}",
     "unsupported_format": "{path}: formato {format} no admitido por este motor (se esperaba {expected})"
-  }
+  },
+  "scan_debug_log": "Registro de depuración (cada paso del análisis, legible aunque se detenga): {path}",
+  "scan_debug_log_error": "No se puede escribir el registro de depuración {path}: {error}"
 }

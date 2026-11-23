@@ -491,5 +491,7 @@
     "truncated_header": "{path}: abgeschnittener Kopf",
     "unreadable": "{path}: {error}",
     "unsupported_format": "{path}: Format {format} wird von dieser Engine nicht unterstützt (erwartet: {expected})"
-  }
+  },
+  "scan_debug_log": "Debug-Protokoll (jeder Schritt der Analyse, lesbar auch nach einem Abbruch): {path}",
+  "scan_debug_log_error": "Das Debug-Protokoll {path} kann nicht geschrieben werden: {error}"
 }

@@ -364,6 +364,7 @@
     "quadratic_uniqueness_check_in_loop": ["PR.IR-02"],
     "race_condition_financial": ["PR.DS-10"],
     "razor_html_raw": ["PR.DS-10", "PR.PS-06"],
+    "blazor_markup_string": ["PR.DS-10", "PR.PS-06"],
     "redis_eval_injection_js": ["PR.DS-10", "PR.PS-06"],
     "redis_eval_injection_python": ["PR.DS-10", "PR.PS-06"],
     "regex_dos": ["PR.IR-02"],

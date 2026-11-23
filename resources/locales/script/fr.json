@@ -491,5 +491,7 @@
     "truncated_header": "{path} : en-tête tronqué",
     "unreadable": "{path} : {error}",
     "unsupported_format": "{path} : format {format} non pris en charge par ce moteur ({expected} attendu)"
-  }
+  },
+  "scan_debug_log": "Journal de débogage (chaque étape de l'analyse, lisible même si elle s'arrête) : {path}",
+  "scan_debug_log_error": "Impossible d'écrire le journal de débogage {path} : {error}"
 }

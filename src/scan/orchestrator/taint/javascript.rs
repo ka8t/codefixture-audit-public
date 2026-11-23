@@ -44,6 +44,13 @@ impl<'a> TaintLanguage<'a> for JsTaint<'a> {
         }
     }
 
+    fn graph_size(&self) -> Option<(usize, usize)> {
+        Some(super::graph_size(
+            &self.call_graph.nodes,
+            &self.call_graph.edges,
+        ))
+    }
+
     fn dependency_fingerprint(&self, file: &str) -> String {
         self.call_graph.dependency_fingerprint(file)
     }

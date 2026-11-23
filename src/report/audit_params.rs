@@ -10,10 +10,12 @@
 //!     codefixture-audit has no such notion — the badge simply reflects
 //!     `only_category` (a single "active" category if filtered,
 //!     all 5 otherwise), weight always displayed as `×1`.
-//!   - **Scanned extensions**: derived from a static table
-//!     (mirroring `SourceLanguage::from_extension`, `orchestrator.rs`)
-//!     from the detected languages — not from a configurable
-//!     `self._py_exts`/`_js_exts` as on the Python side.
+//!   - **Scanned extensions**: derived from the detected languages and
+//!     the discovery lists themselves (`SourceLanguage::EXTENSIONS` and
+//!     the exact file names, `orchestrator.rs`) — not from a configurable
+//!     `self._py_exts`/`_js_exts` as on the Python side. Until ticket #285
+//!     a static copy named Python, Java, JavaScript and PHP only: an HTML,
+//!     C#, YAML or Dockerfile project showed no extension at all.
 //!   - **CLI options**: only the options of the binary that wrote the
 //!     report are listed (ticket #188). The shared binary has seven scan
 //!     options since 4e976cd; the report shows its `--quick`,
@@ -89,16 +91,36 @@ impl DependencyCheck {
     }
 }
 
-/// File extensions recognized per language — static mirror of
-/// `SourceLanguage::from_extension` (`orchestrator.rs`), duplicated here
-/// for display purposes rather than made public from the orchestrator
-/// (otherwise there'd be a reverse report → orchestrator dependency).
-const LANGUAGE_EXTENSIONS: [(&str, &[&str]); 4] = [
-    ("python", &[".py"]),
-    ("java", &[".java"]),
-    ("javascript", &[".js", ".jsx", ".mjs", ".cjs", ".ts"]),
-    ("php", &[".php"]),
-];
+/// What the scan reads for the rule language `lang`: its extensions
+/// (`.cs`, `.html`, `.cshtml`, `.razor`…), then the files it recognizes
+/// by exact name (`Dockerfile`, `pom.xml`, `web.config`, `package.json`),
+/// in the order of the discovery lists. Read from the lists the discovery
+/// itself uses (`SourceLanguage::EXTENSIONS`, `DOCKERFILE_FILENAMES`,
+/// `CONFIG_FILENAMES`): the static copy it replaces (ticket #285) had
+/// drifted to four languages and missed `.tsx`, `.inc` and every HTML
+/// template.
+fn language_files(lang: &str) -> Vec<String> {
+    use crate::scan::orchestrator::SourceLanguage;
+    let mut files: Vec<String> = SourceLanguage::EXTENSIONS
+        .iter()
+        .filter(|(_, l)| l.rule_tag() == lang)
+        .map(|(ext, _)| format!(".{ext}"))
+        .collect();
+    if SourceLanguage::Dockerfile.rule_tag() == lang {
+        files.extend(
+            SourceLanguage::DOCKERFILE_FILENAMES
+                .iter()
+                .map(|n| n.to_string()),
+        );
+    }
+    files.extend(
+        SourceLanguage::CONFIG_FILENAMES
+            .iter()
+            .filter(|(_, l)| l.rule_tag() == lang)
+            .map(|(n, _)| n.to_string()),
+    );
+    files
+}
 
 const CATEGORY_ORDER: [(&str, &str, &str); 5] = [
     ("SECURITY", "security", "🔒"),
@@ -108,10 +130,14 @@ const CATEGORY_ORDER: [(&str, &str, &str); 5] = [
     ("MAINTENANCE", "maintenance", "🔧"),
 ];
 
+/// The "scanned extensions" row: for each detected language, the files
+/// the scan reads for it ([`language_files`]); a language that reads none
+/// is left out.
 fn extensions_for(languages: &[String]) -> String {
     let mut parts = Vec::new();
     for lang in languages {
-        if let Some((_, exts)) = LANGUAGE_EXTENSIONS.iter().find(|(l, _)| l == lang) {
+        let exts = language_files(lang);
+        if !exts.is_empty() {
             let exts_html = exts
                 .iter()
                 .map(|e| format!("<code>{}</code>", escape(e)))
@@ -662,5 +688,30 @@ mod tests {
         info.languages = vec!["php".to_string()];
         let html = render_audit_params_html(&info, &ctx, &en);
         assert!(html.contains("<code>.php</code>"));
+    }
+
+    /// Ticket #285: every language lists the files the discovery reads
+    /// for it — HTML templates (Razor views among them), C#, YAML, the
+    /// Dockerfile names and the configuration files of their language.
+    #[test]
+    fn test_language_files_follow_the_discovery_lists() {
+        let html = language_files("html");
+        for ext in [".html", ".htm", ".vue", ".cshtml", ".razor"] {
+            assert!(html.contains(&ext.to_string()), "{ext}: {html:?}");
+        }
+        assert_eq!(language_files("csharp"), [".cs", "web.config"]);
+        assert_eq!(language_files("yaml"), [".yml", ".yaml"]);
+        assert_eq!(
+            language_files("dockerfile"),
+            ["Dockerfile", "Dockerfile.dev", "Dockerfile.prod"]
+        );
+        assert!(language_files("javascript").contains(&".tsx".to_string()));
+        assert!(language_files("unknown").is_empty());
+        let row = extensions_for(&["csharp".to_string(), "html".to_string()]);
+        assert!(
+            row.contains("<code>csharp</code>: <code>.cs</code>"),
+            "{row}"
+        );
+        assert!(row.contains("<code>.razor</code>"), "{row}");
     }
 }

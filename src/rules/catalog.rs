@@ -408,8 +408,26 @@ impl RuleRegistry {
                 None => true,
             };
         for file in &loaded.files {
+            // Ticket #282: each rule file compiled, in the debug log.
+            let step = crate::scan::debug_log::span("rules", || {
+                format!(
+                    "compile file={:?} origin={:?}",
+                    file.source_name, file.origin
+                )
+            });
             match crate::scan::parser::compile_sca_to_json(&file.content, &file.source_name) {
                 Ok(compiled) => {
+                    step.end_with(|| {
+                        let ids: Vec<String> = compiled
+                            .iter()
+                            .map(|rule| {
+                                RuleId::of(rule)
+                                    .map_or_else(|| "<no id>".to_string(), |id| id.to_string())
+                            })
+                            .collect();
+                        let other_language = compiled.iter().filter(|r| !targeted(r)).count();
+                        format!("compiled={ids:?} other_language_dropped={other_language}")
+                    });
                     for mut rule in compiled.into_iter().filter(targeted) {
                         if let Some(obj) = rule.as_object_mut() {
                             obj.insert("origin".to_string(), file.origin.as_str().into());
@@ -421,9 +439,11 @@ impl RuleRegistry {
                         });
                     }
                 }
-                Err(e) => self
-                    .errors
-                    .push((PathBuf::from(&file.source_name), RuleLoadError::Compile(e))),
+                Err(e) => {
+                    step.end_with(|| format!("refused error={:?}", e.to_string()));
+                    self.errors
+                        .push((PathBuf::from(&file.source_name), RuleLoadError::Compile(e)))
+                }
             }
         }
     }

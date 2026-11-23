@@ -50,11 +50,19 @@ fn line_comment_marker(language: &str) -> Option<&'static str> {
     }
 }
 
-fn block_comment_delims(language: &str) -> Option<(&'static str, &'static str)> {
+/// The block comment delimiters of a comment syntax, stripped in this
+/// order. `razor` is the syntax of a Razor view (`.cshtml`, `.razor`,
+/// ADR-0058): its server comments `@* … *@` are stripped first, then its
+/// HTML comments, exactly as HTML comments are (ticket #285). Deliberate
+/// deviation from the Audit, which strips only `<!-- -->` from a
+/// `.cshtml` and never reads a `.razor`: a Razor comment never reaches
+/// the page, so a `pattern-not` or `with` must not read what it holds.
+fn block_comment_delims(language: &str) -> &'static [(&'static str, &'static str)] {
     match language {
-        "javascript" | "java" | "csharp" | "php" => Some(("/*", "*/")),
-        "html" => Some(("<!--", "-->")),
-        _ => None,
+        "javascript" | "java" | "csharp" | "php" => &[("/*", "*/")],
+        "html" => &[("<!--", "-->")],
+        "razor" => &[("@*", "*@"), ("<!--", "-->")],
+        _ => &[],
     }
 }
 
@@ -66,12 +74,15 @@ pub fn strip_comments_from_lines(
     all_lines: &[(usize, String)],
     language: &str,
 ) -> Vec<(usize, String)> {
-    let stripped_texts: Vec<String> = if let Some((open, close)) = block_comment_delims(language) {
-        let full_text: String = all_lines.iter().map(|(_, t)| t.as_str()).collect();
-        let stripped_full = strip_block_comments(&full_text, open, close);
-        stripped_full.split('\n').map(|s| s.to_string()).collect()
-    } else {
+    let delims = block_comment_delims(language);
+    let stripped_texts: Vec<String> = if delims.is_empty() {
         all_lines.iter().map(|(_, t)| t.clone()).collect()
+    } else {
+        let mut full_text: String = all_lines.iter().map(|(_, t)| t.as_str()).collect();
+        for (open, close) in delims {
+            full_text = strip_block_comments(&full_text, open, close);
+        }
+        full_text.split('\n').map(|s| s.to_string()).collect()
     };
 
     let final_texts: Vec<String> = if let Some(marker) = line_comment_marker(language) {
@@ -444,6 +455,26 @@ mod tests {
         let clean = strip_comments_from_lines(&all_lines, "javascript");
         assert_eq!(clean.len(), 4);
         assert_eq!(clean[3].0, 4); // the last line's number stays correct
+    }
+
+    /// Razor views (ticket #285): `@* … *@` is stripped like an HTML
+    /// comment, on one line or across lines, line numbers kept; HTML
+    /// comments are still stripped; the `html` syntax leaves `@* *@` alone.
+    #[test]
+    fn test_strip_razor_comments_like_html_comments() {
+        let all_lines = lines(&[
+            "<p>@* @Html.Raw(a) *@ kept</p>",
+            "@*",
+            "  @Html.Raw(b)",
+            "*@",
+            "<!-- @Html.Raw(c) --> @Html.Raw(d)",
+        ]);
+        let clean = strip_comments_from_lines(&all_lines, "razor");
+        let texts: Vec<&str> = clean.iter().map(|(_, t)| t.as_str()).collect();
+        assert_eq!(texts, ["<p> kept</p>", "", "", "", " @Html.Raw(d)"]);
+        assert_eq!(clean[4].0, 5);
+        let html = strip_comments_from_lines(&all_lines, "html");
+        assert!(html[0].1.contains("@Html.Raw(a)"));
     }
 
     #[test]

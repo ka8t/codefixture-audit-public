@@ -624,6 +624,17 @@ fn emit_json_line(level: LogLevel, message: &str, duration_ms: Option<serde_json
 /// kept for ticket #92): plain text by default, a JSON event with
 /// `--log-format json`.
 fn log_line(level: LogLevel, msg: &str) {
+    // Ticket #282: every console line is in the debug log too, at its
+    // place among the steps.
+    codefixture_audit::debug_log!(
+        "console",
+        "{} {msg:?}",
+        match level {
+            LogLevel::Info => "info",
+            LogLevel::Warn => "warn",
+            LogLevel::Error => "error",
+        }
+    );
     if JSON_LOGS.load(std::sync::atomic::Ordering::Relaxed) {
         emit_json_line(level, msg, None);
     } else {
@@ -640,6 +651,9 @@ fn log_line(level: LogLevel, msg: &str) {
 fn emit_progress(quiet: bool, msg: &str) {
     if !quiet {
         log_line(LogLevel::Info, msg);
+    } else {
+        // Hidden from the console, not from the debug log (ticket #282).
+        codefixture_audit::debug_log!("console", "info_hidden_by_quiet {msg:?}");
     }
 }
 
@@ -1303,7 +1317,8 @@ impl Default for ScanExtraArgs {
 #[allow(clippy::large_enum_variant)]
 enum Command {
     /// Scans a project (Python, Java, JavaScript/TypeScript, PHP, C#,
-    /// HTML templates, YAML, Dockerfile), and its `pom.xml`, `web.config`
+    /// HTML and its templates, Razor views `.cshtml` and `.razor` among them,
+    /// YAML, Dockerfile), and its `pom.xml`, `web.config`
     /// and `package.json` for the rules written for them. Minified files (a `.min.` name,
     /// or JavaScript, TypeScript and HTML written on very long lines) are
     /// skipped and listed after the scan, and so are web pages saved from
@@ -1376,6 +1391,26 @@ enum Command {
         /// other programs.
         #[arg(long, value_name = "GB")]
         max_memory: Option<f64>,
+        // Ticket #282. The `///` text below is the `--help` line. `=` is
+        // required for the file (`--debug-log=scan.log`): with an optional
+        // value, `--debug-log <project>` would take the project for the
+        // file.
+        /// Writes a debug log of every step of the analysis (each folder,
+        /// file and rule, with times and memory), line by line, so that it
+        /// still tells where the analysis stood after a crash or a frozen
+        /// machine. Alone: `audit-reports/audit-datas/logs/scan-<date>.log.gz`,
+        /// a gzip file of several members, one per second (read it with
+        /// `gzip -dc`, from Git Bash on Windows, or 7-Zip);
+        /// `--debug-log=FILE` writes to FILE, compressed when its name ends
+        /// in `.gz`, plain text otherwise.
+        #[arg(
+            long,
+            value_name = "FILE",
+            num_args = 0..=1,
+            require_equals = true,
+            default_missing_value = ""
+        )]
+        debug_log: Option<String>,
     },
     /// Lists the builtin rules by category (mirrors `--list-rules`).
     ListRules {
@@ -1408,8 +1443,13 @@ impl Command {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     install_panic_hook(cli.command.lang());
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| dispatch(cli.command)))
-        .unwrap_or(ExitCode::from(4))
+    let code = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| dispatch(cli.command)))
+        .unwrap_or(ExitCode::from(4));
+    // Ticket #282: the debug log ends here, after a panic too; nothing
+    // when it is off.
+    codefixture_audit::debug_log!("end", "command_end exit={code:?}");
+    codefixture_audit::scan::debug_log::finish();
+    code
 }
 
 /// Replaces Rust's default panic output (raw message + `RUST_BACKTRACE`
@@ -1436,6 +1476,9 @@ fn install_panic_hook(lang: &str) {
     let incident = format!("{started:x}-{:x}", std::process::id());
     let log_path = std::env::temp_dir().join(format!("codefixture-audit-crash-{incident}.log"));
     std::panic::set_hook(Box::new(move |info| {
+        // Ticket #282: the panic in the debug log first, on the disk
+        // before anything else can fail.
+        codefixture_audit::scan::debug_log::record_panic(info);
         let thread = std::thread::current();
         let entry = format!(
             "codefixture-audit {}\nincident: {incident}\nthread: {}\n{info}\n\nbacktrace:\n{}\n\n",
@@ -1449,6 +1492,10 @@ fn install_panic_hook(lang: &str) {
             .open(&log_path)
             .and_then(|mut f| f.write_all(entry.as_bytes()))
             .is_ok();
+        if written {
+            codefixture_audit::debug_log!("panic", "crash_log path={:?}", log_path);
+            codefixture_audit::scan::debug_log::sync();
+        }
         if REPORTED.swap(true, Ordering::SeqCst) {
             return;
         }
@@ -1488,6 +1535,7 @@ fn dispatch(command: Command) -> ExitCode {
             custom_rules_dir,
             skip_memory_check,
             max_memory,
+            debug_log,
         } => run_scan_command(ScanArgs {
             path,
             rules,
@@ -1502,6 +1550,7 @@ fn dispatch(command: Command) -> ExitCode {
             custom_rules_dir,
             skip_memory_check,
             max_memory,
+            debug_log,
         }),
         Command::ListRules { lang, rules } => run_list_rules_command(&lang, rules),
     }
@@ -1743,6 +1792,57 @@ fn write_sbom(
     Ok(path)
 }
 
+/// The first lines of a debug log (ticket #282): the build, the command
+/// as typed, the system, its threads and memory, the project and its
+/// `audit.config.json`, and the settings of the analysis threads. The
+/// scan's own settings follow in `run_scan` (`scan_config` line).
+fn log_scan_header(project: &Path) {
+    use codefixture_audit::debug_log;
+    use codefixture_audit::scan::debug_log::mebibytes;
+    debug_log!(
+        "header",
+        "build version={:?} os={} arch={} family={}",
+        codefixture_audit::BUILD_VERSION,
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        std::env::consts::FAMILY
+    );
+    debug_log!(
+        "header",
+        "command args={:?} cwd={:?} pid={}",
+        std::env::args().collect::<Vec<_>>(),
+        std::env::current_dir().ok(),
+        std::process::id()
+    );
+    let system = codefixture_audit::scan::memory::system_memory();
+    debug_log!(
+        "header",
+        "machine cores={} rayon_threads={} RAYON_NUM_THREADS={:?} mem_total={} mem_available={}",
+        std::thread::available_parallelism().map_or(0, |n| n.get()),
+        rayon::current_num_threads(),
+        std::env::var("RAYON_NUM_THREADS").ok(),
+        mebibytes(system.map(|s| s.total)),
+        mebibytes(system.map(|s| s.available))
+    );
+    let config_path = project.join("audit.config.json");
+    match std::fs::read_to_string(&config_path) {
+        Ok(text) => debug_log!(
+            "header",
+            "project path={:?} audit_config={:?} content={:?}",
+            project,
+            config_path,
+            text
+        ),
+        Err(error) => debug_log!(
+            "header",
+            "project path={:?} audit_config={:?} unreadable={:?}",
+            project,
+            config_path,
+            error.to_string()
+        ),
+    }
+}
+
 /// Arguments of the `scan` subcommand, grouped so as not to blow up
 /// the number of parameters of `run_scan_command`.
 struct ScanArgs {
@@ -1759,6 +1859,8 @@ struct ScanArgs {
     custom_rules_dir: Option<PathBuf>,
     skip_memory_check: bool,
     max_memory: Option<f64>,
+    /// `--debug-log`: `Some("")` for the default file, `None` when off.
+    debug_log: Option<String>,
 }
 
 fn run_scan_command(args: ScanArgs) -> ExitCode {
@@ -1776,6 +1878,7 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
         custom_rules_dir,
         skip_memory_check,
         max_memory,
+        debug_log,
     } = args;
     // The shared binary has none of these options: their defaults.
     let extra = ScanExtraArgs::default();
@@ -1862,6 +1965,36 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
             }
         };
     }
+    // Ticket #282: the debug log starts right after the configuration
+    // wizard (which writes nothing else into the project), before the
+    // rules are read, so that it holds every step of the scan. A log asked
+    // for that cannot be written stops the scan: the user asked for it to
+    // find where a scan stops.
+    if let Some(requested) = &debug_log {
+        let log_path = if requested.is_empty() {
+            codefixture_audit::scan::debug_log::default_path(
+                &data_dir.clone().unwrap_or_else(|| path.join(DATAS_DIR)),
+            )
+        } else {
+            PathBuf::from(requested)
+        };
+        if let Err(error) = codefixture_audit::scan::debug_log::start(&log_path) {
+            emit_error(&format!(
+                "[codefixture-audit] {}",
+                codefixture_audit::i18n::t(&script_locale, "scan_debug_log_error")
+                    .replace("{path}", &log_path.display().to_string())
+                    .replace("{error}", &error.to_string())
+            ));
+            return ExitCode::from(2);
+        }
+        log_scan_header(&path);
+        emit_result(&format!(
+            "[codefixture-audit] {}",
+            codefixture_audit::i18n::t(&script_locale, "scan_debug_log")
+                .replace("{path}", &log_path.display().to_string())
+        ));
+    }
+
     // ADR-0040: `--rules <PATH>`, else `rules.cfpack` next to the
     // executable. A missing pack or a folder without any `.sca` file would
     // scan with no rule at all, so it stops here with the path searched.
@@ -2187,10 +2320,15 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
         && config.database.is_none()
         && metrics_output.is_none()
         && !(format == "html" && explicit_output);
+    let shortcut_step = codefixture_audit::scan::debug_log::span("unchanged", || {
+        format!("unchanged_check allowed={shortcut_allowed}")
+    });
     let inputs = shortcut_allowed.then(|| ScanInputs::read(&config));
-    if let Some(inputs) = &inputs
-        && let Some(last) = LastScan::find_unchanged(&config, inputs, format == "html")
-    {
+    let last_unchanged = inputs
+        .as_ref()
+        .and_then(|inputs| LastScan::find_unchanged(&config, inputs, format == "html"));
+    shortcut_step.end_with(|| format!("unchanged={}", last_unchanged.is_some()));
+    if let Some(last) = last_unchanged {
         return report_unchanged_scan(UnchangedScan {
             last: &last,
             config: &config,
@@ -2212,7 +2350,24 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
         ),
     );
     let t_scan_start = std::time::Instant::now();
+    let scan_step = codefixture_audit::scan::debug_log::span("scan", || "run_scan".to_string());
+    // Debug builds only: lets the CLI tests check that a panic during the
+    // scan reaches the debug log (ticket #282). Compiled out of release
+    // builds, like `CODEFIXTURE_AUDIT_DEBUG_PANIC`.
+    #[cfg(debug_assertions)]
+    if std::env::var_os("CODEFIXTURE_AUDIT_DEBUG_PANIC_IN_SCAN").is_some() {
+        panic!("CODEFIXTURE_AUDIT_DEBUG_PANIC_IN_SCAN set");
+    }
     let report = run_scan(&config);
+    scan_step.end_with(|| {
+        format!(
+            "files={} loc={} findings={} stopped_for_memory={}",
+            report.files_scanned,
+            report.total_loc,
+            report.findings.len(),
+            report.stopped_for_memory
+        )
+    });
 
     // Ticket #281: the memory the scan was expected to take, on every
     // scan; a scan that did not fit stopped before reading the files.
@@ -2322,6 +2477,8 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
 
     let mut sbom_written = None;
     if sbom {
+        let _sbom_step =
+            codefixture_audit::scan::debug_log::span("report", || "write_sbom".to_string());
         match write_sbom(&config, &project_name, &brand, &now) {
             Ok(sbom_path) => {
                 emit_progress(
@@ -2341,6 +2498,8 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
         }
     }
 
+    let render_step =
+        codefixture_audit::scan::debug_log::span("report", || format!("render format={format}"));
     let output_text = match format.as_str() {
         "sarif" => match sarif_text(&report.findings, &brand, &script_locale) {
             Ok(text) => text,
@@ -2417,10 +2576,15 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
         }
         _ => format_text_report(&report.findings),
     };
+    render_step.end_with(|| format!("bytes={}", output_text.len()));
 
+    let write_step = codefixture_audit::scan::debug_log::span("report", || {
+        format!("write_output path={:?}", output.as_deref())
+    });
     if let Err(code) = write_scan_output(output.as_deref(), &output_text, quiet, &script_locale) {
         return code;
     }
+    drop(write_step);
 
     // ADR-0050: the record that lets the next scan skip everything when
     // nothing changes, written once this scan's export and report exist,
@@ -2438,7 +2602,15 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
             report.total_loc,
         );
         record.sbom_path = sbom_written;
-        let _ = record.save(&config);
+        let saved = record.save(&config);
+        codefixture_audit::debug_log!(
+            "report",
+            "last_scan_record saved={}",
+            match &saved {
+                Ok(_) => "yes".to_string(),
+                Err(error) => format!("no error={error:?}"),
+            }
+        );
     }
 
     let exit_code = finish_scan(

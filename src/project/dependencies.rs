@@ -299,11 +299,14 @@ pub fn find_dependency_files(
         starts.extend(include_paths.iter().map(PathBuf::from));
     }
     let starts: Vec<&Path> = starts.iter().map(PathBuf::as_path).collect();
+    // Named apart from the scan's own walk in the debug log (ticket #282).
     let found: Vec<(PathBuf, DepFileType)> =
-        crate::scan::discovery::find_files(root_dir, &starts, &config)
-            .into_iter()
-            .filter_map(|path| manifest_type(&path).map(|t| (normalize(&path), t)))
-            .collect();
+        crate::scan::discovery::traced_as("discovery_manifests", || {
+            crate::scan::discovery::find_files(root_dir, &starts, &config)
+        })
+        .into_iter()
+        .filter_map(|path| manifest_type(&path).map(|t| (normalize(&path), t)))
+        .collect();
     // The walk lists a folder's files by name; within one folder the
     // manifests keep Audit's order (`requirements.txt` before
     // `pyproject.toml`…, the order of `MANIFEST_FILES`), so the SBOM and the

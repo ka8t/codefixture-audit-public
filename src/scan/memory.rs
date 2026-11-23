@@ -161,6 +161,91 @@ fn read_system_memory() -> Option<SystemMemory> {
     None
 }
 
+/// The memory this process takes now, in bytes, or `None` when this
+/// system does not tell (ticket #282, for the debug log):
+///
+/// - macOS: the physical footprint (`proc_pid_rusage`,
+///   `ri_phys_footprint`), what Activity Monitor shows and what the
+///   `peak memory footprint` of `/usr/bin/time -l` measures, the figure
+///   the memory model above was measured with;
+/// - Linux: the resident memory, `VmRSS` of `/proc/self/status`;
+/// - Windows: the working set (`K32GetProcessMemoryInfo`), the resident
+///   memory of Windows. Not built nor run on Windows by the maintainers
+///   yet: a failure reads as `None`, never as a figure.
+pub fn process_memory() -> Option<u64> {
+    read_process_memory()
+}
+
+#[cfg(target_os = "linux")]
+fn read_process_memory() -> Option<u64> {
+    parse_status_rss(&std::fs::read_to_string("/proc/self/status").ok()?)
+}
+
+/// `VmRSS` of a `/proc/<pid>/status` text, in bytes (the file gives kB).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn parse_status_rss(text: &str) -> Option<u64> {
+    text.lines()
+        .find_map(|line| line.strip_prefix("VmRSS:"))
+        .and_then(|rest| rest.split_whitespace().next()?.parse::<u64>().ok())
+        .map(|kb| kb * 1024)
+}
+
+#[cfg(target_os = "macos")]
+fn read_process_memory() -> Option<u64> {
+    // SAFETY: `rusage_info_v2` is plain data; zeroed is a valid value.
+    let mut info: libc::rusage_info_v2 = unsafe { std::mem::zeroed() };
+    // SAFETY: `info` is a `rusage_info_v2`, the structure the
+    // `RUSAGE_INFO_V2` flavor fills; the pid is this process's.
+    let status = unsafe {
+        libc::proc_pid_rusage(
+            std::process::id() as libc::c_int,
+            libc::RUSAGE_INFO_V2,
+            (&mut info as *mut libc::rusage_info_v2).cast(),
+        )
+    };
+    (status == 0 && info.ri_phys_footprint > 0).then_some(info.ri_phys_footprint)
+}
+
+#[cfg(target_os = "windows")]
+fn read_process_memory() -> Option<u64> {
+    /// `PROCESS_MEMORY_COUNTERS` of `psapi.h`.
+    #[repr(C)]
+    struct ProcessMemoryCounters {
+        cb: u32,
+        page_fault_count: u32,
+        peak_working_set_size: usize,
+        working_set_size: usize,
+        quota_peak_paged_pool_usage: usize,
+        quota_paged_pool_usage: usize,
+        quota_peak_non_paged_pool_usage: usize,
+        quota_non_paged_pool_usage: usize,
+        pagefile_usage: usize,
+        peak_pagefile_usage: usize,
+    }
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetCurrentProcess() -> *mut std::ffi::c_void;
+        fn K32GetProcessMemoryInfo(
+            process: *mut std::ffi::c_void,
+            counters: *mut ProcessMemoryCounters,
+            size: u32,
+        ) -> i32;
+    }
+    let size = std::mem::size_of::<ProcessMemoryCounters>() as u32;
+    // SAFETY: plain data; zeroed is a valid value, `cb` set to its size.
+    let mut counters: ProcessMemoryCounters = unsafe { std::mem::zeroed() };
+    counters.cb = size;
+    // SAFETY: the pseudo-handle of this process and a structure of the
+    // size given, as `K32GetProcessMemoryInfo` expects.
+    let ok = unsafe { K32GetProcessMemoryInfo(GetCurrentProcess(), &mut counters, size) };
+    (ok != 0).then_some(counters.working_set_size as u64)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+fn read_process_memory() -> Option<u64> {
+    None
+}
+
 /// Memory every scan takes whatever the project: the binary, the rules,
 /// the report. Measured from 0.05 to 0.1 GB on the smallest projects of
 /// the reference corpus (2026-11-23); rounded up.
@@ -425,6 +510,25 @@ mod tests {
             parse_meminfo("MemTotal: 16303428 kB\nMemFree: 1 kB\n"),
             None
         );
+    }
+
+    #[test]
+    fn test_status_gives_the_resident_memory() {
+        let text = "Name:\tcodefixture\nVmPeak:\t  900000 kB\nVmRSS:\t  524288 kB\nThreads:\t9\n";
+        assert_eq!(parse_status_rss(text), Some(524_288 * 1024));
+        assert_eq!(parse_status_rss("Name:\tx\n"), None);
+    }
+
+    /// This process tells its memory (Linux and macOS), at least the
+    /// block it has just touched. Other tests run in the same process: only
+    /// a lower bound holds.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn test_this_process_tells_its_memory() {
+        let block = vec![1u8; 64 * 1024 * 1024];
+        let now = process_memory().expect("Linux and macOS tell it");
+        assert!(block.iter().all(|b| *b == 1));
+        assert!(now >= 64 * 1024 * 1024, "{now}");
     }
 
     /// The machine running the tests tells its memory (Linux, macOS and

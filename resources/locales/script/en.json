@@ -491,5 +491,7 @@
     "truncated_header": "{path}: truncated header",
     "unreadable": "{path}: {error}",
     "unsupported_format": "{path}: format {format} not supported by this engine (expected {expected})"
-  }
+  },
+  "scan_debug_log": "Debug log (every step of the analysis, readable even if it stops): {path}",
+  "scan_debug_log_error": "Cannot write the debug log {path}: {error}"
 }

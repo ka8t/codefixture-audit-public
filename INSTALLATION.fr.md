@@ -405,6 +405,26 @@ Quand la mémoire est juste, l'analyse fait d'abord tourner moins de règles de 
 
 `--max-memory <Go>` fixe la mémoire la plus haute que l'analyse peut prendre, en dessous de celle de la machine : par exemple `--max-memory 8` sur un portable de 16 Go laisse de la place au navigateur. La mémoire disponible est lue sous Linux, macOS et Windows ; sur un système qui ne l'indique pas, `--max-memory` est la seule borne.
 
+### Si l'analyse plante ou fige la machine
+
+Relancez-la avec un journal de débogage :
+
+```bash
+./target/release/codefixture-audit scan /chemin/vers/votre/projet --debug-log
+```
+
+Le journal va dans `audit-reports/audit-datas/logs/scan-<date>.log.gz` du projet ; la première ligne de l'analyse le nomme. `--debug-log=scan.log` (avec le `=`) écrit à la place un fichier texte de votre choix.
+
+Le journal trace chaque étape, une ligne par étape : chaque dossier et fichier trouvé ou écarté, et pourquoi, chaque règle compilée, chaque fichier lu et analysé, chaque règle passée sur chaque fichier, le suivi de données de chaque règle (son graphe d'appels, ses résumés, chaque fichier), le rapport. Chaque ligne donne l'heure à la milliseconde, le temps écoulé depuis le début, le fil d'exécution, et la mémoire que prend le moteur. Toutes les 2 secondes, quoi qu'il arrive, une ligne `heartbeat` donne la mémoire et liste chaque étape en cours avec sa durée.
+
+Il est écrit au fil de l'analyse : une analyse qui plante, qui est tuée (par le système quand la mémoire manque, ou à la main), ou une machine qui se fige et qu'il faut redémarrer, laisse toutes les lignes écrites jusqu'à ses dernières secondes.
+
+Le fichier est un gzip fait de plusieurs membres, un fermé chaque seconde, que tout lecteur gzip lit l'un après l'autre. Pour le lire sous macOS et Linux : `gzip -dc scan-<date>.log.gz | less`. Sous Windows : la même commande dans Git Bash (installé avec Git for Windows), ou ouvrez-le avec 7-Zip. Après une analyse tuée, `gzip` finit par `unexpected end of file` : c'est attendu, toutes les lignes d'avant sont là, à la dernière seconde près au plus. Si même la dernière seconde compte, lancez avec `--debug-log=scan.log` : le texte brut garde chaque ligne jusqu'à la toute fin. Les dernières lignes `heartbeat` disent ce que faisait l'analyse et combien de mémoire elle prenait.
+
+Joignez le journal à votre retour, avec la commande et ce qu'a affiché le terminal. Il nomme les dossiers, fichiers et règles de votre projet et contient votre `audit.config.json`, jamais votre code.
+
+Le journal coûte un peu de temps : sur OWASP DVWA (187 fichiers), environ 5 % de temps de processeur en plus (2,77 s contre 2,64 s, médiane de 10 analyses), le même pic de mémoire (environ 120 Mo), et un journal de 19 853 lignes, 3,3 Mo de texte, 0,36 Mo compressé. Un gros projet donne un gros journal : sur la suite Juliet Java (46 793 fichiers, 22 règles de suivi de données), 7,2 millions de lignes, 1,6 Go de texte, 129 Mo compressé, pour environ 6 % de temps de processeur en plus (796 s contre 750 s) et le même pic de mémoire (10 Go). Sans `--debug-log`, rien n'est écrit et l'analyse prend le même temps qu'avant.
+
 ### Déplacer le moteur
 
 Le moteur et `rules.cfpack` sont tout ce dont une analyse a besoin : copiez-les ensemble dans un autre dossier et lancez le moteur depuis n'importe où. Sans le pack à côté de lui, le moteur s'arrête et nomme le fichier qu'il a cherché.
@@ -423,6 +443,7 @@ flowchart TD
     P -- "un langage jamais vérifié" --> A6["Ajoutez-le à languages<br/>dans audit.config.json"]
     P -- "git pull refuse" --> A7["Voir la fin de l'étape 11"]
     P -- "Arrêt avant la lecture des fichiers" --> A8["Voir Mémoire d'un gros projet"]
+    P -- "l'analyse plante, se bloque<br/>ou fige la machine" --> A9["Relancez avec --debug-log,<br/>joignez le journal"]
 ```
 
 | Message ou symptôme | Que faire |
@@ -436,5 +457,6 @@ flowchart TD
 | un langage de votre projet n'est jamais vérifié | ajoutez-le à `languages` dans `audit.config.json` (étape 7) |
 | `git pull` refuse | voir la fin de l'étape 11 |
 | `Arrêt avant la lecture des fichiers` | le projet demande plus de mémoire que la machine n'en a de disponible : voir [Mémoire d'un gros projet](#mémoire-dun-gros-projet) |
+| l'analyse plante, s'arrête sans rien dire, se bloque ou fige la machine | relancez-la avec `--debug-log` et joignez le journal : voir [Si l'analyse plante ou fige la machine](#si-lanalyse-plante-ou-fige-la-machine) |
 
 Les versions antérieures à novembre 2026 écrivaient leurs rapports dans `docs/audit-reports/`. La première analyse après la mise à jour compare encore avec les derniers résultats trouvés là, puis n'écrit plus que dans `audit-reports/` ; vous pouvez ensuite supprimer l'ancien dossier.

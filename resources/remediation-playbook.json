@@ -3,7 +3,7 @@
   "tool": "codefixture-audit",
   "tool_version": "1.4.0",
   "description": "Remediation playbook — structured steps for each detection rule. Readable by humans and machines.",
-  "total_rules": 560,
+  "total_rules": 561,
   "rules": {
     "autoplay_media": {
       "title": "A video or a sound starts playing by itself",
@@ -7914,6 +7914,37 @@
         {
           "order": 2,
           "action": "Show the value with @Model.UserContent, which Razor protects for you, and keep Html.Raw() only for HTML written by you or cleaned by a library such as HtmlSanitizer.",
+          "type": "code_change"
+        },
+        {
+          "order": 3,
+          "action": "Run the audit again to verify the finding is resolved",
+          "type": "verification"
+        }
+      ],
+      "benefit": "User data shows as text and can no longer run as a script.",
+      "references": {
+        "iso27001": [
+          "A.8.28",
+          "A.8.26"
+        ]
+      }
+    },
+    "blazor_markup_string": {
+      "title": "MarkupString shows HTML without protection: a script can be injected",
+      "severity": "HIGH",
+      "category": "security",
+      "language": "html",
+      "risk": "In this Blazor component, a MarkupString shows a text as HTML, as is, without the protection Blazor gives to @Value. If the text contains data from a user, they can insert a script that runs in the browsers of other visitors and steals their session.",
+      "steps": [
+        {
+          "order": 1,
+          "action": "Locate the vulnerable code pattern in the file",
+          "type": "diagnostic"
+        },
+        {
+          "order": 2,
+          "action": "Show the value with @Comment.Text, which Blazor protects for you, and keep MarkupString only for HTML written by you or cleaned by a library such as HtmlSanitizer.",
           "type": "code_change"
         },
         {

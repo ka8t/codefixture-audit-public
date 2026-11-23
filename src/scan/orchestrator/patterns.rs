@@ -60,10 +60,19 @@ pub(super) fn run_pattern_pass(
     // Ticket #204: why the previous cache could not serve, for the line.
     let miss = loaded.as_ref().and_then(|r| r.as_ref().err().cloned());
     let previous = loaded.and_then(Result::ok);
+    crate::debug_log!(
+        "phase_b",
+        "pattern_cache path={cache_path:?} previous_files={} miss={miss:?}",
+        previous.as_ref().map_or(0, |c| c.files.len())
+    );
 
     // Every rule compiled once for the whole pass (ticket #248), then run
     // on each file of its language.
+    let prepare_step = crate::scan::debug_log::span("phase_b", || {
+        format!("prepare_rules rules={}", rule_jsons.len())
+    });
     let prepared: Vec<PreparedRule> = rule_jsons.par_iter().map(prepare_rule).collect();
+    drop(prepare_step);
     let runs: Vec<FileRun> = parsed_files
         .par_iter()
         .map(|pf| run_file(pf, rule_jsons, &prepared, &governance, previous.as_ref()))
@@ -87,7 +96,11 @@ pub(super) fn run_pattern_pass(
         // Nothing redone: the cache on disk is already this one. A cache
         // that cannot be written only costs the next scan its speed.
         if previous.is_none() || redone > 0 {
-            let _ = next.save(path);
+            let save_step = crate::scan::debug_log::span("phase_b", || {
+                format!("pattern_cache_save path={path:?}")
+            });
+            let saved = next.save(path);
+            save_step.end_with(|| format!("redone={redone} result={saved:?}"));
         }
         context.cache_stats.push(CacheStat {
             language: CACHE_STAT_NAME.to_string(),
@@ -98,6 +111,11 @@ pub(super) fn run_pattern_pass(
             full: miss,
         });
     }
+    crate::debug_log!(
+        "phase_b",
+        "pattern_findings reportable={}",
+        reportable.iter().map(Vec::len).sum::<usize>()
+    );
     for findings in reportable {
         // A pattern finding is never merged with another rule's: it is the
         // rule's own finding too (ticket #242).
@@ -151,22 +169,26 @@ fn run_file(
     // is not valid UTF-8, those of the text with its invalid bytes
     // replaced, not those on disk. Two versions of such a file that only
     // differ by invalid bytes give the same findings, and share a hash.
+    let step = crate::scan::debug_log::span("phase_b", || format!("file path={:?}", pf.rel_path));
     let hash = sha256_hex(pf.bytes());
     let governance = governance_fingerprint(&pf.filepath, governance);
     if let Some(prior) = previous.and_then(|c| c.files.get(&pf.rel_path))
         && prior.hash == hash
         && prior.governance == governance
     {
+        step.end_with(|| format!("cache=reused findings={}", prior.findings.len()));
         return FileRun {
             state: prior.clone(),
             redone: false,
         };
     }
+    let findings = rules_on_file(pf, rule_jsons, prepared);
+    step.end_with(|| format!("cache=redone findings={}", findings.len()));
     FileRun {
         state: PatternFileState {
             hash,
             governance,
-            findings: rules_on_file(pf, rule_jsons, prepared),
+            findings,
         },
         redone: true,
     }
@@ -179,14 +201,15 @@ fn run_file(
 /// ADR-0047) is read only by the rules that name a path with
 /// `path_contains`: a Java rule written for `.java` code has no business
 /// on a `pom.xml`. Its comments are stripped with its own syntax (XML or
-/// none), not with the rule language's.
+/// none), not with the rule language's. A Razor view also loses its
+/// `@* … *@` comments (ticket #285).
 fn rules_on_file(
     pf: &ParsedFile,
     rule_jsons: &[serde_json::Value],
     prepared: &[PreparedRule],
 ) -> Vec<(usize, Finding)> {
     let mut findings = Vec::new();
-    let syntax = pf.language.comment_syntax();
+    let syntax = pf.language.comment_syntax_for(&pf.filepath);
     // The numbered lines the pattern rules read, built when the first
     // rule of the file's language reaches it and dropped with this
     // call: the scan keeps one copy of each text (ticket #241). With them,
@@ -208,10 +231,25 @@ fn rules_on_file(
                 syntax,
             )
         });
+        // Ticket #282: each rule on each file, with its time and matches.
+        let started = crate::scan::debug_log::enabled().then(std::time::Instant::now);
         let DispatchOutcome::Findings(found) = run_prepared(&prepared[index], pf.location(), text)
         else {
             continue; // Taint/Ast/Hook: handled elsewhere (phase C) or out of scope.
         };
+        if let Some(started) = started {
+            crate::debug_log!(
+                "phase_b",
+                "rule_on_file path={:?} rule={:?} matches={} ms={}",
+                pf.rel_path,
+                rule_json
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("<no id>"),
+                found.len(),
+                crate::scan::debug_log::ms_since(started)
+            );
+        }
         findings.extend(found.into_iter().map(|f| (index, f)));
     }
     findings

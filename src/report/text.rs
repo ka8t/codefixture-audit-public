@@ -179,24 +179,33 @@ pub fn is_dependency(filepath: &str) -> bool {
         .any(|p| lower.contains(p))
 }
 
-/// Language label inferred from the file extension — port of
-/// `_lang_label`.
+/// Language label of a reported file — port of `_lang_label`, which maps
+/// a fixed list of extensions. Deliberate deviation (ticket #285): the
+/// label follows the language the scan itself gives the file
+/// (`SourceLanguage::from_path`, case ignored), so every file the scan
+/// reads has one: the HTML templates (`.vue`, `.jsp`, the Razor views
+/// `.cshtml` and `.razor`…) are "HTML" like `.html`, `.inc` is "PHP",
+/// `Dockerfile.dev` is "Dockerfile", and the configuration files
+/// (ADR-0047) are named by their format, "XML" or "JSON". The Python list
+/// only knew `.html`/`.htm` among the templates. `.pyw`, which the scan
+/// does not read, keeps its "Python" label from that list.
 pub fn lang_label(file: &str) -> &'static str {
-    let basename = file.rsplit('/').next().unwrap_or(file);
-    if basename.eq_ignore_ascii_case("dockerfile") {
-        return "Dockerfile";
-    }
-    let ext = basename.rsplit_once('.').map(|(_, e)| e.to_lowercase());
-    match ext.as_deref() {
-        Some("py") | Some("pyw") => "Python",
-        Some("js") | Some("jsx") | Some("mjs") | Some("cjs") => "JavaScript",
-        Some("ts") | Some("tsx") => "TypeScript",
-        Some("java") => "Java",
-        Some("cs") => "C#",
-        Some("php") => "PHP",
-        Some("html") | Some("htm") => "HTML",
-        Some("yml") | Some("yaml") => "YAML",
-        _ => "",
+    use crate::scan::orchestrator::SourceLanguage;
+    let basename = file.rsplit('/').next().unwrap_or(file).to_lowercase();
+    match SourceLanguage::from_path(std::path::Path::new(&basename)) {
+        Some(SourceLanguage::Python) => "Python",
+        Some(SourceLanguage::JavaScript) => "JavaScript",
+        Some(SourceLanguage::TypeScript) => "TypeScript",
+        Some(SourceLanguage::Java) => "Java",
+        Some(SourceLanguage::CSharp) => "C#",
+        Some(SourceLanguage::Php) => "PHP",
+        Some(SourceLanguage::Html) => "HTML",
+        Some(SourceLanguage::Yaml) => "YAML",
+        Some(SourceLanguage::Dockerfile) => "Dockerfile",
+        Some(SourceLanguage::MavenPom | SourceLanguage::WebConfig) => "XML",
+        Some(SourceLanguage::PackageJson) => "JSON",
+        None if basename.ends_with(".pyw") => "Python",
+        None => "",
     }
 }
 
@@ -526,6 +535,29 @@ mod tests {
         assert_eq!(lang_label("app.tsx"), "TypeScript");
         assert_eq!(lang_label("Dockerfile"), "Dockerfile");
         assert_eq!(lang_label("path/to/Dockerfile"), "Dockerfile");
+    }
+
+    /// Ticket #285: HTML templates, Razor views among them, and C# have a
+    /// label, like every file the scan reads.
+    #[test]
+    fn test_lang_label_html_templates_and_csharp() {
+        for file in [
+            "index.html",
+            "page.htm",
+            "Views/Home/Index.cshtml",
+            "Shared/NavMenu.razor",
+            "App.vue",
+            "page.jsp",
+            "INDEX.HTML",
+        ] {
+            assert_eq!(lang_label(file), "HTML", "{file}");
+        }
+        assert_eq!(lang_label("Controllers/HomeController.cs"), "C#");
+        assert_eq!(lang_label("lib/db.inc"), "PHP");
+        assert_eq!(lang_label("Dockerfile.dev"), "Dockerfile");
+        assert_eq!(lang_label("Web.config"), "XML");
+        assert_eq!(lang_label("package.json"), "JSON");
+        assert_eq!(lang_label("tool.pyw"), "Python");
     }
 
     #[test]

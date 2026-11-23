@@ -116,6 +116,11 @@ pub(super) trait TaintLanguage<'a>: Sync + Sized {
         specs: &mut RuleSpecs,
         resolved: &ResolvedSummaries,
     ) -> TaintFindings;
+
+    /// The size of what [`Self::build`] linked, for the debug log (ticket
+    /// #282): functions and call edges of the call graph, `None` for a
+    /// language without one (C#).
+    fn graph_size(&self) -> Option<(usize, usize)>;
 }
 
 /// Most rules a taint pass runs at the same time (ticket #247), fewer when
@@ -194,6 +199,15 @@ pub(super) fn language_has_taint_rule(
     })
 }
 
+/// Functions and call edges of a call graph (`TaintLanguage::graph_size`):
+/// its nodes, and the callees of every function summed.
+pub(super) fn graph_size<N>(
+    nodes: &BTreeMap<NodeKey, N>,
+    edges: &BTreeMap<NodeKey, BTreeMap<String, NodeKey>>,
+) -> (usize, usize) {
+    (nodes.len(), edges.values().map(BTreeMap::len).sum())
+}
+
 /// The parsed files as a call graph takes them (path, tree, bytes).
 pub(super) fn call_graph_inputs<'a>(files: &[&'a ParsedFile]) -> Vec<FileInput<'a>> {
     files
@@ -255,15 +269,42 @@ pub(super) fn run_taint_pass<'a, L: TaintLanguage<'a>>(
     // call graph and prepare every file anyway (1.9 s on 2,944 Java files
     // scanned with one pattern rule).
     if !language_has_taint_rule(L::RULE_LANGUAGE, rule_jsons) {
+        crate::debug_log!(
+            "phase_c",
+            "no_taint_rule language={} files={}",
+            L::NAME,
+            files.len()
+        );
         let (key, french_fallback) = L::PHASE_LABEL;
         return (
             phase_label(context.config, key, french_fallback),
             started.elapsed(),
         );
     }
+    let build_step = crate::scan::debug_log::span("phase_c", || {
+        format!(
+            "call_graph_build language={} files={} rules={}",
+            L::NAME,
+            files.len(),
+            rules.len()
+        )
+    });
     let language = L::build(&files);
+    build_step.end_with(|| match language.graph_size() {
+        Some((functions, edges)) => format!("functions={functions} call_edges={edges}"),
+        None => "no_call_graph".to_string(),
+    });
     let per_rule = cached_rule_runs(&language, &files, &rules, context);
+    let merge_step =
+        crate::scan::debug_log::span("phase_c", || format!("merge_findings language={}", L::NAME));
+    let before = context.findings.len();
     merge_taint_findings(&files, &rules, per_rule, context, seen);
+    merge_step.end_with(|| {
+        format!(
+            "report_findings_added={}",
+            context.findings.len().saturating_sub(before)
+        )
+    });
     let (key, french_fallback) = L::PHASE_LABEL;
     (
         phase_label(context.config, key, french_fallback),
@@ -322,6 +363,14 @@ fn cached_rule_runs<'a, L: TaintLanguage<'a>>(
         || file_states.keys().cloned().collect(),
         |cache| cache.dirty_files(&file_states),
     );
+    crate::debug_log!(
+        "phase_c",
+        "taint_cache language={} path={cache_path:?} caching={caching} previous={} miss={miss:?} \
+         dirty_files={}",
+        L::NAME,
+        previous.is_some(),
+        dirty.len()
+    );
 
     // Per rule: its per-file findings, id, cache entry (only with a
     // cache) and analyses run.
@@ -331,11 +380,20 @@ fn cached_rule_runs<'a, L: TaintLanguage<'a>>(
     // before the runs so that the raw regexes of all the rules are
     // numbered in one table, whose answers each line computes once for
     // every rule (ticket #240).
+    let specs_step = crate::scan::debug_log::span("phase_c", || {
+        format!("rule_specs language={} rules={}", L::NAME, rule_jsons.len())
+    });
     let mut all_specs: Vec<Option<RuleSpecs>> = rule_jsons
         .par_iter()
         .map(|rule_json| rule_json_to_specs(rule_json, &config.lang))
         .collect();
     ExprTable::attach(all_specs.iter_mut().flatten());
+    specs_step.end_with(|| {
+        format!(
+            "with_source_and_sink={}",
+            all_specs.iter().filter(|s| s.is_some()).count()
+        )
+    });
     // Computed ahead for the files every rule will analyse: all of them
     // without a previous run, else the changed ones. A clean file that a
     // rule analyses again (it reads a changed summary) computes its lines
@@ -347,6 +405,8 @@ fn cached_rule_runs<'a, L: TaintLanguage<'a>>(
         .flatten()
         .find_map(|specs| specs.exprs.as_ref())
     {
+        let _exprs_step =
+            crate::scan::debug_log::span("phase_c", || format!("line_facts language={}", L::NAME));
         files
             .par_iter()
             .filter(|pf| previous.is_none() || dirty.contains(&pf.rel_path))
@@ -354,7 +414,21 @@ fn cached_rule_runs<'a, L: TaintLanguage<'a>>(
     }
     let run_rule =
         |rule_json: &serde_json::Value, base_specs: Option<RuleSpecs>| -> Option<RuleRun> {
-            let base_specs = base_specs?;
+            let Some(base_specs) = base_specs else {
+                crate::debug_log!(
+                    "phase_c",
+                    "rule_not_taint language={} rule={:?} reason=no_source_or_sink",
+                    L::NAME,
+                    rule_json
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("<no id>")
+                );
+                return None;
+            };
+            let rule_step = crate::scan::debug_log::span("phase_c", || {
+                format!("rule language={} rule={:?}", L::NAME, base_specs.rule_id)
+            });
             let rule_hash = sha256_hex(
                 serde_json::to_string(rule_json)
                     .unwrap_or_default()
@@ -369,7 +443,23 @@ fn cached_rule_runs<'a, L: TaintLanguage<'a>>(
                 previous,
                 dirty_files: &dirty,
             });
+            let resolve_step = crate::scan::debug_log::span("phase_c", || {
+                format!(
+                    "resolve_summaries language={} rule={:?} reuse={}",
+                    L::NAME,
+                    base_specs.rule_id,
+                    reuse.is_some()
+                )
+            });
             let resolved = language.resolve(&base_specs, reuse.as_ref());
+            resolve_step.end_with(|| {
+                format!(
+                    "summaries={} recomputed={} changed={}",
+                    resolved.all.len(),
+                    resolved.recomputed,
+                    resolved.changed.len()
+                )
+            });
             // The files to redo although clean: only asked when a previous
             // run's findings can be reused.
             let readers = prior.map(|_| language.readers(&resolved.changed));
@@ -396,9 +486,21 @@ fn cached_rule_runs<'a, L: TaintLanguage<'a>>(
                 .with_min_len(16)
                 .map_init(
                     || base_specs.clone(),
-                    |node_specs, pf| match reused(pf) {
-                        Some(findings) => findings.clone(),
-                        None => language.analyse_file(pf, node_specs, &resolved),
+                    |node_specs, pf| {
+                        let step = crate::scan::debug_log::span("phase_c", || {
+                            format!(
+                                "file language={} rule={:?} path={:?}",
+                                L::NAME,
+                                base_specs.rule_id,
+                                pf.rel_path
+                            )
+                        });
+                        let (findings, cache) = match reused(pf) {
+                            Some(findings) => (findings.clone(), "reused"),
+                            None => (language.analyse_file(pf, node_specs, &resolved), "analysed"),
+                        };
+                        step.end_with(|| format!("cache={cache} findings={}", findings.len()));
+                        findings
                     },
                 )
                 .collect();
@@ -414,6 +516,13 @@ fn cached_rule_runs<'a, L: TaintLanguage<'a>>(
                     .zip(&per_file)
                     .map(|(pf, f)| (pf.rel_path.clone(), f.clone()))
                     .collect(),
+            });
+            rule_step.end_with(|| {
+                format!(
+                    "files={} analysed={analysed} findings={}",
+                    files.len(),
+                    per_file.iter().map(Vec::len).sum::<usize>()
+                )
             });
             Some((per_file, base_specs.rule_id.clone(), state, analysed))
         };
@@ -440,7 +549,11 @@ fn cached_rule_runs<'a, L: TaintLanguage<'a>>(
         // be written only costs the next scan its speed: never an error of
         // this one.
         if previous.is_none() || !dirty.is_empty() || analysed > 0 {
-            let _ = cache.save(path);
+            let save_step = crate::scan::debug_log::span("phase_c", || {
+                format!("taint_cache_save language={} path={path:?}", L::NAME)
+            });
+            let saved = cache.save(path);
+            save_step.end_with(|| format!("result={saved:?}"));
         }
         context.cache_stats.push(CacheStat {
             language: L::NAME.to_string(),

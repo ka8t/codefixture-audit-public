@@ -90,7 +90,12 @@ impl ScanInputs {
     /// Discovers and hashes the inputs of a scan of `config`. The files are
     /// hashed in parallel; a file that cannot be read is recorded as such.
     pub fn read(config: &ScanConfig) -> Self {
-        let (discovered, _) = discover_files(config);
+        // The scan walks the project again if it runs: this walk has its
+        // own phase in the debug log (ticket #282).
+        let (discovered, _) =
+            crate::scan::discovery::traced_as("discovery_unchanged_check", || {
+                discover_files(config)
+            });
         let relative = |path: &Path| {
             path.strip_prefix(&config.root)
                 .unwrap_or(path)

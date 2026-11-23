@@ -405,6 +405,26 @@ When memory is short, the analysis first runs fewer data flow rules at a time: i
 
 `--max-memory <GB>` sets the most memory the analysis may take, below what the machine has: for example `--max-memory 8` on a 16 GB laptop leaves room for a browser. The available memory is read on Linux, macOS and Windows; on a system that does not tell it, `--max-memory` is the only bound.
 
+### If the analysis crashes or freezes the machine
+
+Run it again with a debug log:
+
+```bash
+./target/release/codefixture-audit scan /path/to/your/project --debug-log
+```
+
+The log goes to `audit-reports/audit-datas/logs/scan-<date>.log.gz` in the project; the first line of the analysis names it. `--debug-log=scan.log` (with the `=`) writes a plain text file of your choice instead.
+
+The log traces every step, one line each: every folder and file found or skipped and why, every rule compiled, every file read and parsed, every rule run on every file, the data flow analysis of every rule (its call graph, its summaries, each file), the report. Each line gives the time to the millisecond, the time since the start, the thread, and the memory the engine takes. Every 2 seconds, whatever happens, a `heartbeat` line gives the memory and lists every step in progress with how long it has run.
+
+It is written as the analysis goes: an analysis that crashes, that is killed (by the system when memory runs out, or by hand), or a machine that freezes and has to be restarted, leaves every line written up to its last seconds.
+
+The file is gzip made of several members, one closed every second, which every gzip reader reads in turn. To read it on macOS and Linux: `gzip -dc scan-<date>.log.gz | less`. On Windows: the same command in Git Bash (installed with Git for Windows), or open it with 7-Zip. After an analysis that was killed, `gzip` ends with `unexpected end of file`: that is expected, every line before it is there, up to the last second at most. If even the last second matters, run with `--debug-log=scan.log`: plain text keeps every line up to the very end. The last `heartbeat` lines say what the analysis was doing and how much memory it took.
+
+Attach the log to your feedback, with the command and what the terminal printed. It names your project's folders, files and rules and holds your `audit.config.json`, never your code.
+
+The log costs a little time: on OWASP DVWA (187 files), about 5% more processor time (2.77 s against 2.64 s, median of 10 runs), the same peak memory (about 120 MB), and a log of 19,853 lines, 3.3 MB of text, 0.36 MB compressed. A large project gives a large log: on the Juliet Java suite (46,793 files, 22 data flow rules), 7.2 million lines, 1.6 GB of text, 129 MB compressed, for about 6% more processor time (796 s against 750 s) and the same peak memory (10 GB). Without `--debug-log`, nothing is written and the analysis takes the same time as before.
+
 ### Moving the engine
 
 The engine and `rules.cfpack` are all an analysis needs: copy them together to another folder and run the engine from anywhere. Without the pack beside it, the engine stops and names the file it looked for.
@@ -423,6 +443,7 @@ flowchart TD
     P -- "a language never checked" --> A6["Add it to languages<br/>in audit.config.json"]
     P -- "git pull refuses" --> A7["See the end of step 11"]
     P -- "Stopped before reading the files" --> A8["See Memory of a large project"]
+    P -- "the analysis crashes, hangs<br/>or freezes the machine" --> A9["Run it again with --debug-log,<br/>attach the log"]
 ```
 
 | Message or symptom | What to do |
@@ -436,5 +457,6 @@ flowchart TD
 | a language of your project is never checked | add it to `languages` in `audit.config.json` (step 7) |
 | `git pull` refuses | see the end of step 11 |
 | `Stopped before reading the files` | the project needs more memory than the machine has available: see [Memory of a large project](#memory-of-a-large-project) |
+| the analysis crashes, stops without a word, hangs or freezes the machine | run it again with `--debug-log` and attach the log: see [If the analysis crashes or freezes the machine](#if-the-analysis-crashes-or-freezes-the-machine) |
 
 Versions before November 2026 wrote their reports to `docs/audit-reports/`. The first analysis after the upgrade still compares with the last results found there, then writes only to `audit-reports/`; you can delete the old folder afterwards.

@@ -4,6 +4,7 @@
 
 pub mod counters;
 pub mod dataflow;
+pub mod debug_log;
 pub mod discovery;
 pub mod engine;
 pub mod memory;

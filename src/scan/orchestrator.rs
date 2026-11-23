@@ -146,7 +146,7 @@ impl SourceLanguage {
     /// Value expected in `rule_json["language"]` for this language. A
     /// configuration file takes the tag of the language whose rules
     /// target it.
-    fn rule_tag(self) -> &'static str {
+    pub(crate) fn rule_tag(self) -> &'static str {
         match self {
             SourceLanguage::Python => "python",
             SourceLanguage::Java | SourceLanguage::MavenPom => "java",
@@ -187,6 +187,23 @@ impl SourceLanguage {
         }
     }
 
+    /// [`SourceLanguage::comment_syntax`] for the file at `path`: a Razor
+    /// view (`.cshtml`, `.razor`, ADR-0058) is an HTML template whose
+    /// `@* … *@` server comments are stripped with its HTML comments
+    /// (`razor` syntax, ticket #285); every other file keeps the syntax of
+    /// its language.
+    pub(crate) fn comment_syntax_for(self, path: &Path) -> &'static str {
+        let is_razor_view = matches!(
+            path.extension().and_then(|e| e.to_str()),
+            Some("cshtml" | "razor")
+        );
+        if self == SourceLanguage::Html && is_razor_view {
+            "razor"
+        } else {
+            self.comment_syntax()
+        }
+    }
+
     /// Detects the language by EXTENSION alone. `None` for a format
     /// without a standard extension (`Dockerfile`) — use
     /// [`SourceLanguage::from_path`] for a real file on disk,
@@ -217,7 +234,15 @@ impl SourceLanguage {
     /// and the HTML rules are line-oriented regexes, so a partial parse of
     /// template syntax never hides a match. Deliberate superset: `cjs`
     /// (CommonJS, absent from Python's list) is kept from the initial port.
-    pub(crate) const EXTENSIONS: [(&'static str, SourceLanguage); 33] = [
+    ///
+    /// Second deliberate superset (ticket #285, ADR-0058): `razor`, the
+    /// Blazor component, absent from Python's list, joins `cshtml` among
+    /// the HTML templates. A Razor view mixes HTML and C#: the C# grammar
+    /// cannot parse it, so it never goes to the C# taint pass nor to the
+    /// C# pattern rules (`file_too_long`, `cs_magic_number`… would misfire
+    /// on markup); the rules written for views are `html` rules
+    /// (`html/security/razor_html_raw.sca`).
+    pub(crate) const EXTENSIONS: [(&'static str, SourceLanguage); 34] = [
         ("py", SourceLanguage::Python),
         ("java", SourceLanguage::Java),
         ("js", SourceLanguage::JavaScript),
@@ -251,6 +276,7 @@ impl SourceLanguage {
         ("asp", SourceLanguage::Html),
         ("aspx", SourceLanguage::Html),
         ("cshtml", SourceLanguage::Html),
+        ("razor", SourceLanguage::Html),
         ("yml", SourceLanguage::Yaml),
         ("yaml", SourceLanguage::Yaml),
     ];
@@ -1598,34 +1624,74 @@ impl FileOutcome {
 /// scan does. The tree is kept when the file's language is one of
 /// `tree_languages` (ticket #241); otherwise it is dropped once the lines
 /// of code are counted.
+///
+/// The debug log (ticket #282) gets the start and end of each file, with
+/// its outcome: lines of code, bytes, size of its tree and whether the
+/// tree is kept, or why the file was skipped or failed.
 fn parse_file(root: &Path, filepath: &Path, tree_languages: &[SourceLanguage]) -> FileOutcome {
-    match read_and_parse(root, filepath, tree_languages) {
-        Some(outcome) => outcome,
-        None => FileOutcome::Failed,
-    }
+    let step = crate::scan::debug_log::span("phase_a", || {
+        format!("file path={:?}", project_relative_path(root, filepath))
+    });
+    let outcome = match read_and_parse(root, filepath, tree_languages) {
+        Ok(outcome) => outcome,
+        Err(reason) => {
+            crate::debug_log!(
+                "phase_a",
+                "file_failed path={:?} reason={reason:?}",
+                project_relative_path(root, filepath)
+            );
+            FileOutcome::Failed
+        }
+    };
+    step.end_with(|| match &outcome {
+        FileOutcome::Parsed(loc, pf) => format!(
+            "outcome=parsed language={} loc={loc} bytes={} tree_kept={}",
+            pf.language.rule_tag(),
+            pf.source.text().len(),
+            pf.tree.is_some()
+        ),
+        FileOutcome::Minified(_) => "outcome=skipped reason=minified".to_string(),
+        FileOutcome::SavedPage(_) => "outcome=skipped reason=saved_page".to_string(),
+        FileOutcome::Failed => "outcome=failed".to_string(),
+    });
+    outcome
 }
 
-/// Body of [`parse_file`]; `None` when the file cannot be read or parsed.
+/// Body of [`parse_file`]; an error, the reason, when the file cannot be
+/// read or parsed (the reason only goes to the debug log: such a file is
+/// left out of the scan, as before).
 fn read_and_parse(
     root: &Path,
     filepath: &Path,
     tree_languages: &[SourceLanguage],
-) -> Option<FileOutcome> {
-    let language = SourceLanguage::from_path(filepath)?; // unknown extension/name: should not happen (discovery already filtered).
+) -> Result<FileOutcome, String> {
+    // Unknown extension/name: should not happen (discovery already filtered).
+    let language = SourceLanguage::from_path(filepath)
+        .ok_or_else(|| "no language for this name".to_string())?;
     // Valid UTF-8 (nearly every file) becomes the text without a copy;
     // otherwise the invalid bytes are replaced, as Python's
     // `errors="replace"` does.
-    let source_text = String::from_utf8(std::fs::read(filepath).ok()?)
+    let read_started = crate::scan::debug_log::enabled().then(std::time::Instant::now);
+    let bytes = std::fs::read(filepath).map_err(|e| format!("read: {e}"))?;
+    let source_text = String::from_utf8(bytes)
         .unwrap_or_else(|invalid| String::from_utf8_lossy(invalid.as_bytes()).into_owned());
     let rel_path = project_relative_path(root, filepath);
+    if let Some(started) = read_started {
+        crate::debug_log!(
+            "phase_a",
+            "file_read path={rel_path:?} bytes={} ms={}",
+            source_text.len(),
+            crate::scan::debug_log::ms_since(started)
+        );
+    }
     // A saved page first: it is often minified too, and its own reason
     // tells the reader more (ADR-0046).
     if language == SourceLanguage::Html && crate::scan::saved_page::is_saved_page_text(&source_text)
     {
-        return Some(FileOutcome::SavedPage(rel_path));
+        return Ok(FileOutcome::SavedPage(rel_path));
     }
     if crate::scan::minified::is_minified(filepath, language, &source_text) {
-        return Some(FileOutcome::Minified(rel_path));
+        return Ok(FileOutcome::Minified(rel_path));
     }
     let mut parser = TsParser::new();
     let ts_lang: tree_sitter::Language = match language {
@@ -1649,8 +1715,22 @@ fn read_and_parse(
         SourceLanguage::MavenPom | SourceLanguage::WebConfig => tree_sitter_html::LANGUAGE.into(),
         SourceLanguage::PackageJson => tree_sitter_javascript::LANGUAGE.into(),
     };
-    parser.set_language(&ts_lang).ok()?;
-    let tree = parser.parse(&source_text, None)?;
+    parser
+        .set_language(&ts_lang)
+        .map_err(|e| format!("grammar: {e}"))?;
+    let parse_started = crate::scan::debug_log::enabled().then(std::time::Instant::now);
+    let tree = parser
+        .parse(&source_text, None)
+        .ok_or_else(|| "the parser gave no tree".to_string())?;
+    if let Some(started) = parse_started {
+        crate::debug_log!(
+            "phase_a",
+            "file_parsed path={rel_path:?} tree_nodes={} has_errors={} ms={}",
+            tree.root_node().descendant_count(),
+            tree.root_node().has_error(),
+            crate::scan::debug_log::ms_since(started)
+        );
+    }
     let source_bytes = source_text.as_bytes();
 
     let loc = match language {
@@ -1673,7 +1753,7 @@ fn read_and_parse(
         | SourceLanguage::WebConfig
         | SourceLanguage::PackageJson => count_js_loc(source_bytes, &tree),
     };
-    Some(FileOutcome::Parsed(
+    Ok(FileOutcome::Parsed(
         loc,
         ParsedFile {
             rel_path,
@@ -1850,7 +1930,41 @@ pub fn run_scan(config: &ScanConfig) -> ScanReport {
     // between the rules phase and phase A): the languages it finds
     // decide which phase C passes run, hence the `[n/N]` total printed
     // from the very first phase on (ticket #134).
+    // Ticket #282: the settings of the scan, then each step, in the debug
+    // log when it is on (`scan::debug_log`).
+    crate::debug_log!(
+        "scan",
+        "scan_config root={:?} include={:?} exclude={:?} target_languages={:?} rules={:?} \
+         custom_rules={:?} cache={:?} datas={:?} quick={} only_category={:?} \
+         category_overrides={:?} disabled_rules={:?} severity={:?} with_deps={} with_tests={} \
+         database={} memory_check={} memory_limit={:?} lang={:?} suppress_file={:?}",
+        config.root,
+        config.include_paths,
+        config.exclude_patterns,
+        config.target_languages,
+        config.rules_path,
+        config.custom_rules_dir,
+        config.cache_dir,
+        config.datas_dir,
+        config.quick_mode,
+        config.only_category,
+        config.category_overrides,
+        config.disabled_rules,
+        config.severity_levels,
+        config.with_deps,
+        config.with_tests,
+        config.database.is_some(),
+        config.memory_check,
+        config.memory_limit,
+        config.lang,
+        config.suppress_file
+    );
+    let discovery_step = crate::scan::debug_log::span("discovery", || {
+        format!("discover_files root={:?}", config.root)
+    });
     let (files, skipped_dirs) = discover_files(config);
+    discovery_step
+        .end_with(|| format!("files={} skipped_dirs={}", files.len(), skipped_dirs.len()));
 
     // ADR-0038: the rule languages of the scan — the project's declared
     // list, else the languages of the discovered files. The rules of any
@@ -1904,6 +2018,13 @@ pub fn run_scan(config: &ScanConfig) -> ScanReport {
     let taint_js_active = has_language(taint::JsTaint::FILE_LANGUAGES);
     let taint_php_active = has_language(taint::PhpTaint::FILE_LANGUAGES);
     let taint_csharp_active = has_language(taint::CSharpTaint::FILE_LANGUAGES);
+    crate::debug_log!(
+        "scan",
+        "languages discovered={discovered_languages:?} rule_languages={rule_languages:?} \
+         undeclared={undeclared_languages:?} taint_passes python={taint_python_active} \
+         java={taint_java_active} javascript={taint_js_active} php={taint_php_active} \
+         csharp={taint_csharp_active}"
+    );
 
     // Rules, phase A, phase B — always run.
     const CORE_PHASES: usize = 3;
@@ -1963,6 +2084,12 @@ pub fn run_scan(config: &ScanConfig) -> ScanReport {
     // fine to `&str`.
     let mut record_phase = |label: &str, elapsed: std::time::Duration| {
         phase_timings.push((label.to_string(), elapsed));
+        crate::debug_log!(
+            "phase",
+            "phase_end n={}/{total_phases} label={label:?} ms={:.3}",
+            phase_timings.len(),
+            elapsed.as_secs_f64() * 1000.0
+        );
         if let Some(cb) = config.on_phase_complete {
             // The label stored in `phase_timings` stays the full label
             // (including the per-language count for phase A) — only
@@ -1984,7 +2111,27 @@ pub fn run_scan(config: &ScanConfig) -> ScanReport {
     let mut registry = crate::rules::catalog::RuleRegistry::default();
     let mut rule_errors: Vec<(PathBuf, crate::rules::catalog::RuleLoadError)> = Vec::new();
     let mut load_source = |path: &Path, origin: crate::rules::catalog::RuleOrigin| {
+        let source_step = crate::scan::debug_log::span("rules", || {
+            format!("load_source path={path:?} origin={origin:?}")
+        });
         let mut loaded = crate::rules::catalog::load_rules(path, &rule_languages, origin);
+        source_step.end_with(|| {
+            let summary = loaded.summary();
+            format!(
+                "kind={:?} files_available={} files_read={} errors={}",
+                summary.kind,
+                summary.files_available,
+                summary.files_read,
+                loaded.errors.len()
+            )
+        });
+        for (file, error) in &loaded.errors {
+            crate::debug_log!(
+                "rules",
+                "rule_file_refused path={file:?} error={:?}",
+                error.to_string()
+            );
+        }
         registry.add_source(&loaded, &rule_languages);
         rule_errors.append(&mut loaded.errors);
         rule_sources.push(loaded.summary());
@@ -2002,6 +2149,23 @@ pub fn run_scan(config: &ScanConfig) -> ScanReport {
         load_source(custom_dir, crate::rules::catalog::RuleOrigin::Client);
     }
     let (loaded_rule_jsons, rule_conflicts, mut compile_errors) = registry.finish();
+    for conflict in &rule_conflicts {
+        crate::debug_log!(
+            "rules",
+            "rule_conflict id={} kind={:?} kept={:?} dropped={:?}",
+            conflict.id,
+            conflict.kind,
+            conflict.kept,
+            conflict.dropped
+        );
+    }
+    for (file, error) in &compile_errors {
+        crate::debug_log!(
+            "rules",
+            "rule_refused path={file:?} error={:?}",
+            error.to_string()
+        );
+    }
     rule_errors.append(&mut compile_errors);
     let rules_loaded = loaded_rule_jsons.len();
     record_phase(
@@ -2024,14 +2188,30 @@ pub fn run_scan(config: &ScanConfig) -> ScanReport {
     let rule_jsons: Vec<serde_json::Value> = loaded_rule_jsons
         .into_iter()
         .filter(|r| {
+            // The debug log names each rule kept and each rule left out,
+            // with the reason (ticket #282).
+            let rule_name = || {
+                crate::rules::identity::RuleId::of(r)
+                    .map_or_else(|| "<no id>".to_string(), |id| id.to_string())
+            };
             let cat = r.get("category").and_then(|v| v.as_str()).unwrap_or("");
             if let Some(only_cat) = &config.only_category {
                 if !cat.eq_ignore_ascii_case(only_cat) {
+                    crate::debug_log!(
+                        "rules",
+                        "rule_left_out id={} reason=only_category category={cat:?}",
+                        rule_name()
+                    );
                     return false;
                 }
             } else if let Some(&enabled) = config.category_overrides.get(&cat.to_lowercase())
                 && !enabled
             {
+                crate::debug_log!(
+                    "rules",
+                    "rule_left_out id={} reason=category_disabled category={cat:?}",
+                    rule_name()
+                );
                 return false;
             }
             // A name disables the rule in every language, `language/name`
@@ -2039,8 +2219,15 @@ pub fn run_scan(config: &ScanConfig) -> ScanReport {
             if let Some(id) = crate::rules::identity::RuleId::of(r)
                 && config.disabled_rules.iter().any(|d| id.is_selected_by(d))
             {
+                crate::debug_log!("rules", "rule_left_out id={id} reason=disable_rule");
                 return false;
             }
+            crate::debug_log!(
+                "rules",
+                "rule_kept id={} category={cat:?} taint={}",
+                rule_name(),
+                crate::scan::dataflow::rule_loader::has_taint_specs(r)
+            );
             true
         })
         .collect();
@@ -2104,6 +2291,15 @@ pub fn run_scan(config: &ScanConfig) -> ScanReport {
     // available memory stops here: past it the system swaps, and a
     // Linux laptop froze on a 2.3 GB Java project (16 GB, 12 available).
     let memory = estimate_scan_memory(&files, &tree_languages, config.memory_limit);
+    crate::debug_log!(
+        "memory",
+        "estimate bytes={} fits={:?} rules_at_once={}/{} tree_languages={tree_languages:?} \
+         detail={memory:?}",
+        memory.bytes,
+        memory.fits(),
+        memory.rules_at_once,
+        memory.max_rules_at_once
+    );
     if config.memory_check && memory.fits() == Some(false) {
         return ScanReport {
             memory: Some(memory),
@@ -2128,6 +2324,8 @@ pub fn run_scan(config: &ScanConfig) -> ScanReport {
     // the pipeline (Phase B/C) and the reports depend on it to be
     // identical to the sequential version.
     let t_phase_a = std::time::Instant::now();
+    let phase_a_step =
+        crate::scan::debug_log::span("phase_a", || format!("phase_a files={}", files.len()));
     // ADR-0046: the resources folders of saved web pages, found once
     // for all files (one read of the head of each candidate page).
     let saved_page_folders = crate::scan::saved_page::SavedPageFolders::find(&config.root, &files);
@@ -2135,6 +2333,11 @@ pub fn run_scan(config: &ScanConfig) -> ScanReport {
         .par_iter()
         .map(|filepath| {
             if saved_page_folders.contains(filepath) {
+                crate::debug_log!(
+                    "phase_a",
+                    "file_skipped path={:?} reason=saved_page_resources_folder",
+                    project_relative_path(&config.root, filepath)
+                );
                 FileOutcome::SavedPage(project_relative_path(&config.root, filepath))
             } else {
                 parse_file(&config.root, filepath, &tree_languages)
@@ -2159,6 +2362,15 @@ pub fn run_scan(config: &ScanConfig) -> ScanReport {
             FileOutcome::Failed => {}
         }
     }
+    phase_a_step.end_with(|| {
+        format!(
+            "parsed={} minified={} saved_pages={} failed={} loc={total_loc}",
+            parsed_files.len(),
+            skipped_minified.len(),
+            skipped_saved_pages.len(),
+            files.len() - parsed_files.len() - skipped_minified.len() - skipped_saved_pages.len()
+        )
+    });
 
     // Per-language count (ticket #46), split by extension when a group
     // holds several (ticket #139) — computed here, not in a separate
@@ -2212,15 +2424,25 @@ pub fn run_scan(config: &ScanConfig) -> ScanReport {
     // it ends, the trees of its files are released (ticket #241), so that
     // the next pass does not run with them.
     let mut seen_taint = taint::SeenTaint::new();
-    for (active, file_languages, _, pass) in taint_passes {
+    for (active, file_languages, rule_language, pass) in taint_passes {
         if active {
+            let pass_step = crate::scan::debug_log::span("phase_c", || {
+                format!("taint_pass language={}", rule_language.rule_tag())
+            });
             let (label, elapsed) = pass(&parsed_files, &rule_jsons, &mut passes, &mut seen_taint);
+            drop(pass_step);
             record_phase(&label, elapsed);
+            let mut released = 0usize;
             for pf in &mut parsed_files {
                 if file_languages.contains(&pf.language) {
-                    pf.tree = None;
+                    released += usize::from(pf.tree.take().is_some());
                 }
             }
+            crate::debug_log!(
+                "phase_c",
+                "trees_released language={} files={released}",
+                rule_language.rule_tag()
+            );
         }
     }
 
@@ -2239,6 +2461,8 @@ pub fn run_scan(config: &ScanConfig) -> ScanReport {
     let mut version_rules = None;
     let mut lockfiles_not_used = Vec::new();
     if deps_phase_active {
+        let _deps_step =
+            crate::scan::debug_log::span("dependencies", || "dependencies_phase".to_string());
         let t_deps = std::time::Instant::now();
         let all_deps = declared_dependencies.take().unwrap_or_default();
         lockfiles_not_used = lockfiles_not_used_by(&all_deps, &config.root);
@@ -2354,6 +2578,7 @@ pub fn run_scan(config: &ScanConfig) -> ScanReport {
     // --- Audited project's unit tests (opt-in) -------------------------
     let mut test_results = None;
     if tests_phase_active {
+        let _tests_step = crate::scan::debug_log::span("tests", || "tests_phase".to_string());
         let t_tests = std::time::Instant::now();
         // `BTreeMap::keys()` is already sorted and duplicate-free — no
         // need for separate `sort()`/`dedup()` as before
@@ -2387,6 +2612,8 @@ pub fn run_scan(config: &ScanConfig) -> ScanReport {
     let mut database_schema = None;
     let mut database_stats = None;
     if database_phase_active && let Some(db_config) = &config.database {
+        let _database_step =
+            crate::scan::debug_log::span("database", || "database_phase".to_string());
         let t_database = std::time::Instant::now();
         match crate::project::database::live::load_db_credentials(db_config, &config.root)
             .and_then(|creds| crate::project::database::live::extract_pg_schema(&creds))
@@ -2412,7 +2639,11 @@ pub fn run_scan(config: &ScanConfig) -> ScanReport {
                 }
                 database_schema = Some(schema);
             }
-            Err(_) => { /* connection failure: no dedicated finding for now, see TODO below */ }
+            Err(error) => {
+                // Connection failure: no dedicated finding for now, see
+                // TODO below; named in the debug log (ticket #282).
+                crate::debug_log!("database", "database_error error={error:?}");
+            }
         }
         record_phase(
             &phase_label(
@@ -2442,6 +2673,9 @@ pub fn run_scan(config: &ScanConfig) -> ScanReport {
     let mut export_path = None;
     let mut history = Vec::new();
     if let Some(datas_dir) = &config.datas_dir {
+        let _export_step = crate::scan::debug_log::span("report", || {
+            format!("comparison_and_export datas={datas_dir:?}")
+        });
         if let Some(baseline_path) = find_baseline(config)
             && let Ok(mut baseline) = crate::report::export_json::load_export(&baseline_path)
         {
@@ -2472,9 +2706,14 @@ pub fn run_scan(config: &ScanConfig) -> ScanReport {
             &chrono::Local::now().to_rfc3339(),
             database_schema.clone(),
         );
-        export_path =
-            crate::report::export_json::write_export(datas_dir, &config.brand_prefix, &export_data)
-                .ok();
+        let written =
+            crate::report::export_json::write_export(datas_dir, &config.brand_prefix, &export_data);
+        crate::debug_log!(
+            "report",
+            "json_export findings={} result={written:?}",
+            all_findings.len()
+        );
+        export_path = written.ok();
         // Read after the export is written, as Python does
         // (`runner.py`: `_export_json` then `_generate_report`): the
         // chart's last point is this scan. Only `datas_dir`, not the
@@ -3928,6 +4167,8 @@ mod tests {
             ("a.svelte", SourceLanguage::Html),
             ("a.jsp", SourceLanguage::Html),
             ("a.cshtml", SourceLanguage::Html),
+            // Superset of the Audit (ticket #285, ADR-0058).
+            ("a.razor", SourceLanguage::Html),
             ("a.twig", SourceLanguage::Html),
             ("a.tsx", SourceLanguage::TypeScript),
             ("a.inc", SourceLanguage::Php),
@@ -4375,6 +4616,19 @@ mod tests {
         assert_eq!(SourceLanguage::WebConfig.comment_syntax(), "html");
         assert!(SourceLanguage::PackageJson.is_config_file());
         assert!(!SourceLanguage::JavaScript.is_config_file());
+    }
+
+    /// Ticket #285: a Razor view takes the `razor` comment syntax, any
+    /// other HTML template the `html` one, other files their own.
+    #[test]
+    fn test_razor_views_take_the_razor_comment_syntax() {
+        let syntax = |lang: SourceLanguage, file: &str| lang.comment_syntax_for(Path::new(file));
+        assert_eq!(syntax(SourceLanguage::Html, "Views/Index.cshtml"), "razor");
+        assert_eq!(syntax(SourceLanguage::Html, "Shared/Nav.razor"), "razor");
+        assert_eq!(syntax(SourceLanguage::Html, "index.html"), "html");
+        assert_eq!(syntax(SourceLanguage::Html, "App.vue"), "html");
+        assert_eq!(syntax(SourceLanguage::CSharp, "Home.cs"), "csharp");
+        assert_eq!(syntax(SourceLanguage::WebConfig, "web.config"), "html");
     }
 
     /// ADR-0047, end to end: a scan finds a `pom.xml`, counts it under

@@ -411,6 +411,7 @@
     "race_condition": [],
     "race_condition_financial": [],
     "razor_html_raw": ["1.2.1"],
+    "blazor_markup_string": ["1.2.1"],
     "redis_eval_injection_js": ["1.2.4"],
     "redis_eval_injection_python": ["1.2.4"],
     "redos_nested_quantifier": ["1.3.12"],

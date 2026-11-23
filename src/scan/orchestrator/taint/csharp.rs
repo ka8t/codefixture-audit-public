@@ -66,6 +66,10 @@ impl<'a> TaintLanguage<'a> for CSharpTaint<'a> {
     }
 
     /// A file resolves nothing from the others.
+    fn graph_size(&self) -> Option<(usize, usize)> {
+        None // No call graph: each C# file is analysed alone.
+    }
+
     fn dependency_fingerprint(&self, _file: &str) -> String {
         String::new()
     }
