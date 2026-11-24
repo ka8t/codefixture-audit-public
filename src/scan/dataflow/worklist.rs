@@ -28,7 +28,7 @@ use std::collections::{BTreeMap, HashSet, VecDeque};
 
 use tree_sitter::Node;
 
-use super::cfg::{Cfg, EdgeLabel, NodeKind};
+use super::cfg::{Cfg, EdgeLabel, FlowGraph, NodeKind};
 use super::const_eval::{
     ConstState, EvalConst, apply_assign, const_state_equal, empty_const_state, eval_const,
     is_truthy, join_const_states, simplify_stmt, simulate_list_mutation,
@@ -37,7 +37,7 @@ use super::ir::{IrStmt, Rhs, canon_rhs};
 use super::lattice::{State, empty_state, state_equal, state_join_into, state_widen};
 use super::line_facts::RuleLines;
 use super::lowering::{lower_expr_standalone, lower_for_target_assign, lower_stmts};
-use super::passed_check::PassedChecks;
+use super::passed_check::{ConditionFacts, PassedChecks};
 use super::transfer::{Finding, RuleSpecs, transfer_stmts};
 
 /// Spec §4.3: widening threshold for loops.
@@ -371,9 +371,10 @@ pub struct AnalysisResult {
 /// whole CFG again: on `bountybench-main`, lowering was about 65 % of
 /// the scan time.
 ///
-/// It does not hold the CFG it was built from (`Cfg` is not `Clone`
-/// and the callers keep using theirs); [`analyze_prepared`] takes both
-/// and checks in debug builds that they belong together.
+/// It holds the shape of the CFG it was built from ([`FlowGraph`]), not
+/// the CFG, whose nodes point into the parse tree (ticket #281): a
+/// prepared CFG outlives the tree of its file, and [`analyze_prepared`]
+/// needs nothing else.
 pub struct PreparedIr {
     /// Simplified IR of each CFG node, by node id.
     node_ir: BTreeMap<usize, Vec<IrStmt>>,
@@ -388,9 +389,21 @@ pub struct PreparedIr {
     /// identical. Kept here because the preparation already lowers
     /// every node: the summary no longer lowers anything itself.
     return_nodes: Vec<(usize, Vec<IrStmt>)>,
+    /// What the conditions of the CFG prove whatever the rule, read from
+    /// its tree here once (ticket #281): [`analyze_prepared`] keeps the
+    /// checks of one rule from them without the tree.
+    conditions: ConditionFacts,
+    /// The shape of the CFG (ticket #281): the preparation holds it
+    /// instead of the CFG, whose nodes point into the parse tree.
+    flow: FlowGraph,
 }
 
 impl PreparedIr {
+    /// The exit node of the CFG this preparation was built from.
+    pub(crate) fn exit(&self) -> usize {
+        self.flow.exit()
+    }
+
     /// See the `return_nodes` field.
     pub(crate) fn return_nodes(&self) -> &[(usize, Vec<IrStmt>)] {
         &self.return_nodes
@@ -433,10 +446,16 @@ where
     // (branches whose condition is known at compile time). It also
     // simplifies `node_ir` in place.
     let dead_edges = compute_dead_edges_generic(cfg, &mut node_ir, source, lower_expr);
+    // The CFG of a file is built from its text, which the scan holds as a
+    // `String` (`SourceLines`): the bytes are always UTF-8.
+    let text = std::str::from_utf8(source)
+        .expect("a CFG is built from the text of a file, which is valid UTF-8");
     PreparedIr {
         node_ir,
         dead_edges,
         return_nodes,
+        conditions: ConditionFacts::compute(cfg, text),
+        flow: cfg.flow_graph(),
     }
 }
 
@@ -502,7 +521,7 @@ pub fn analyze<'tree>(
     source_lines: Option<&RuleLines>,
 ) -> AnalysisResult {
     let prepared = prepare_ir(cfg, source);
-    analyze_prepared(cfg, &prepared, specs, initial_state, source_lines)
+    analyze_prepared(&prepared, specs, initial_state, source_lines)
 }
 
 /// Java equivalent of [`analyze`] ([`prepare_java_ir`], then
@@ -515,7 +534,7 @@ pub fn analyze_java<'tree>(
     source_lines: Option<&RuleLines>,
 ) -> AnalysisResult {
     let prepared = prepare_java_ir(cfg, source);
-    analyze_prepared(cfg, &prepared, specs, initial_state, source_lines)
+    analyze_prepared(&prepared, specs, initial_state, source_lines)
 }
 
 /// JavaScript equivalent of [`analyze`] ([`prepare_js_ir`], then
@@ -528,7 +547,7 @@ pub fn analyze_js<'tree>(
     source_lines: Option<&RuleLines>,
 ) -> AnalysisResult {
     let prepared = prepare_js_ir(cfg, source);
-    analyze_prepared(cfg, &prepared, specs, initial_state, source_lines)
+    analyze_prepared(&prepared, specs, initial_state, source_lines)
 }
 
 /// PHP equivalent of [`analyze`] ([`prepare_php_ir`], then
@@ -541,7 +560,7 @@ pub fn analyze_php<'tree>(
     source_lines: Option<&RuleLines>,
 ) -> AnalysisResult {
     let prepared = prepare_php_ir(cfg, source);
-    analyze_prepared(cfg, &prepared, specs, initial_state, source_lines)
+    analyze_prepared(&prepared, specs, initial_state, source_lines)
 }
 
 /// C# equivalent of [`analyze`] ([`prepare_csharp_ir`], then
@@ -554,36 +573,34 @@ pub fn analyze_csharp<'tree>(
     source_lines: Option<&RuleLines>,
 ) -> AnalysisResult {
     let prepared = prepare_csharp_ir(cfg, source);
-    analyze_prepared(cfg, &prepared, specs, initial_state, source_lines)
+    analyze_prepared(&prepared, specs, initial_state, source_lines)
 }
 
 /// Taint fixpoint (§6) of one rule on a CFG already prepared by one of
 /// the `prepare_*ir` functions: the only part of the analysis that
 /// depends on the rule. Language-neutral, since the language only
-/// enters through the lowering done by the preparation.
-pub fn analyze_prepared<'tree>(
-    cfg: &Cfg<'tree>,
+/// enters through the lowering done by the preparation. It reads no
+/// syntax tree (ticket #281): the shape of the CFG
+/// (`PreparedIr::flow`) and what its conditions prove
+/// (`PreparedIr::conditions`) were taken from the tree by the
+/// preparation.
+pub fn analyze_prepared(
     prepared: &PreparedIr,
     specs: &RuleSpecs,
     initial_state: Option<&State>,
     source_lines: Option<&RuleLines>,
 ) -> AnalysisResult {
-    // A preparation lowers every node of its CFG: different node ids
-    // mean it was built from another CFG.
-    debug_assert!(
-        prepared.node_ir.keys().eq(cfg.nodes.keys()),
-        "PreparedIr used with a CFG it was not built from"
-    );
+    let cfg = &prepared.flow;
     let node_ir = &prepared.node_ir;
     let dead_edges = &prepared.dead_edges;
 
     // Initialization: state_in[entry] = initial_state, others = empty.
     let mut state_in: BTreeMap<usize, State> =
-        cfg.nodes.keys().map(|&nid| (nid, empty_state())).collect();
+        cfg.nodes().map(|(nid, _)| (nid, empty_state())).collect();
     let mut state_out: BTreeMap<usize, State> =
-        cfg.nodes.keys().map(|&nid| (nid, empty_state())).collect();
+        cfg.nodes().map(|(nid, _)| (nid, empty_state())).collect();
     state_in.insert(
-        cfg.entry,
+        cfg.entry(),
         initial_state.cloned().unwrap_or_else(empty_state),
     );
 
@@ -591,22 +608,21 @@ pub fn analyze_prepared<'tree>(
     let mut raw_findings: Vec<Finding> = Vec::new();
 
     // Per-node iteration counter (for widening on loops).
-    let mut iter_count: BTreeMap<usize, u32> = cfg.nodes.keys().map(|&nid| (nid, 0)).collect();
+    let mut iter_count: BTreeMap<usize, u32> = cfg.nodes().map(|(nid, _)| (nid, 0)).collect();
 
     // Identifies loop heads for widening.
     let loop_heads: HashSet<usize> = cfg
-        .nodes
-        .iter()
-        .filter(|(_, node)| node.kind == NodeKind::Loop)
-        .map(|(&nid, _)| nid)
+        .nodes()
+        .filter(|(_, kind)| *kind == NodeKind::Loop)
+        .map(|(nid, _)| nid)
         .collect();
 
     // The checks the TRUE edge of each branch proves (ticket #252):
     // the state that edge carries loses the variables they mention.
-    let passed_checks = PassedChecks::compute(cfg, specs, source_lines);
+    let passed_checks = PassedChecks::compute(&prepared.conditions, specs, source_lines);
 
-    let mut worklist: VecDeque<usize> = VecDeque::from([cfg.entry]);
-    let mut in_worklist: HashSet<usize> = HashSet::from([cfg.entry]);
+    let mut worklist: VecDeque<usize> = VecDeque::from([cfg.entry()]);
+    let mut in_worklist: HashSet<usize> = HashSet::from([cfg.entry()]);
 
     let mut iterations: u32 = 0;
     while let Some(n) = worklist.pop_front() {
@@ -619,7 +635,7 @@ pub fn analyze_prepared<'tree>(
 
         // Recomputes state_in[n] = ⊔ state_out[p] for p ∈ pred(n). §9 —
         // ignores preds whose edge to n has been marked dead.
-        if n != cfg.entry {
+        if n != cfg.entry() {
             let preds = cfg.predecessor_ids(n);
             let live_preds: Vec<usize> = preds
                 .into_iter()

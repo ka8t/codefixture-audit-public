@@ -25,6 +25,14 @@
 //! resolved by a bounded fixpoint between its members
 //! (`MAX_SCC_FIXPOINT_ITER` passes, same spirit as CFG loop widening)
 //! instead of being given up on.
+//!
+//! **Read from the tree file by file, linked without it (ticket #281)**:
+//! [`PythonFile::extract`] reads from one file's tree everything the
+//! graph needs (its prepared module and functions, its imports, and the
+//! local names of the calls of each function in the order its definition
+//! lists them), so that the scan can drop the tree right after;
+//! [`CallGraph::build_from`] links the files from these facts alone, with
+//! the same edges as the former reading of the trees.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -37,7 +45,8 @@ use super::lattice::SharedText;
 use super::line_facts::{LinesByFile, RuleLinesByFile, SourceLines, rule_lines_by_file};
 use super::prepared::{PreparedFile, PreparedFiles};
 use super::summary::{
-    FunctionInfo, ImportInfo, collect_imports, compute_summary_with, prepare_python_file,
+    FunctionInfo, ImportInfo, collect_functions, collect_imports, compute_summary_with,
+    prepare_python_functions,
 };
 use super::transfer::{FunctionSummary, RuleSpecs};
 use super::visibility::{ImportEntry, ImportVisibility, Visibility, graph_fingerprint};
@@ -422,26 +431,65 @@ fn walk_calls<'tree>(node: Node<'tree>, out: &mut Vec<Node<'tree>>) {
     }
 }
 
-/// Returns a function's outgoing edges: local call name → target
+/// The local names ([`call_local_name`]) of the calls under `def_node`
+/// (a `function_definition`, nested functions and decorators included),
+/// in the order [`walk_calls`] lists them, the order in which the first
+/// resolution of a name wins (ticket #281). A call without a local name
+/// is not kept: no edge was ever drawn from it.
+fn call_names(def_node: Node, source: &[u8]) -> Vec<String> {
+    let mut calls = Vec::new();
+    walk_calls(def_node, &mut calls);
+    calls
+        .into_iter()
+        .filter_map(|call| call_local_name(call, source))
+        .collect()
+}
+
+/// What the call graph needs from one Python file, read from its tree
+/// once ([`PythonFile::extract`], ticket #281): no node of the tree is
+/// kept.
+pub struct PythonFile {
+    /// The module top level and the functions, prepared for every rule.
+    prepared: PreparedFile<FunctionInfo>,
+    /// The local names of the calls of each function of `prepared`, at
+    /// the same index ([`call_names`]).
+    calls: Vec<Vec<String>>,
+    /// The imports, in source order, those inside functions included.
+    imports: Vec<ImportInfo>,
+}
+
+impl PythonFile {
+    /// Reads the file whose tree is `root`, parsed from `source`.
+    pub fn extract(root: Node<'_>, source: &[u8]) -> Self {
+        let functions = collect_functions(root, source);
+        let calls = functions
+            .iter()
+            .map(|function| call_names(function.def_node, source))
+            .collect();
+        PythonFile {
+            imports: collect_imports(root, source),
+            calls,
+            prepared: prepare_python_functions(root, functions, source),
+        }
+    }
+}
+
+/// Returns a function's outgoing edges from the local names of its calls
+/// ([`call_names`]): local call name → target
 /// node. Resolves two cases: a call to a function in the **same
 /// file** (direct name in `local_names`), and a call to an
 /// **imported** function (via `import_bindings`). Other call forms
 /// remain unresolved — unchanged current behavior (SCA-9
 /// over-approximation in `eval_call`).
 fn outgoing_edges(
-    fn_info: &FunctionInfo,
-    source: &[u8],
+    calls: &[String],
     filepath: &str,
     local_names: &BTreeSet<String>,
     visibility: &dyn Visibility,
 ) -> BTreeMap<String, NodeKey> {
     let mut edges = BTreeMap::new();
-    let mut calls = Vec::new();
-    walk_calls(fn_info.def_node, &mut calls);
-    for call_node in calls {
-        let Some(local_name) = call_local_name(call_node, source) else {
-            continue;
-        };
+    for local_name in calls {
+        let local_name = local_name.clone();
         if edges.contains_key(&local_name) {
             continue;
         }
@@ -500,22 +548,21 @@ pub struct ResolvedSummaries {
 /// name → target node) — a subset of the real calls (a call that
 /// cannot be statically resolved is simply absent, not an error).
 #[derive(Default)]
-pub struct CallGraph<'tree> {
-    pub nodes: BTreeMap<NodeKey, FunctionInfo<'tree>>,
+pub struct CallGraph {
+    pub nodes: BTreeMap<NodeKey, FunctionInfo>,
     pub edges: BTreeMap<NodeKey, BTreeMap<String, NodeKey>>,
     /// The resolved imports of each file, whether they are called inside a
     /// function or at module level, looked up on demand (ticket #239):
     /// the former per-file map of every imported name (`import_bindings`)
     /// held one entry per function of every module a file imports.
     visibility: Arc<ImportVisibility>,
-    source_by_file: BTreeMap<String, &'tree [u8]>,
     /// Every file of the graph prepared once for all the rules of the
     /// scan (ticket #192): read for the summaries and handed to the
     /// taint analysis of each file ([`Self::prepared_file`]).
-    prepared: PreparedFiles<'tree, FunctionInfo<'tree>>,
+    prepared: PreparedFiles<FunctionInfo>,
 }
 
-impl<'tree> CallGraph<'tree> {
+impl CallGraph {
     /// What each file of the graph sees of the others, shared with the
     /// taint analysis of each file (ticket #239).
     pub fn visibility(&self) -> &Arc<ImportVisibility> {
@@ -524,49 +571,57 @@ impl<'tree> CallGraph<'tree> {
 
     /// The prepared form of `filepath`, one of the graph's files, for
     /// the taint analysis of each rule (ticket #192).
-    pub fn prepared_file(
-        &self,
-        filepath: &str,
-    ) -> Option<&PreparedFile<'tree, FunctionInfo<'tree>>> {
+    pub fn prepared_file(&self, filepath: &str) -> Option<&PreparedFile<FunctionInfo>> {
         self.prepared.file(filepath)
     }
 
     /// Builds the complete graph (nodes + edges + import bindings)
-    /// from a set of already-parsed Python modules.
-    pub fn build(files: &[FileInput<'tree>]) -> Self {
+    /// from a set of already-parsed Python modules: each file is read
+    /// ([`PythonFile::extract`], in parallel), then linked
+    /// ([`Self::build_from`]).
+    pub fn build(files: &[FileInput<'_>]) -> Self {
+        Self::build_from(
+            files
+                .par_iter()
+                .map(|f| (f.filepath.clone(), PythonFile::extract(f.root, f.source)))
+                .collect(),
+        )
+    }
+
+    /// Builds the complete graph from the files already read, by path,
+    /// without any tree (ticket #281).
+    pub fn build_from(files: Vec<(String, PythonFile)>) -> Self {
         let mut graph = CallGraph::default();
         let mut file_function_names: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         let mut imports_by_file: BTreeMap<String, Vec<ImportInfo>> = BTreeMap::new();
+        // The calls of each node. Homonyms: the last one, as in `nodes`
+        // and `PreparedFiles::index_node`.
+        let mut calls_by_node: BTreeMap<NodeKey, Vec<String>> = BTreeMap::new();
 
-        // Each file is prepared once for every rule of the scan (ticket
-        // #192), in parallel: a file only reads its own tree. Its
-        // collected functions are the graph nodes.
-        let per_file: Vec<_> = files
-            .par_iter()
-            .map(|f| {
-                (
-                    prepare_python_file(f.root, f.source),
-                    collect_imports(f.root, f.source),
-                )
-            })
-            .collect();
-        for (f, (prepared, imports)) in files.iter().zip(per_file) {
+        // Each file was prepared once for every rule of the scan (ticket
+        // #192). Its collected functions are the graph nodes.
+        for (filepath, file) in files {
+            let PythonFile {
+                prepared,
+                calls,
+                imports,
+            } = file;
             file_function_names.insert(
-                f.filepath.clone(),
+                filepath.clone(),
                 prepared
                     .functions
                     .iter()
                     .map(|function| function.info.name.clone())
                     .collect(),
             );
-            for (index, function) in prepared.functions.iter().enumerate() {
-                let key = (f.filepath.clone(), function.info.name.clone());
+            for (index, (function, calls)) in prepared.functions.iter().zip(calls).enumerate() {
+                let key = (filepath.clone(), function.info.name.clone());
                 graph.prepared.index_node(key.clone(), index);
-                graph.nodes.insert(key, function.info.clone());
+                graph.nodes.insert(key.clone(), function.info.clone());
+                calls_by_node.insert(key, calls);
             }
-            graph.prepared.insert_file(f.filepath.clone(), prepared);
-            imports_by_file.insert(f.filepath.clone(), imports);
-            graph.source_by_file.insert(f.filepath.clone(), f.source);
+            graph.prepared.insert_file(filepath.clone(), prepared);
+            imports_by_file.insert(filepath, imports);
         }
 
         let known_files: Vec<String> = file_function_names.keys().cloned().collect();
@@ -593,7 +648,6 @@ impl<'tree> CallGraph<'tree> {
                 .get(filepath)
                 .cloned()
                 .unwrap_or_default();
-            let source = graph.source_by_file[filepath];
             // This file's functions: a range of the sorted keys, not a scan
             // of every function of the project.
             let fn_keys: Vec<NodeKey> = graph
@@ -604,8 +658,7 @@ impl<'tree> CallGraph<'tree> {
                 .collect();
             for key in fn_keys {
                 let edges = outgoing_edges(
-                    &graph.nodes[&key],
-                    source,
+                    &calls_by_node[&key],
                     filepath,
                     &local_names,
                     graph.visibility.as_ref(),
@@ -947,6 +1000,76 @@ mod tests {
     use crate::scan::dataflow::transfer::SinkSpec;
     use tree_sitter::Parser;
 
+    /// The edges of a function as the graph drew them from its tree
+    /// before ticket #281, when `outgoing_edges` walked the call nodes
+    /// under `node` itself: the reference the edges drawn from the local
+    /// names read once ([`call_names`]) must equal. Kept as it was, but for
+    /// the node passed instead of the metadata that held it.
+    fn edges_from_tree(
+        node: Node,
+        source: &[u8],
+        filepath: &str,
+        local_names: &BTreeSet<String>,
+        visibility: &dyn Visibility,
+    ) -> BTreeMap<String, NodeKey> {
+        let mut edges = BTreeMap::new();
+        let mut calls = Vec::new();
+        walk_calls(node, &mut calls);
+        for call_node in calls {
+            let Some(local_name) = call_local_name(call_node, source) else {
+                continue;
+            };
+            if edges.contains_key(&local_name) {
+                continue;
+            }
+            if local_names.contains(&local_name) {
+                edges.insert(local_name.clone(), (filepath.to_string(), local_name));
+            } else if let Some(target) = visibility.binding(filepath, &local_name) {
+                edges.insert(local_name.clone(), target);
+            }
+        }
+        edges
+    }
+
+    /// Builds the graph of `files` and asserts that every node has the
+    /// edges its tree gave before ticket #281 ([`edges_from_tree`]).
+    fn build_checked(files: &[FileInput]) -> CallGraph {
+        let graph = CallGraph::build(files);
+        assert_edges_match_trees(&graph, files);
+        graph
+    }
+
+    /// See [`build_checked`]; returns the number of edges compared.
+    fn assert_edges_match_trees(graph: &CallGraph, files: &[FileInput]) -> usize {
+        let mut compared = 0;
+        for f in files {
+            let functions = collect_functions(f.root, f.source);
+            let local_names: BTreeSet<String> = functions
+                .iter()
+                .map(|function| function.info.name.clone())
+                .collect();
+            // The node of each graph node: the last homonym, as the graph
+            // keeps.
+            let nodes: BTreeMap<String, Node> = functions
+                .iter()
+                .map(|function| (function.info.name.clone(), function.def_node))
+                .collect();
+            for (name, node) in &nodes {
+                let key = (f.filepath.clone(), name.clone());
+                let reference = edges_from_tree(
+                    *node,
+                    f.source,
+                    &f.filepath,
+                    &local_names,
+                    graph.visibility.as_ref(),
+                );
+                assert_eq!(graph.edges[&key], reference, "{key:?}");
+                compared += reference.len();
+            }
+        }
+        compared
+    }
+
     fn parse(src: &str) -> tree_sitter::Tree {
         let mut parser = Parser::new();
         let lang: tree_sitter::Language = tree_sitter_python::LANGUAGE.into();
@@ -1013,7 +1136,7 @@ mod tests {
             root: tree.root_node(),
             source: &src,
         }];
-        let graph = CallGraph::build(&files);
+        let graph = build_checked(&files);
         let edges = &graph.edges[&("m.py".to_string(), "main".to_string())];
         assert_eq!(
             edges.get("helper"),
@@ -1039,7 +1162,7 @@ mod tests {
                 source: &src_u,
             },
         ];
-        let graph = CallGraph::build(&files);
+        let graph = build_checked(&files);
         let edges = &graph.edges[&("a.py".to_string(), "main".to_string())];
         assert_eq!(
             edges.get("helper"),
@@ -1068,7 +1191,7 @@ mod tests {
                 source: &src_u,
             },
         ];
-        let graph = CallGraph::build(&files);
+        let graph = build_checked(&files);
         let specs = specs_with(vec![SinkSpec::new("os.system")]);
         let (own, _extra) = graph.resolve_summaries(&specs, None);
 
@@ -1117,7 +1240,7 @@ mod tests {
             root: tree.root_node(),
             source: &src,
         }];
-        let graph = CallGraph::build(&files);
+        let graph = build_checked(&files);
         let specs = specs_with(vec![]);
         let (own, _extra) = graph.resolve_summaries(&specs, None);
         assert!(own["m.py"].contains_key("f"));
@@ -1134,7 +1257,7 @@ mod tests {
             root: tree.root_node(),
             source: &src,
         }];
-        let graph = CallGraph::build(&files);
+        let graph = build_checked(&files);
         let specs = specs_with(vec![]);
         let (own, _extra) = graph.resolve_summaries(&specs, None);
         assert!(own["m.py"].contains_key("fact"));
@@ -1158,7 +1281,7 @@ mod tests {
                 source: &src_u,
             },
         ];
-        let graph = CallGraph::build(&files);
+        let graph = build_checked(&files);
         let specs = specs_with(vec![]);
         // An imported module function, even not called, is found by the
         // name `a.py` calls it with; since ticket #239 through the graph's
@@ -1191,7 +1314,7 @@ mod tests {
             root: tree.root_node(),
             source: &src,
         }];
-        let graph = CallGraph::build(&files);
+        let graph = build_checked(&files);
         let sccs = graph.strongly_connected_components();
         let flat: Vec<&NodeKey> = sccs.iter().flatten().collect();
         let pos = |name: &str| flat.iter().position(|(_, n)| n == name).unwrap();
@@ -1247,7 +1370,7 @@ mod tests {
                 source: src.as_bytes(),
             })
             .collect();
-        let graph = CallGraph::build(&files);
+        let graph = build_checked(&files);
         let mut names: BTreeMap<String, BTreeSet<String>> = sources
             .iter()
             .map(|(path, _)| (path.to_string(), BTreeSet::new()))

@@ -157,7 +157,7 @@ pub fn key_targets(edges: &Edges) -> KeyTargets {
 }
 
 /// What [`resolve_in_topological_order`] reads from a graph.
-pub struct ClassGraphView<'g, 'tree, F> {
+pub struct ClassGraphView<'g, F> {
     /// Callees-before-callers order of the nodes ([`GraphCaches::topo_order`]).
     pub order: &'g [NodeKey],
     /// Outgoing edges of every node.
@@ -165,7 +165,7 @@ pub struct ClassGraphView<'g, 'tree, F> {
     /// [`key_targets`] of `edges` ([`GraphCaches::key_targets`]).
     pub key_targets: &'g KeyTargets,
     /// The prepared bodies of the nodes.
-    pub prepared: &'g PreparedFiles<'tree, F>,
+    pub prepared: &'g PreparedFiles<F>,
     /// What each file sees of the others.
     pub visibility: &'g dyn Visibility,
     /// Position in `order` of the last node of each file
@@ -212,15 +212,15 @@ pub struct ClassLanguageHooks<C, A> {
 /// What a file sees through its visibility is not copied into `extra`
 /// (ticket #239): its analysis looks it up on demand
 /// ([`super::visibility::FileSummaries`]).
-pub fn resolve_in_topological_order<'tree, F, C, A>(
-    graph: ClassGraphView<'_, 'tree, F>,
+pub fn resolve_in_topological_order<F, C, A>(
+    graph: ClassGraphView<'_, F>,
     hooks: ClassLanguageHooks<C, A>,
     base_specs: &RuleSpecs,
     source_lines_by_file: Option<&LinesByFile>,
     reuse: Option<&SummaryReuse>,
 ) -> ResolvedSummaries
 where
-    C: Fn(&F, &PreparedCfg<'tree>, &RuleSpecs, Option<&RuleLines>) -> FunctionSummary,
+    C: Fn(&F, &PreparedCfg, &RuleSpecs, Option<&RuleLines>) -> FunctionSummary,
     A: Fn(&mut BTreeMap<String, Arc<FunctionSummary>>),
 {
     let mut changed: BTreeSet<NodeKey> = BTreeSet::new();

@@ -10,33 +10,44 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use super::{
-    TaintFindings, TaintLanguage, call_graph_inputs, file_summaries, source_lines_by_file,
-};
+use super::{TaintFile, TaintFindings, TaintLanguage, file_summaries, missing_prepared_file};
 use crate::scan::dataflow::call_graph::{NodeKey, ResolvedSummaries, SummaryReuse};
 use crate::scan::dataflow::line_facts::{LinesByFile, RuleLines};
-use crate::scan::dataflow::php_call_graph::PhpCallGraph;
-use crate::scan::dataflow::php_taint_scan::{run_taint_rule_php, run_taint_rule_php_prepared};
+use crate::scan::dataflow::php_call_graph::{PhpCallGraph, PhpFile};
+use crate::scan::dataflow::php_taint_scan::run_taint_rule_php_prepared;
 use crate::scan::dataflow::transfer::RuleSpecs;
 use crate::scan::dataflow::visibility::{FileSummaries, Visibility};
 use crate::scan::orchestrator::{ParsedFile, SourceLanguage};
+use tree_sitter::Node;
 
 /// PHP files of the scan, linked by their call graph.
-pub(in crate::scan::orchestrator) struct PhpTaint<'a> {
-    call_graph: PhpCallGraph<'a>,
+pub(in crate::scan::orchestrator) struct PhpTaint {
+    call_graph: PhpCallGraph,
     source_lines: LinesByFile,
 }
 
-impl<'a> TaintLanguage<'a> for PhpTaint<'a> {
+impl TaintLanguage for PhpTaint {
+    type File = PhpFile;
     const NAME: &'static str = "php";
     const FILE_LANGUAGES: &'static [SourceLanguage] = &[SourceLanguage::Php];
     const RULE_LANGUAGE: SourceLanguage = SourceLanguage::Php;
     const PHASE_LABEL: (&'static str, &'static str) = ("scan_phase_c_php", "phase C - PHP (taint)");
 
-    fn build(files: &[&'a ParsedFile]) -> Self {
+    fn extract(root: Node<'_>, source: &[u8]) -> PhpFile {
+        PhpFile::extract(root, source)
+    }
+
+    fn take(file: TaintFile) -> Option<PhpFile> {
+        match file {
+            TaintFile::Php(file) => Some(file),
+            _ => None,
+        }
+    }
+
+    fn build(files: Vec<(String, PhpFile)>, source_lines: LinesByFile) -> Self {
         PhpTaint {
-            call_graph: PhpCallGraph::build(&call_graph_inputs(files)),
-            source_lines: source_lines_by_file(files),
+            call_graph: PhpCallGraph::build_from(files),
+            source_lines,
         }
     }
 
@@ -77,21 +88,18 @@ impl<'a> TaintLanguage<'a> for PhpTaint<'a> {
         )));
         // The graph prepared every file of the pass once for all its
         // rules (ticket #192). A file it does not know cannot happen (the
-        // pass is built from the files it analyzes); it would still be
-        // analyzed, only prepared again for this rule.
-        match self.call_graph.prepared_file(&file.rel_path) {
-            Some(prepared) => run_taint_rule_php_prepared(
-                prepared,
-                file.bytes(),
-                specs,
-                Some(RuleLines::shared(&file.source, specs)),
-            ),
-            None => run_taint_rule_php(
-                file.tree().root_node(),
-                file.bytes(),
-                specs,
-                Some(&file.source),
-            ),
-        }
+        // pass is built from the files it analyzes); one would stop the
+        // scan naming the file rather than analyse it without its
+        // preparation: its tree is gone (ticket #281).
+        let prepared = self
+            .call_graph
+            .prepared_file(&file.rel_path)
+            .unwrap_or_else(|| missing_prepared_file(Self::NAME, &file.rel_path));
+        run_taint_rule_php_prepared(
+            prepared,
+            file.bytes(),
+            specs,
+            Some(RuleLines::shared(&file.source, specs)),
+        )
     }
 }

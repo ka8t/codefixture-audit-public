@@ -24,7 +24,7 @@
 //!   - **Building the CFG from a function**:
 //!     `build_csharp_cfg` already directly accepts a `block` node
 //!     (no separate `constructor_body` type in this grammar,
-//!     unlike Java) — `fn.body_node` IS the expected input,
+//!     unlike Java) — the collected `body` IS the expected input,
 //!     no wrapping needed.
 //!   - **Namespaces** (`namespace Foo { ... }`, with no
 //!     Java equivalent): the block form wraps its types in a
@@ -47,7 +47,7 @@
 //! detection). `CSharpFunctionInfo` therefore does NOT have this field,
 //! unlike `JavaFunctionInfo`.
 
-use super::prepared::{PreparedCfg, PreparedFile, PreparedFunction};
+use super::prepared::{CollectedFunction, PreparedCfg, PreparedFile, PreparedFunction};
 use super::worklist::prepare_csharp_ir;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -73,11 +73,11 @@ const NAMESPACE_DECLS: [&str; 1] = ["namespace_declaration"];
 /// `name`: dotted name `"ClassName.Method"` (methods) or
 /// `"ClassName.<init>"` (constructors — same convention as
 /// `JavaFunctionInfo`, avoids the `Foo.Foo` collision with a method
-/// named like the class). `body_node`: tree-sitter node of the body
-/// (`block`), directly consumable by `build_csharp_cfg`.
-pub struct CSharpFunctionInfo<'tree> {
+/// named like the class). Holds no node of the parse tree (ticket
+/// #281): the body (`block`), which `build_csharp_cfg` reads, is the
+/// `body` of the [`CollectedFunction`] the collection returns.
+pub struct CSharpFunctionInfo {
     pub name: String,
-    pub body_node: Node<'tree>,
     pub param_names: Vec<String>,
     pub lineno: usize,
 }
@@ -120,7 +120,7 @@ fn param_names<'tree>(params_node: Option<Node<'tree>>, source: &[u8]) -> Vec<St
 pub fn collect_csharp_functions<'tree>(
     root: Node<'tree>,
     source: &[u8],
-) -> Vec<CSharpFunctionInfo<'tree>> {
+) -> Vec<CollectedFunction<'tree, CSharpFunctionInfo>> {
     let mut functions = Vec::new();
     for type_decl in iter_top_level_type_decls(root) {
         collect_type_members(type_decl, source, &mut functions);
@@ -156,7 +156,7 @@ fn iter_top_level_type_decls<'tree>(root: Node<'tree>) -> Vec<Node<'tree>> {
 fn collect_type_members<'tree>(
     type_decl: Node<'tree>,
     source: &[u8],
-    out: &mut Vec<CSharpFunctionInfo<'tree>>,
+    out: &mut Vec<CollectedFunction<'tree, CSharpFunctionInfo>>,
 ) {
     let Some(name_node) = type_decl.child_by_field_name("name") else {
         return;
@@ -189,17 +189,19 @@ fn method_info<'tree>(
     node: Node<'tree>,
     type_name: &str,
     source: &[u8],
-) -> Option<CSharpFunctionInfo<'tree>> {
+) -> Option<CollectedFunction<'tree, CSharpFunctionInfo>> {
     let body = node.child_by_field_name("body")?; // interface member/abstract method: nothing to analyze
     let method_name = node
         .child_by_field_name("name")
         .map(|n| text(n, source))
         .unwrap_or_else(|| "?".to_string());
-    Some(CSharpFunctionInfo {
-        name: format!("{type_name}.{method_name}"),
-        body_node: body,
-        param_names: param_names(node.child_by_field_name("parameters"), source),
-        lineno: node.start_position().row + 1,
+    Some(CollectedFunction {
+        info: CSharpFunctionInfo {
+            name: format!("{type_name}.{method_name}"),
+            param_names: param_names(node.child_by_field_name("parameters"), source),
+            lineno: node.start_position().row + 1,
+        },
+        body,
     })
 }
 
@@ -207,13 +209,15 @@ fn constructor_info<'tree>(
     node: Node<'tree>,
     type_name: &str,
     source: &[u8],
-) -> Option<CSharpFunctionInfo<'tree>> {
+) -> Option<CollectedFunction<'tree, CSharpFunctionInfo>> {
     let body = node.child_by_field_name("body")?;
-    Some(CSharpFunctionInfo {
-        name: format!("{type_name}.<init>"),
-        body_node: body,
-        param_names: param_names(node.child_by_field_name("parameters"), source),
-        lineno: node.start_position().row + 1,
+    Some(CollectedFunction {
+        info: CSharpFunctionInfo {
+            name: format!("{type_name}.<init>"),
+            param_names: param_names(node.child_by_field_name("parameters"), source),
+            lineno: node.start_position().row + 1,
+        },
+        body,
     })
 }
 
@@ -225,17 +229,17 @@ fn constructor_info<'tree>(
 /// then [`compute_csharp_summary_with`]. A caller that already holds the prepared
 /// body (the call graph, ticket #192) calls [`compute_csharp_summary_with`].
 pub fn compute_csharp_summary<'tree>(
-    fn_info: &CSharpFunctionInfo<'tree>,
+    function: &CollectedFunction<'tree, CSharpFunctionInfo>,
     specs: &RuleSpecs,
     source: &'tree [u8],
     source_lines: Option<&RuleLines>,
 ) -> FunctionSummary {
     let body = PreparedCfg::new(
-        super::csharp_cfg::build_csharp_cfg(fn_info.body_node, source),
+        super::csharp_cfg::build_csharp_cfg(function.body, source),
         source,
         prepare_csharp_ir,
     );
-    compute_csharp_summary_with(fn_info, &body, specs, source_lines)
+    compute_csharp_summary_with(&function.info, &body, specs, source_lines)
 }
 
 /// Summary of a C# function whose body is already prepared
@@ -259,21 +263,29 @@ pub fn compute_csharp_summary_with(
 
 /// Prepares a C# file for every taint rule of the scan (ticket
 /// #192): every collected method (no module top level: executable code only lives in methods).
-pub fn prepare_csharp_file<'tree>(
-    root: Node<'tree>,
-    source: &'tree [u8],
-) -> PreparedFile<'tree, CSharpFunctionInfo<'tree>> {
+pub fn prepare_csharp_file(root: Node<'_>, source: &[u8]) -> PreparedFile<CSharpFunctionInfo> {
+    prepare_csharp_functions(collect_csharp_functions(root, source), source)
+}
+
+/// Prepares the methods `functions` of a C# file, already collected
+/// ([`collect_csharp_functions`]): what [`prepare_csharp_file`] does, for
+/// a caller that also reads the collected bodies (the call graph, ticket
+/// #281). The bodies are dropped once prepared.
+pub fn prepare_csharp_functions(
+    functions: Vec<CollectedFunction<'_, CSharpFunctionInfo>>,
+    source: &[u8],
+) -> PreparedFile<CSharpFunctionInfo> {
     PreparedFile {
         module: None,
-        functions: collect_csharp_functions(root, source)
+        functions: functions
             .into_iter()
-            .map(|info| PreparedFunction {
+            .map(|function| PreparedFunction {
                 body: Some(PreparedCfg::new(
-                    super::csharp_cfg::build_csharp_cfg(info.body_node, source),
+                    super::csharp_cfg::build_csharp_cfg(function.body, source),
                     source,
                     prepare_csharp_ir,
                 )),
-                info,
+                info: function.info,
             })
             .collect(),
     }
@@ -440,9 +452,18 @@ fn collect_local_var_types(node: Node, source: &[u8], out: &mut BTreeMap<String,
 /// built over the WHOLE file, not per method scope. Method
 /// PARAMETERS are not covered.
 pub fn collect_csharp_local_types(root: Node, source: &[u8]) -> BTreeMap<String, String> {
+    local_types_of(&collect_csharp_functions(root, source), source)
+}
+
+/// [`collect_csharp_local_types`] over methods already collected, in
+/// collection order (the last declaration of a name wins).
+pub fn local_types_of(
+    functions: &[CollectedFunction<'_, CSharpFunctionInfo>],
+    source: &[u8],
+) -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
-    for fn_info in collect_csharp_functions(root, source) {
-        collect_local_var_types(fn_info.body_node, source, &mut out);
+    for function in functions {
+        collect_local_var_types(function.body, source, &mut out);
     }
     out
 }
@@ -599,7 +620,7 @@ mod tests {
         let names: std::collections::BTreeSet<String> =
             collect_csharp_functions(tree.root_node(), src.as_bytes())
                 .into_iter()
-                .map(|f| f.name)
+                .map(|f| f.info.name)
                 .collect();
         assert_eq!(
             names,
@@ -621,7 +642,7 @@ mod tests {
         let names: std::collections::BTreeSet<String> =
             collect_csharp_functions(tree.root_node(), src.as_bytes())
                 .into_iter()
-                .map(|f| f.name)
+                .map(|f| f.info.name)
                 .collect();
         assert_eq!(
             names,
@@ -639,7 +660,7 @@ mod tests {
         let names: std::collections::BTreeSet<String> =
             collect_csharp_functions(tree.root_node(), src.as_bytes())
                 .into_iter()
-                .map(|f| f.name)
+                .map(|f| f.info.name)
                 .collect();
         assert_eq!(
             names,
@@ -656,7 +677,7 @@ mod tests {
         let names: std::collections::BTreeSet<String> =
             collect_csharp_functions(tree.root_node(), src.as_bytes())
                 .into_iter()
-                .map(|f| f.name)
+                .map(|f| f.info.name)
                 .collect();
         assert_eq!(
             names,
@@ -671,7 +692,7 @@ mod tests {
         let names: std::collections::BTreeSet<String> =
             collect_csharp_functions(tree.root_node(), src.as_bytes())
                 .into_iter()
-                .map(|f| f.name)
+                .map(|f| f.info.name)
                 .collect();
         assert_eq!(names, std::collections::BTreeSet::from(["C.M".to_string()]));
     }
@@ -685,7 +706,7 @@ mod tests {
         let names: std::collections::BTreeSet<String> =
             collect_csharp_functions(tree.root_node(), src.as_bytes())
                 .into_iter()
-                .map(|f| f.name)
+                .map(|f| f.info.name)
                 .collect();
         assert_eq!(names, std::collections::BTreeSet::from(["C.M".to_string()]));
     }
@@ -697,7 +718,7 @@ mod tests {
         let names: std::collections::BTreeSet<String> =
             collect_csharp_functions(tree.root_node(), src.as_bytes())
                 .into_iter()
-                .map(|f| f.name)
+                .map(|f| f.info.name)
                 .collect();
         assert_eq!(names, std::collections::BTreeSet::from(["C.M".to_string()]));
     }

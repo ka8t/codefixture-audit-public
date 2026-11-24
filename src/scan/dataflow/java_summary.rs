@@ -33,7 +33,7 @@
 //! consumed by the future `java_taint_scan.rs` to seed
 //! `initial_state`.
 
-use super::prepared::{PreparedCfg, PreparedFile, PreparedFunction};
+use super::prepared::{CollectedFunction, PreparedCfg, PreparedFile, PreparedFunction};
 use super::worklist::prepare_java_ir;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -56,8 +56,9 @@ const TOP_LEVEL_TYPE_DECLS: [&str; 4] = [
 /// `name`: dotted name `"ClassName.method"` (methods) or
 /// `"ClassName.<init>"` (constructors — Java bytecode convention,
 /// avoids the `Foo.Foo` collision with a method named like the
-/// class). `body_node`: tree-sitter node for the body (`block`/
-/// `constructor_body`), directly consumable by `build_java_cfg`.
+/// class). Holds no node of the parse tree (ticket #281): the body
+/// (`block`/`constructor_body`), which `build_java_cfg` reads, is the
+/// `body` of the [`CollectedFunction`] the collection returns.
 /// `route_param_names`: subset of `param_names` bound by Spring
 /// right at handler entry — annotated (`@RequestParam`/...) or, for a
 /// mapped handler (`@GetMapping`/...), not annotated at all (implicit
@@ -66,9 +67,8 @@ const TOP_LEVEL_TYPE_DECLS: [&str; 4] = [
 // Clone: the call graph keeps a copy as its node, next to the
 // prepared function that owns the original (ticket #192).
 #[derive(Clone)]
-pub struct JavaFunctionInfo<'tree> {
+pub struct JavaFunctionInfo {
     pub name: String,
-    pub body_node: Node<'tree>,
     pub param_names: Vec<String>,
     pub lineno: usize,
     pub route_param_names: Vec<String>,
@@ -354,7 +354,7 @@ fn annotated_params<'tree>(
 pub fn collect_java_functions<'tree>(
     root: Node<'tree>,
     source: &[u8],
-) -> Vec<JavaFunctionInfo<'tree>> {
+) -> Vec<CollectedFunction<'tree, JavaFunctionInfo>> {
     let mut functions = Vec::new();
     let mut w = root.walk();
     for type_decl in root.named_children(&mut w) {
@@ -368,7 +368,7 @@ pub fn collect_java_functions<'tree>(
 fn collect_type_members<'tree>(
     type_decl: Node<'tree>,
     source: &[u8],
-    out: &mut Vec<JavaFunctionInfo<'tree>>,
+    out: &mut Vec<CollectedFunction<'tree, JavaFunctionInfo>>,
 ) {
     let Some(name_node) = type_decl.child_by_field_name("name") else {
         return;
@@ -382,15 +382,15 @@ fn collect_type_members<'tree>(
     for member in body.named_children(&mut w) {
         match member.kind() {
             "method_declaration" => {
-                if let Some(mut fn_info) = method_info(member, &class_name, source) {
-                    fn_info.class_fields = fields.clone();
-                    out.push(fn_info);
+                if let Some(mut function) = method_info(member, &class_name, source) {
+                    function.info.class_fields = fields.clone();
+                    out.push(function);
                 }
             }
             "constructor_declaration" => {
-                if let Some(mut fn_info) = constructor_info(member, &class_name, source) {
-                    fn_info.class_fields = fields.clone();
-                    out.push(fn_info);
+                if let Some(mut function) = constructor_info(member, &class_name, source) {
+                    function.info.class_fields = fields.clone();
+                    out.push(function);
                 }
             }
             k if TOP_LEVEL_TYPE_DECLS.contains(&k) => {
@@ -440,25 +440,27 @@ fn method_info<'tree>(
     node: Node<'tree>,
     class_name: &str,
     source: &[u8],
-) -> Option<JavaFunctionInfo<'tree>> {
+) -> Option<CollectedFunction<'tree, JavaFunctionInfo>> {
     let body = node.child_by_field_name("body")?; // abstract method/interface: nothing to analyze
     let method_name = node
         .child_by_field_name("name")
         .map(|n| text(n, source))
         .unwrap_or_else(|| "?".to_string());
     let params_node = node.child_by_field_name("parameters");
-    Some(JavaFunctionInfo {
-        name: format!("{class_name}.{method_name}"),
-        body_node: body,
-        param_names: param_names(params_node, source),
-        lineno: node.start_position().row + 1,
-        route_param_names: route_param_names(
-            params_node,
-            method_has_spring_mapping(node, source),
-            source,
-        ),
-        annotated_params: annotated_params(params_node, source),
-        class_fields: Vec::new(),
+    Some(CollectedFunction {
+        info: JavaFunctionInfo {
+            name: format!("{class_name}.{method_name}"),
+            param_names: param_names(params_node, source),
+            lineno: node.start_position().row + 1,
+            route_param_names: route_param_names(
+                params_node,
+                method_has_spring_mapping(node, source),
+                source,
+            ),
+            annotated_params: annotated_params(params_node, source),
+            class_fields: Vec::new(),
+        },
+        body,
     })
 }
 
@@ -466,16 +468,18 @@ fn constructor_info<'tree>(
     node: Node<'tree>,
     class_name: &str,
     source: &[u8],
-) -> Option<JavaFunctionInfo<'tree>> {
+) -> Option<CollectedFunction<'tree, JavaFunctionInfo>> {
     let body = node.child_by_field_name("body")?;
-    Some(JavaFunctionInfo {
-        name: format!("{class_name}.<init>"),
-        body_node: body,
-        param_names: param_names(node.child_by_field_name("parameters"), source),
-        lineno: node.start_position().row + 1,
-        route_param_names: Vec::new(),
-        annotated_params: annotated_params(node.child_by_field_name("parameters"), source),
-        class_fields: Vec::new(),
+    Some(CollectedFunction {
+        info: JavaFunctionInfo {
+            name: format!("{class_name}.<init>"),
+            param_names: param_names(node.child_by_field_name("parameters"), source),
+            lineno: node.start_position().row + 1,
+            route_param_names: Vec::new(),
+            annotated_params: annotated_params(node.child_by_field_name("parameters"), source),
+            class_fields: Vec::new(),
+        },
+        body,
     })
 }
 
@@ -487,17 +491,17 @@ fn constructor_info<'tree>(
 /// then [`compute_java_summary_with`]. A caller that already holds the prepared
 /// body (the call graph, ticket #192) calls [`compute_java_summary_with`].
 pub fn compute_java_summary<'tree>(
-    fn_info: &JavaFunctionInfo<'tree>,
+    function: &CollectedFunction<'tree, JavaFunctionInfo>,
     specs: &RuleSpecs,
     source: &'tree [u8],
     source_lines: Option<&RuleLines>,
 ) -> FunctionSummary {
     let body = PreparedCfg::new(
-        super::java_cfg::build_java_cfg(fn_info.body_node, source),
+        super::java_cfg::build_java_cfg(function.body, source),
         source,
         prepare_java_ir,
     );
-    compute_java_summary_with(fn_info, &body, specs, source_lines)
+    compute_java_summary_with(&function.info, &body, specs, source_lines)
 }
 
 /// Summary of a Java function whose body is already prepared
@@ -521,21 +525,29 @@ pub fn compute_java_summary_with(
 
 /// Prepares a Java file for every taint rule of the scan (ticket
 /// #192): every collected method (no module top level: executable code only lives in methods).
-pub fn prepare_java_file<'tree>(
-    root: Node<'tree>,
-    source: &'tree [u8],
-) -> PreparedFile<'tree, JavaFunctionInfo<'tree>> {
+pub fn prepare_java_file(root: Node<'_>, source: &[u8]) -> PreparedFile<JavaFunctionInfo> {
+    prepare_java_functions(collect_java_functions(root, source), source)
+}
+
+/// Prepares the methods `functions` of a Java file, already collected
+/// ([`collect_java_functions`]): what [`prepare_java_file`] does, for a
+/// caller that also reads the collected bodies (the call graph, ticket
+/// #281). The bodies are dropped once prepared.
+pub fn prepare_java_functions(
+    functions: Vec<CollectedFunction<'_, JavaFunctionInfo>>,
+    source: &[u8],
+) -> PreparedFile<JavaFunctionInfo> {
     PreparedFile {
         module: None,
-        functions: collect_java_functions(root, source)
+        functions: functions
             .into_iter()
-            .map(|info| PreparedFunction {
+            .map(|function| PreparedFunction {
                 body: Some(PreparedCfg::new(
-                    super::java_cfg::build_java_cfg(info.body_node, source),
+                    super::java_cfg::build_java_cfg(function.body, source),
                     source,
                     prepare_java_ir,
                 )),
-                info,
+                info: function.info,
             })
             .collect(),
     }
@@ -566,14 +578,14 @@ pub fn compute_java_file_summaries<'tree>(
     // rule on this file (ticket #190).
     let rule_lines = source_lines.map(|lines| RuleLines::new(lines, specs));
     let mut summaries = BTreeMap::new();
-    for fn_info in collect_java_functions(root, source) {
+    for function in collect_java_functions(root, source) {
         let summary = Arc::new(compute_java_summary(
-            &fn_info,
+            &function,
             specs,
             source,
             rule_lines.as_ref(),
         ));
-        summaries.insert(fn_info.name, summary);
+        summaries.insert(function.info.name, summary);
     }
     add_bare_name_aliases(&mut summaries);
     summaries
@@ -667,9 +679,18 @@ fn collect_local_var_types(node: Node, source: &[u8], out: &mut BTreeMap<String,
 /// covered (out of scope for the current need, which targets
 /// local variables like `SeparateClassRequest scr = new ...`).
 pub fn collect_java_local_types(root: Node, source: &[u8]) -> BTreeMap<String, String> {
+    local_types_of(&collect_java_functions(root, source), source)
+}
+
+/// [`collect_java_local_types`] over methods already collected, in
+/// collection order (the last declaration of a name wins).
+pub fn local_types_of(
+    functions: &[CollectedFunction<'_, JavaFunctionInfo>],
+    source: &[u8],
+) -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
-    for fn_info in collect_java_functions(root, source) {
-        collect_local_var_types(fn_info.body_node, source, &mut out);
+    for function in functions {
+        collect_local_var_types(function.body, source, &mut out);
     }
     out
 }
@@ -826,7 +847,7 @@ mod tests {
         let names: std::collections::BTreeSet<String> =
             collect_java_functions(tree.root_node(), src.as_bytes())
                 .into_iter()
-                .map(|f| f.name)
+                .map(|f| f.info.name)
                 .collect();
         assert_eq!(
             names,
@@ -848,7 +869,7 @@ mod tests {
         let names: std::collections::BTreeSet<String> =
             collect_java_functions(tree.root_node(), src.as_bytes())
                 .into_iter()
-                .map(|f| f.name)
+                .map(|f| f.info.name)
                 .collect();
         assert_eq!(
             names,
@@ -866,7 +887,7 @@ mod tests {
         let names: std::collections::BTreeSet<String> =
             collect_java_functions(tree.root_node(), src.as_bytes())
                 .into_iter()
-                .map(|f| f.name)
+                .map(|f| f.info.name)
                 .collect();
         assert_eq!(
             names,

@@ -37,19 +37,21 @@
 //! normally.
 
 use super::line_facts::{RuleLines, SourceLines};
-use super::prepared::{PreparedCfg, PreparedFile, PreparedFunction};
+use super::prepared::{CollectedFunction, PreparedCfg, PreparedFile, PreparedFunction};
 use super::transfer::{FunctionSummary, RuleSpecs};
 use super::worklist::prepare_php_ir;
 use tree_sitter::Node;
 
 /// Metadata for a PHP function (top-level function, class method,
-/// `function(...) {...}` closure).
+/// `function(...) {...}` closure). Holds no node of the parse tree
+/// (ticket #281): the body (a `compound_statement`), which
+/// `build_php_cfg` reads, is the `body` of the [`CollectedFunction`] the
+/// collection returns.
 // Clone: the call graph keeps a copy as its node, next to the
 // prepared function that owns the original (ticket #192).
 #[derive(Clone)]
-pub struct PhpFunctionInfo<'tree> {
+pub struct PhpFunctionInfo {
     pub name: String,
-    pub body_node: Node<'tree>,
     pub param_names: Vec<String>,
     pub lineno: usize,
 }
@@ -110,7 +112,7 @@ fn inferred_name_from_context<'tree>(node: Node<'tree>, source: &[u8]) -> Option
 pub fn collect_php_functions<'tree>(
     root: Node<'tree>,
     source: &[u8],
-) -> Vec<PhpFunctionInfo<'tree>> {
+) -> Vec<CollectedFunction<'tree, PhpFunctionInfo>> {
     let mut functions = Vec::new();
     collect_functions_rec(root, source, &mut functions);
     functions
@@ -119,18 +121,20 @@ pub fn collect_php_functions<'tree>(
 fn collect_functions_rec<'tree>(
     node: Node<'tree>,
     source: &[u8],
-    out: &mut Vec<PhpFunctionInfo<'tree>>,
+    out: &mut Vec<CollectedFunction<'tree, PhpFunctionInfo>>,
 ) {
     if FUNCTION_LIKE_KINDS.contains(&node.kind())
         && let Some(body) = node.child_by_field_name("body")
         && body.kind() == "compound_statement"
     {
         let name = function_name(node, source);
-        out.push(PhpFunctionInfo {
-            name,
-            body_node: body,
-            param_names: param_names(node.child_by_field_name("parameters"), source),
-            lineno: node.start_position().row + 1,
+        out.push(CollectedFunction {
+            info: PhpFunctionInfo {
+                name,
+                param_names: param_names(node.child_by_field_name("parameters"), source),
+                lineno: node.start_position().row + 1,
+            },
+            body,
         });
     }
     let mut w = node.walk();
@@ -164,17 +168,17 @@ fn function_name(node: Node, source: &[u8]) -> String {
 /// then [`compute_php_summary_with`]. A caller that already holds the prepared
 /// body (the call graph, ticket #192) calls [`compute_php_summary_with`].
 pub fn compute_php_summary<'tree>(
-    fn_info: &PhpFunctionInfo<'tree>,
+    function: &CollectedFunction<'tree, PhpFunctionInfo>,
     specs: &RuleSpecs,
     source: &'tree [u8],
     source_lines: Option<&RuleLines>,
 ) -> FunctionSummary {
     let body = PreparedCfg::new(
-        super::php_cfg::build_php_cfg(fn_info.body_node, source),
+        super::php_cfg::build_php_cfg(function.body, source),
         source,
         prepare_php_ir,
     );
-    compute_php_summary_with(fn_info, &body, specs, source_lines)
+    compute_php_summary_with(&function.info, &body, specs, source_lines)
 }
 
 /// Summary of a PHP function whose body is already prepared
@@ -198,25 +202,35 @@ pub fn compute_php_summary_with(
 
 /// Prepares a PHP file for every taint rule of the scan (ticket
 /// #192): the module top level and every collected function.
-pub fn prepare_php_file<'tree>(
-    root: Node<'tree>,
-    source: &'tree [u8],
-) -> PreparedFile<'tree, PhpFunctionInfo<'tree>> {
+pub fn prepare_php_file(root: Node<'_>, source: &[u8]) -> PreparedFile<PhpFunctionInfo> {
+    prepare_php_functions(root, collect_php_functions(root, source), source)
+}
+
+/// Prepares the module top level `root` of a PHP file and its functions
+/// `functions`, already collected ([`collect_php_functions`]): what
+/// [`prepare_php_file`] does, for a caller that also reads the collected
+/// bodies (the call graph, ticket #281). The bodies are dropped once
+/// prepared.
+pub fn prepare_php_functions(
+    root: Node<'_>,
+    functions: Vec<CollectedFunction<'_, PhpFunctionInfo>>,
+    source: &[u8],
+) -> PreparedFile<PhpFunctionInfo> {
     PreparedFile {
         module: Some(PreparedCfg::new(
             super::php_cfg::build_php_cfg(root, source),
             source,
             prepare_php_ir,
         )),
-        functions: collect_php_functions(root, source)
+        functions: functions
             .into_iter()
-            .map(|info| PreparedFunction {
+            .map(|function| PreparedFunction {
                 body: Some(PreparedCfg::new(
-                    super::php_cfg::build_php_cfg(info.body_node, source),
+                    super::php_cfg::build_php_cfg(function.body, source),
                     source,
                     prepare_php_ir,
                 )),
-                info,
+                info: function.info,
             })
             .collect(),
     }

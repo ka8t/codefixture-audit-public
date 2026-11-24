@@ -5,56 +5,55 @@
 //! once per scan. Java also knows the declared type of each field and
 //! local variable, so that `obj.method()` resolves through the class of
 //! `obj` (Round 5); mirrors `dataflow_taint_java.py`, except that the
-//! summaries are computed once by the call graph, as for Python.
+//! summaries are computed once by the call graph, as for Python, and the
+//! declared types are the graph's own table (ticket #281).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use super::{
-    TaintFindings, TaintLanguage, call_graph_inputs, file_summaries, source_lines_by_file,
-};
+use super::{TaintFile, TaintFindings, TaintLanguage, file_summaries, missing_prepared_file};
 use crate::scan::dataflow::call_graph::{NodeKey, ResolvedSummaries, SummaryReuse};
-use crate::scan::dataflow::java_call_graph::JavaCallGraph;
-use crate::scan::dataflow::java_summary::{collect_java_field_types, collect_java_local_types};
-use crate::scan::dataflow::java_taint_scan::{run_taint_rule_java, run_taint_rule_java_prepared};
+use crate::scan::dataflow::java_call_graph::{JavaCallGraph, JavaFile};
+use crate::scan::dataflow::java_taint_scan::run_taint_rule_java_prepared;
 use crate::scan::dataflow::line_facts::{LinesByFile, RuleLines};
 use crate::scan::dataflow::transfer::RuleSpecs;
 use crate::scan::dataflow::visibility::{FileSummaries, Visibility};
 use crate::scan::orchestrator::{ParsedFile, SourceLanguage};
+use tree_sitter::Node;
 
 /// Java files of the scan, linked by their call graph, with the declared
 /// types of each file.
-pub(in crate::scan::orchestrator) struct JavaTaint<'a> {
-    call_graph: JavaCallGraph<'a>,
+pub(in crate::scan::orchestrator) struct JavaTaint {
+    call_graph: JavaCallGraph,
     source_lines: LinesByFile,
-    /// Variable or field name → declared class, per file. Recomputed here,
-    /// independently of the call graph: it is the same table as the one
-    /// `JavaCallGraph::build` merges and MUST stay in sync with it (see
-    /// `collect_java_field_types`; same choice as `dataflow_taint_java.py`).
-    type_maps: BTreeMap<String, BTreeMap<String, String>>,
 }
 
-impl<'a> TaintLanguage<'a> for JavaTaint<'a> {
+impl TaintLanguage for JavaTaint {
+    type File = JavaFile;
     const NAME: &'static str = "java";
     const FILE_LANGUAGES: &'static [SourceLanguage] = &[SourceLanguage::Java];
     const RULE_LANGUAGE: SourceLanguage = SourceLanguage::Java;
     const PHASE_LABEL: (&'static str, &'static str) =
         ("scan_phase_c_java", "phase C - Java (taint)");
 
-    fn build(files: &[&'a ParsedFile]) -> Self {
-        let type_maps = files
-            .iter()
-            .map(|pf| {
-                let root = pf.tree().root_node();
-                let mut type_map = collect_java_field_types(root, pf.bytes());
-                type_map.extend(collect_java_local_types(root, pf.bytes()));
-                (pf.rel_path.clone(), type_map)
-            })
-            .collect();
+    fn extract(root: Node<'_>, source: &[u8]) -> JavaFile {
+        JavaFile::extract(root, source)
+    }
+
+    fn take(file: TaintFile) -> Option<JavaFile> {
+        match file {
+            TaintFile::Java(file) => Some(file),
+            _ => None,
+        }
+    }
+
+    fn build(files: Vec<(String, JavaFile)>, source_lines: LinesByFile) -> Self {
+        // The declared types of each file are the graph's own table
+        // (`JavaCallGraph::type_map`): the pass used to compute it a
+        // second time from the trees (ticket #281).
         JavaTaint {
-            call_graph: JavaCallGraph::build(&call_graph_inputs(files)),
-            source_lines: source_lines_by_file(files),
-            type_maps,
+            call_graph: JavaCallGraph::build_from(files),
+            source_lines,
         }
     }
 
@@ -93,27 +92,30 @@ impl<'a> TaintLanguage<'a> for JavaTaint<'a> {
             &file.rel_path,
             resolved.all.clone(),
         )));
+        // Variable or field name → declared class: the table the graph
+        // resolved the file's edges with (`JavaCallGraph::type_map`), so
+        // that both resolve `obj.method()` alike. Deliberate deviation
+        // from `dataflow_taint_java.py`, which computes the same table a
+        // second time for the analysis; the pass did too until ticket
+        // #281.
         specs.type_map = self
-            .type_maps
-            .get(&file.rel_path)
+            .call_graph
+            .type_map(&file.rel_path)
             .cloned()
             .unwrap_or_default();
         // The graph prepared every file of the pass once for all its
         // rules (ticket #192). A file it does not know cannot happen (the
-        // pass is built from the files it analyzes); it would still be
-        // analyzed, only prepared again for this rule.
-        match self.call_graph.prepared_file(&file.rel_path) {
-            Some(prepared) => run_taint_rule_java_prepared(
-                prepared,
-                specs,
-                Some(RuleLines::shared(&file.source, specs)),
-            ),
-            None => run_taint_rule_java(
-                file.tree().root_node(),
-                file.bytes(),
-                specs,
-                Some(&file.source),
-            ),
-        }
+        // pass is built from the files it analyzes); one would stop the
+        // scan naming the file rather than analyse it without its
+        // preparation: its tree is gone (ticket #281).
+        let prepared = self
+            .call_graph
+            .prepared_file(&file.rel_path)
+            .unwrap_or_else(|| missing_prepared_file(Self::NAME, &file.rel_path));
+        run_taint_rule_java_prepared(
+            prepared,
+            specs,
+            Some(RuleLines::shared(&file.source, specs)),
+        )
     }
 }

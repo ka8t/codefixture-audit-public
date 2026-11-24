@@ -12,24 +12,24 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use super::{
-    TaintFindings, TaintLanguage, call_graph_inputs, file_summaries, source_lines_by_file,
-};
+use super::{TaintFile, TaintFindings, TaintLanguage, file_summaries, missing_prepared_file};
 use crate::scan::dataflow::call_graph::{NodeKey, ResolvedSummaries, SummaryReuse};
-use crate::scan::dataflow::js_call_graph::JsCallGraph;
-use crate::scan::dataflow::js_taint_scan::{run_taint_rule_js, run_taint_rule_js_prepared};
+use crate::scan::dataflow::js_call_graph::{JsCallGraph, JsFile};
+use crate::scan::dataflow::js_taint_scan::run_taint_rule_js_prepared;
 use crate::scan::dataflow::line_facts::{LinesByFile, RuleLines};
 use crate::scan::dataflow::transfer::RuleSpecs;
 use crate::scan::dataflow::visibility::{FileSummaries, Visibility};
 use crate::scan::orchestrator::{ParsedFile, SourceLanguage};
+use tree_sitter::Node;
 
 /// JavaScript and TypeScript files of the scan, linked by their call graph.
-pub(in crate::scan::orchestrator) struct JsTaint<'a> {
-    call_graph: JsCallGraph<'a>,
+pub(in crate::scan::orchestrator) struct JsTaint {
+    call_graph: JsCallGraph,
     source_lines: LinesByFile,
 }
 
-impl<'a> TaintLanguage<'a> for JsTaint<'a> {
+impl TaintLanguage for JsTaint {
+    type File = JsFile;
     const NAME: &'static str = "javascript";
     const FILE_LANGUAGES: &'static [SourceLanguage] =
         &[SourceLanguage::JavaScript, SourceLanguage::TypeScript];
@@ -37,10 +37,21 @@ impl<'a> TaintLanguage<'a> for JsTaint<'a> {
     const PHASE_LABEL: (&'static str, &'static str) =
         ("scan_phase_c_js", "phase C - JS/TS (taint)");
 
-    fn build(files: &[&'a ParsedFile]) -> Self {
+    fn extract(root: Node<'_>, source: &[u8]) -> JsFile {
+        JsFile::extract(root, source)
+    }
+
+    fn take(file: TaintFile) -> Option<JsFile> {
+        match file {
+            TaintFile::JavaScript(file) => Some(file),
+            _ => None,
+        }
+    }
+
+    fn build(files: Vec<(String, JsFile)>, source_lines: LinesByFile) -> Self {
         JsTaint {
-            call_graph: JsCallGraph::build(&call_graph_inputs(files)),
-            source_lines: source_lines_by_file(files),
+            call_graph: JsCallGraph::build_from(files),
+            source_lines,
         }
     }
 
@@ -81,20 +92,17 @@ impl<'a> TaintLanguage<'a> for JsTaint<'a> {
         )));
         // The graph prepared every file of the pass once for all its
         // rules (ticket #192). A file it does not know cannot happen (the
-        // pass is built from the files it analyzes); it would still be
-        // analyzed, only prepared again for this rule.
-        match self.call_graph.prepared_file(&file.rel_path) {
-            Some(prepared) => run_taint_rule_js_prepared(
-                prepared,
-                specs,
-                Some(RuleLines::shared(&file.source, specs)),
-            ),
-            None => run_taint_rule_js(
-                file.tree().root_node(),
-                file.bytes(),
-                specs,
-                Some(&file.source),
-            ),
-        }
+        // pass is built from the files it analyzes); one would stop the
+        // scan naming the file rather than analyse it without its
+        // preparation: its tree is gone (ticket #281).
+        let prepared = self
+            .call_graph
+            .prepared_file(&file.rel_path)
+            .unwrap_or_else(|| missing_prepared_file(Self::NAME, &file.rel_path));
+        run_taint_rule_js_prepared(
+            prepared,
+            specs,
+            Some(RuleLines::shared(&file.source, specs)),
+        )
     }
 }

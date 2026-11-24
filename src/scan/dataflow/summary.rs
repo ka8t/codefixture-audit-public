@@ -33,14 +33,45 @@ use super::worklist::prepare_ir;
 // Collecting functions (§8.1)
 // ============================================================================
 
-/// Metadata for a function defined in the module.
+/// Metadata for a function defined in the module. Holds no node of the
+/// parse tree (ticket #281): the nodes the preparation and the call graph
+/// read are in the [`CollectedPythonFunction`] the collection returns.
 // Clone: the call graph keeps a copy as its node, next to the
 // prepared function that owns the original (ticket #192).
 #[derive(Clone)]
-pub struct FunctionInfo<'tree> {
+pub struct FunctionInfo {
     /// Name (for global functions) or dotted name (Class.method).
     pub name: String,
-    /// tree-sitter `function_definition` node.
+    /// "positional-or-keyword" parameters — excludes posonly (before
+    /// `/`), kwonly (after `*`/`*args`), `*args`/`**kwargs` themselves.
+    /// Includes self/cls if a method (filtered at use time, like on the
+    /// Python side). Their annotations are only read for
+    /// [`Self::route_params`], when the function is collected.
+    pub params: Vec<String>,
+    /// True if a class method (1st parameter self/cls).
+    pub is_method: bool,
+    pub lineno: usize,
+    /// The parameters a web route handler receives from the request
+    /// ([`route_source_params`]), read from the decorators and the
+    /// annotations when the function is collected (ticket #281): the
+    /// taint analysis of each rule seeds them without reading the tree.
+    pub route_params: Vec<String>,
+}
+
+impl FunctionInfo {
+    pub fn param_names(&self) -> Vec<String> {
+        self.params.clone()
+    }
+}
+
+/// A Python function as the collection reads it from the parse tree: its
+/// tree-free metadata and the nodes its preparation and its calls are
+/// read from. It lives only while the file is prepared (ticket #281).
+pub struct CollectedPythonFunction<'tree> {
+    /// Name, parameters, line, route parameters.
+    pub info: FunctionInfo,
+    /// tree-sitter `function_definition` node, whose calls the call graph
+    /// reads (nested functions and decorators included, as the Audit).
     pub def_node: Node<'tree>,
     /// `block` node of the function body — always present in
     /// practice (the grammar requires it), `None` only in case of a
@@ -49,19 +80,14 @@ pub struct FunctionInfo<'tree> {
     /// `decorator` nodes carried by the function (via an enclosing
     /// `decorated_definition`), empty if not decorated.
     pub decorators: Vec<Node<'tree>>,
-    /// "positional-or-keyword" parameters (name, type annotation node
-    /// if any) — excludes posonly (before `/`), kwonly (after
-    /// `*`/`*args`), `*args`/`**kwargs` themselves. Includes self/cls
-    /// if a method (filtered at use time, like on the Python side).
-    pub params: Vec<(String, Option<Node<'tree>>)>,
-    /// True if a class method (1st parameter self/cls).
-    pub is_method: bool,
-    pub lineno: usize,
 }
 
-impl<'tree> FunctionInfo<'tree> {
-    pub fn param_names(&self) -> Vec<String> {
-        self.params.iter().map(|(n, _)| n.clone()).collect()
+/// A collected function reads as its metadata (`function.name`).
+impl std::ops::Deref for CollectedPythonFunction<'_> {
+    type Target = FunctionInfo;
+
+    fn deref(&self) -> &FunctionInfo {
+        &self.info
     }
 }
 
@@ -133,7 +159,7 @@ fn walk_functions<'tree>(
     prefix: &str,
     is_method: bool,
     pending_decorators: &[Node<'tree>],
-    out: &mut Vec<FunctionInfo<'tree>>,
+    out: &mut Vec<CollectedPythonFunction<'tree>>,
 ) {
     match node.kind() {
         "function_definition" => {
@@ -151,14 +177,17 @@ fn walk_functions<'tree>(
                 .map(|p| collect_pos_or_kw_params(p, source))
                 .unwrap_or_default();
             let body = node.child_by_field_name("body");
-            out.push(FunctionInfo {
-                name: full_name.clone(),
+            out.push(CollectedPythonFunction {
+                info: FunctionInfo {
+                    name: full_name.clone(),
+                    route_params: route_source_params(pending_decorators, &params, source),
+                    params: params.into_iter().map(|(name, _)| name).collect(),
+                    is_method,
+                    lineno: node.start_position().row + 1,
+                },
                 def_node: node,
                 body_node: body,
                 decorators: pending_decorators.to_vec(),
-                params,
-                is_method,
-                lineno: node.start_position().row + 1,
             });
             // Continue into the body for nested functions.
             if let Some(body) = body {
@@ -203,7 +232,10 @@ fn walk_functions<'tree>(
 
 /// Lists all function/method definitions of a module (tree-sitter
 /// root node).
-pub fn collect_functions<'tree>(root: Node<'tree>, source: &[u8]) -> Vec<FunctionInfo<'tree>> {
+pub fn collect_functions<'tree>(
+    root: Node<'tree>,
+    source: &[u8],
+) -> Vec<CollectedPythonFunction<'tree>> {
     let mut out = Vec::new();
     let mut w = root.walk();
     for child in root.named_children(&mut w) {
@@ -381,12 +413,12 @@ const ROUTE_DECORATOR_ATTRS: &[&str] = &[
 /// taking an `id: UUID` as an injection (my-ia report, 2026-11-14).
 const USER_PARAM_SCALARS: &[&str] = &["str", "bytes"];
 
-/// True if the function is a web route handler (recognized
-/// decorator). Detects `@app.get(...)`, `@router.post(...)`,
+/// True if a function with these `decorators` is a web route handler
+/// (recognized decorator). Detects `@app.get(...)`, `@router.post(...)`,
 /// `@blueprint.route(...)` etc. — a decorator that is a call on an
 /// HTTP method attribute.
-pub fn is_route_handler(fn_info: &FunctionInfo, source: &[u8]) -> bool {
-    for deco in &fn_info.decorators {
+pub fn is_route_handler(decorators: &[Node], source: &[u8]) -> bool {
+    for deco in decorators {
         let mut w = deco.walk();
         let Some(expr) = deco.named_children(&mut w).next() else {
             continue;
@@ -496,16 +528,23 @@ fn is_word_list_pattern(literal: &str) -> bool {
 }
 
 /// Returns the parameters of a route handler to treat as HTTP
-/// sources. Conservative: only parameters annotated with a
+/// sources, from the function's `decorators` and its `params` with
+/// their annotation node. Conservative: only parameters annotated with a
 /// user-facing scalar type (`str`, `int`…) are kept — these are
 /// FastAPI path/query parameters. Injected dependencies (`db`,
 /// `session`, `request`, unannotated or `Depends(...)`) are ignored.
-pub fn route_source_params(fn_info: &FunctionInfo, source: &[u8]) -> Vec<String> {
-    if !is_route_handler(fn_info, source) {
+/// Read once, when the function is collected
+/// ([`FunctionInfo::route_params`], ticket #281).
+pub fn route_source_params(
+    decorators: &[Node],
+    params: &[(String, Option<Node>)],
+    source: &[u8],
+) -> Vec<String> {
+    if !is_route_handler(decorators, source) {
         return Vec::new();
     }
     let mut out = Vec::new();
-    for (name, ann) in &fn_info.params {
+    for (name, ann) in params {
         if name == "self" || name == "cls" {
             continue;
         }
@@ -764,13 +803,18 @@ pub fn compute_summary_prepared(
 /// `compute_file_summaries`). A caller that already holds the prepared
 /// body (the call graph, ticket #192) calls [`compute_summary_with`].
 pub fn compute_summary<'tree>(
-    fn_info: &FunctionInfo<'tree>,
+    function: &CollectedPythonFunction<'tree>,
     specs: &RuleSpecs,
     source: &'tree [u8],
     source_lines: Option<&RuleLines>,
 ) -> Option<FunctionSummary> {
-    let body = prepare_python_body(fn_info, source)?;
-    Some(compute_summary_with(fn_info, &body, specs, source_lines))
+    let body = prepare_python_body(function, source)?;
+    Some(compute_summary_with(
+        &function.info,
+        &body,
+        specs,
+        source_lines,
+    ))
 }
 
 /// Summary of a Python function whose body is already prepared
@@ -785,8 +829,8 @@ pub fn compute_summary_with(
     let params: Vec<String> = fn_info
         .params
         .iter()
-        .map(|(n, _)| n.clone())
-        .filter(|n| n != "self" && n != "cls")
+        .filter(|n| *n != "self" && *n != "cls")
+        .cloned()
         .collect();
     compute_summary_prepared(
         body,
@@ -800,11 +844,11 @@ pub fn compute_summary_with(
 
 /// Prepared CFG of a Python function body; `None` when the body is
 /// missing from a malformed tree.
-fn prepare_python_body<'tree>(
-    fn_info: &FunctionInfo<'tree>,
-    source: &'tree [u8],
-) -> Option<PreparedCfg<'tree>> {
-    let body = fn_info.body_node?;
+fn prepare_python_body(
+    function: &CollectedPythonFunction<'_>,
+    source: &[u8],
+) -> Option<PreparedCfg> {
+    let body = function.body_node?;
     Some(PreparedCfg::new(
         build_cfg_from_block(source, body),
         source,
@@ -814,21 +858,31 @@ fn prepare_python_body<'tree>(
 
 /// Prepares a Python file for every taint rule of the scan (ticket
 /// #192): the module top level and every collected function.
-pub fn prepare_python_file<'tree>(
-    root: Node<'tree>,
-    source: &'tree [u8],
-) -> PreparedFile<'tree, FunctionInfo<'tree>> {
+pub fn prepare_python_file(root: Node<'_>, source: &[u8]) -> PreparedFile<FunctionInfo> {
+    prepare_python_functions(root, collect_functions(root, source), source)
+}
+
+/// Prepares the module top level `root` of a Python file and its
+/// functions `functions`, already collected ([`collect_functions`]): what
+/// [`prepare_python_file`] does, for a caller that also reads the
+/// collected nodes (the call graph, ticket #281). The nodes are dropped
+/// once prepared.
+pub fn prepare_python_functions(
+    root: Node<'_>,
+    functions: Vec<CollectedPythonFunction<'_>>,
+    source: &[u8],
+) -> PreparedFile<FunctionInfo> {
     PreparedFile {
         module: Some(PreparedCfg::new(
             build_cfg_from_block(source, root),
             source,
             prepare_ir,
         )),
-        functions: collect_functions(root, source)
+        functions: functions
             .into_iter()
-            .map(|info| PreparedFunction {
-                body: prepare_python_body(&info, source),
-                info,
+            .map(|function| PreparedFunction {
+                body: prepare_python_body(&function, source),
+                info: function.info,
             })
             .collect(),
     }
@@ -984,14 +1038,14 @@ mod tests {
     fn test_is_route_handler_detects_fastapi_decorator() {
         let (tree, src) = build("@app.get('/x')\ndef handler(item_id: str):\n    return item_id\n");
         let fns = collect_functions(tree.root_node(), &src);
-        assert!(is_route_handler(&fns[0], &src));
+        assert!(is_route_handler(&fns[0].decorators, &src));
     }
 
     #[test]
     fn test_is_route_handler_false_for_plain_function() {
         let (tree, src) = build("def handler(item_id):\n    return item_id\n");
         let fns = collect_functions(tree.root_node(), &src);
-        assert!(!is_route_handler(&fns[0], &src));
+        assert!(!is_route_handler(&fns[0].decorators, &src));
     }
 
     #[test]
@@ -1000,7 +1054,7 @@ mod tests {
             "@router.post('/x')\ndef handler(self, item_id: str, db: Session, q: int = 0):\n    pass\n",
         );
         let fns = collect_functions(tree.root_node(), &src);
-        let params = route_source_params(&fns[0], &src);
+        let params = fns[0].route_params.clone();
         // `q: int` is converted by FastAPI: not a source (see USER_PARAM_SCALARS).
         assert_eq!(params, vec!["item_id".to_string()]);
     }
@@ -1014,7 +1068,7 @@ mod tests {
             "@router.get('/x')\ndef handler(\n    format: str = Query(\"json\", pattern=\"^(json|md|docx)$\"),\n    lang: str = Query('fr', regex='^fr$'),\n    q: str = Query(None, pattern='^.*$'),\n    name: str = Query(None),\n):\n    pass\n",
         );
         let fns = collect_functions(tree.root_node(), &src);
-        let params = route_source_params(&fns[0], &src);
+        let params = fns[0].route_params.clone();
         assert_eq!(params, vec!["q".to_string(), "name".to_string()]);
     }
 
@@ -1022,7 +1076,7 @@ mod tests {
     fn test_route_source_params_empty_for_non_route() {
         let (tree, src) = build("def handler(item_id: str):\n    pass\n");
         let fns = collect_functions(tree.root_node(), &src);
-        assert!(route_source_params(&fns[0], &src).is_empty());
+        assert!(fns[0].route_params.is_empty());
     }
 
     #[test]

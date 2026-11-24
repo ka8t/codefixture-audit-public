@@ -47,6 +47,19 @@
 //! Deliberate deviation from the Audit (`Audit/sca/dataflow/
 //! worklist.py`), whose fixpoint reads the TRUE/FALSE labels of the edges
 //! only to drop the dead ones (§9) and gives both edges the same state.
+//!
+//! **Two steps (ticket #281)**: everything above but the sanitizer test
+//! is the same for every rule. [`ConditionFacts::compute`] reads it from
+//! the syntax tree once, when the CFG is prepared: the candidate calls of
+//! each edge, in the order the condition lists them, without their
+//! string literals and with the position of their `(`, and the edges a
+//! settled condition makes infeasible. [`PassedChecks::compute`] then
+//! keeps, for one rule, the candidates one of its sanitizers names,
+//! reading only the line text. The CFG and its tree are no longer needed
+//! once prepared, so the scan does not keep the trees for this
+//! (`prepared.rs`). Before, every analysis of every rule walked the
+//! conditions again, and the settled conditions were recomputed for each
+//! rule and each parameter probe.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -57,7 +70,117 @@ use super::lattice::State;
 use super::line_facts::{Comparison, RuleLines, compares_to_failure, strip_plain_string_literals};
 use super::transfer::{RuleSpecs, mentions_identifier, sanitizer_names_call};
 
+/// What the conditions of one CFG prove whatever the rule, read from its
+/// syntax tree when the CFG is prepared (see the module doc): no node of
+/// the tree is kept.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct ConditionFacts {
+    /// The branches whose condition lists at least one candidate call,
+    /// in node id order.
+    branches: Vec<BranchCandidates>,
+    /// The edges no run can take: their condition was settled by an
+    /// earlier branch (see [`settled_edges`], ticket #268).
+    infeasible: HashSet<(usize, usize)>,
+}
+
+/// The candidate checks of one branch, for its TRUE then its FALSE edges.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BranchCandidates {
+    /// The branch node.
+    node: usize,
+    /// For the TRUE label then the FALSE one: the calls that hold when
+    /// the edge is taken ([`calls_true_with`], [`calls_false_with`]), and
+    /// the successors the edges of that label lead to and that no edge of
+    /// the other label reaches (`if check(x): pass` with nothing after
+    /// proves nothing).
+    by_label: [(Vec<CandidateCall>, Vec<usize>); 2],
+}
+
+/// A call of a condition that proves a check when one of the rule's
+/// sanitizers names it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CandidateCall {
+    /// The text of the call without its string literals (a tainted name
+    /// written inside a literal is not the variable).
+    text: String,
+    /// The line (1-based) of the `(` that opens its arguments.
+    line: usize,
+    /// The byte column of that `(` in its line.
+    column: usize,
+}
+
+impl ConditionFacts {
+    /// Reads the conditions of every branch of `cfg` (see the module doc).
+    /// `text` is the text the tree of `cfg` was parsed from; in the scan
+    /// it is the text of the file's lines, which the old one-step reading
+    /// took the node texts from.
+    pub(crate) fn compute(cfg: &Cfg, text: &str) -> Self {
+        let mut branches = Vec::new();
+        for node in cfg.nodes.values() {
+            let Some(condition) = boolean_condition(node) else {
+                continue;
+            };
+            let candidates_of = |calls: Vec<Node<'_>>| -> Vec<CandidateCall> {
+                calls
+                    .into_iter()
+                    // A check with a text literal among its arguments
+                    // proves nothing, whatever the rule.
+                    .filter(|&call| !has_literal_argument(call))
+                    .filter_map(|call| {
+                        // A call without arguments field is never a
+                        // sanitizer call ([`is_sanitizer_call`]).
+                        let position = call.child_by_field_name("arguments")?.start_position();
+                        let call_text = text.get(call.byte_range())?;
+                        Some(CandidateCall {
+                            text: strip_plain_string_literals(call_text),
+                            line: position.row + 1,
+                            column: position.column,
+                        })
+                    })
+                    .collect()
+            };
+            let mut true_calls = Vec::new();
+            calls_true_with(condition, text, &mut true_calls);
+            let mut false_calls = Vec::new();
+            calls_false_with(condition, text, &mut false_calls);
+            let true_calls = candidates_of(true_calls);
+            let false_calls = candidates_of(false_calls);
+            if true_calls.is_empty() && false_calls.is_empty() {
+                continue;
+            }
+            let edges = cfg.successors(node.id);
+            let destinations = |label: EdgeLabel| -> Vec<usize> {
+                edges
+                    .iter()
+                    .filter(|edge| {
+                        // An edge that is also the other (or any other)
+                        // edge to the same node proves nothing.
+                        edge.label == label
+                            && edges
+                                .iter()
+                                .filter(|other| other.dst == edge.dst)
+                                .all(|other| other.label == label)
+                    })
+                    .map(|edge| edge.dst)
+                    .collect()
+            };
+            branches.push(BranchCandidates {
+                node: node.id,
+                by_label: [
+                    (true_calls, destinations(EdgeLabel::True)),
+                    (false_calls, destinations(EdgeLabel::False)),
+                ],
+            });
+        }
+        Self {
+            branches,
+            infeasible: settled_edges(cfg, text),
+        }
+    }
+}
+
 /// The checks each TRUE edge of a CFG proves, for one rule.
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
 pub(crate) struct PassedChecks {
     /// By `(branch, successor)` edge: the text of each sanitizer call
     /// the condition proves, without its string literals (a tainted name
@@ -69,11 +192,57 @@ pub(crate) struct PassedChecks {
 }
 
 impl PassedChecks {
-    /// Reads the condition of every branch of `cfg` (see the module
-    /// doc). Without the source lines (`source_lines` is `None`: a test
-    /// of the bare fixpoint) no edge proves anything; for a rule without a
-    /// sanitizer, only the settled conditions are read.
-    pub(crate) fn compute(cfg: &Cfg, specs: &RuleSpecs, source_lines: Option<&RuleLines>) -> Self {
+    /// The checks of `facts` that one of the rule's sanitizers names,
+    /// read on the line of their `(` (see the module doc). Without the
+    /// source lines (`source_lines` is `None`: a test of the bare
+    /// fixpoint) no edge proves anything; for a rule without a sanitizer,
+    /// only the settled conditions are kept.
+    pub(crate) fn compute(
+        facts: &ConditionFacts,
+        specs: &RuleSpecs,
+        source_lines: Option<&RuleLines>,
+    ) -> Self {
+        let mut by_edge = HashMap::new();
+        let Some(lines) = source_lines else {
+            return Self {
+                by_edge,
+                infeasible: HashSet::new(),
+            };
+        };
+        let infeasible = facts.infeasible.clone();
+        if specs.sanitizers.iter().all(|san| san.raw_regex.is_none()) {
+            return Self {
+                by_edge,
+                infeasible,
+            };
+        }
+        for branch in &facts.branches {
+            for (calls, destinations) in &branch.by_label {
+                let checks: Vec<String> = calls
+                    .iter()
+                    .filter(|call| is_sanitizer_at(call.line, call.column, lines, specs))
+                    .map(|call| call.text.clone())
+                    .collect();
+                if checks.is_empty() {
+                    continue;
+                }
+                for dst in destinations {
+                    by_edge.insert((branch.node, *dst), checks.clone());
+                }
+            }
+        }
+        Self {
+            by_edge,
+            infeasible,
+        }
+    }
+
+    /// The one-step reading of the conditions this module did before
+    /// ticket #281, straight from the syntax tree of `cfg` for one rule:
+    /// the reference [`ConditionFacts`] then [`Self::compute`] must give
+    /// exactly (see the equivalence tests).
+    #[cfg(test)]
+    fn compute_from_tree(cfg: &Cfg, specs: &RuleSpecs, source_lines: Option<&RuleLines>) -> Self {
         let mut by_edge = HashMap::new();
         let Some(lines) = source_lines else {
             return Self {
@@ -117,9 +286,6 @@ impl PassedChecks {
                     continue;
                 }
                 for edge in &edges {
-                    // An edge that is also the other (or any other) edge
-                    // to the same node, `if check(x): pass` with nothing
-                    // after, proves nothing.
                     let only_this = edges
                         .iter()
                         .filter(|other| other.dst == edge.dst)
@@ -642,27 +808,203 @@ fn node_text<'a>(node: Node<'_>, text: &'a str) -> Option<&'a str> {
     text.get(node.byte_range())
 }
 
-/// True when one of the rule's sanitizers names `call`
-/// ([`sanitizer_names_call`]), read on the line of its `(`. The line
-/// facts tell first, from their per-line cache, whether a sanitizer
-/// matches the line at all.
+/// True when one of the rule's sanitizers names `call`, read on the line
+/// of its `(` ([`is_sanitizer_at`]); the one-step reading of
+/// [`PassedChecks::compute_from_tree`].
+#[cfg(test)]
 fn is_sanitizer_call(call: Node<'_>, lines: &RuleLines, specs: &RuleSpecs) -> bool {
     let Some(arguments) = call.child_by_field_name("arguments") else {
         return false;
     };
     let position = arguments.start_position();
-    let lineno = position.row + 1;
+    is_sanitizer_at(position.row + 1, position.column, lines, specs)
+}
+
+/// True when one of the rule's sanitizers names the call whose `(` is at
+/// byte `column` of line `lineno` ([`sanitizer_names_call`]). The line
+/// facts tell first, from their per-line cache, whether a sanitizer
+/// matches the line at all.
+fn is_sanitizer_at(lineno: usize, column: usize, lines: &RuleLines, specs: &RuleSpecs) -> bool {
     let (Some(line), Some(facts)) = (lines.line(lineno), lines.facts(lineno, specs)) else {
         return false;
     };
     facts.first_sanitizer.is_some()
-        && line.as_bytes().get(position.column) == Some(&b'(')
-        && sanitizer_names_call(line, specs, position.column)
+        && line.as_bytes().get(column) == Some(&b'(')
+        && sanitizer_names_call(line, specs, column)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scan::dataflow::line_facts::SourceLines;
+
+    /// The grammar of a file of rule language `language` named `path`, as
+    /// the scan picks it; `None` for a language without taint pass.
+    fn grammar(language: &str, path: &str) -> Option<tree_sitter::Language> {
+        Some(match language {
+            "python" => tree_sitter_python::LANGUAGE.into(),
+            "java" => tree_sitter_java::LANGUAGE.into(),
+            "javascript" if path.ends_with(".tsx") => tree_sitter_typescript::LANGUAGE_TSX.into(),
+            "javascript" if path.ends_with(".ts") => {
+                tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()
+            }
+            "javascript" => tree_sitter_javascript::LANGUAGE.into(),
+            "php" => tree_sitter_php::LANGUAGE_PHP.into(),
+            "csharp" => tree_sitter_c_sharp::LANGUAGE.into(),
+            _ => return None,
+        })
+    }
+
+    /// Every CFG the preparation of a file of `language` builds: the
+    /// module top level (Python, JavaScript, PHP), then each function.
+    fn file_cfgs<'t>(language: &str, root: Node<'t>, source: &'t [u8]) -> Vec<Cfg<'t>> {
+        use crate::scan::dataflow::{
+            cfg, csharp_cfg, csharp_summary, java_cfg, java_summary, js_cfg, js_summary, php_cfg,
+            php_summary, summary,
+        };
+        match language {
+            "python" => std::iter::once(cfg::build_cfg_from_block(source, root))
+                .chain(
+                    summary::collect_functions(root, source)
+                        .into_iter()
+                        .filter_map(|f| f.body_node)
+                        .map(|body| cfg::build_cfg_from_block(source, body)),
+                )
+                .collect(),
+            "java" => java_summary::collect_java_functions(root, source)
+                .into_iter()
+                .map(|f| java_cfg::build_java_cfg(f.body, source))
+                .collect(),
+            "javascript" => std::iter::once(js_cfg::build_js_cfg(root, source))
+                .chain(
+                    js_summary::collect_js_functions(root, source)
+                        .into_iter()
+                        .map(|f| js_cfg::build_js_cfg(f.body, source)),
+                )
+                .collect(),
+            "php" => std::iter::once(php_cfg::build_php_cfg(root, source))
+                .chain(
+                    php_summary::collect_php_functions(root, source)
+                        .into_iter()
+                        .map(|f| php_cfg::build_php_cfg(f.body, source)),
+                )
+                .collect(),
+            "csharp" => csharp_summary::collect_csharp_functions(root, source)
+                .into_iter()
+                .map(|f| csharp_cfg::build_csharp_cfg(f.body, source))
+                .collect(),
+            other => panic!("no taint pass for {other}"),
+        }
+    }
+
+    /// Asserts that the two-step reading ([`ConditionFacts`], then
+    /// [`PassedChecks::compute`]) gives, for every CFG of `source` and
+    /// every rule of `rules`, exactly the one-step reading of the tree
+    /// ([`PassedChecks::compute_from_tree`]). Returns how many edges
+    /// proved a check or were infeasible, so that a caller can tell the
+    /// comparison was not empty.
+    fn assert_two_steps_agree(
+        language: &str,
+        path: &str,
+        source: &str,
+        rules: &[RuleSpecs],
+    ) -> usize {
+        let Some(grammar) = grammar(language, path) else {
+            return 0;
+        };
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&grammar).expect("valid grammar");
+        let tree = parser.parse(source, None).expect("parsed");
+        let lines = SourceLines::from_text(source.to_string());
+        let mut proved = 0;
+        for cfg in file_cfgs(language, tree.root_node(), source.as_bytes()) {
+            let facts = ConditionFacts::compute(&cfg, source);
+            for specs in rules {
+                let rule_lines = RuleLines::new(&lines, specs);
+                let reference = PassedChecks::compute_from_tree(&cfg, specs, Some(&rule_lines));
+                let two_steps = PassedChecks::compute(&facts, specs, Some(&rule_lines));
+                assert_eq!(
+                    two_steps, reference,
+                    "{path}, rule {}: the two-step reading differs",
+                    specs.rule_id
+                );
+                assert_eq!(
+                    PassedChecks::compute(&facts, specs, None),
+                    PassedChecks::compute_from_tree(&cfg, specs, None)
+                );
+                proved += reference.by_edge.len() + reference.infeasible.len();
+            }
+        }
+        proved
+    }
+
+    /// The specs of the `.sca` rule `sca`.
+    fn specs_of(sca: &str) -> RuleSpecs {
+        let rules = crate::scan::parser::compile_sca_to_json(sca, "test.sca").expect("valid rule");
+        crate::scan::dataflow::rule_loader::rule_json_to_specs(&rules[0], "en")
+            .expect("a taint rule")
+    }
+
+    /// Ticket #281: the two steps agree on the shapes of the module doc,
+    /// in every language, with and without a sanitizer.
+    #[test]
+    fn test_two_steps_agree_on_the_condition_shapes() {
+        let rule = |language: &str, sanitizer: &str| {
+            specs_of(&format!(
+                "rule t\n  language {language}\n  category security\n  severity HIGH\n  \
+                 source  input\\s*\\(  kind=http\n  sink  run\\s*\\(\n  \
+                 sanitizer  {sanitizer}\nend\n"
+            ))
+        };
+        let cases = [
+            (
+                "python",
+                "a.py",
+                "def f(t):\n    if t.is_relative_to(B) and ok(x):\n        run(t)\n    \
+                 if not t.is_relative_to(B):\n        return\n    if t.startswith('id='):\n        \
+                 run(t)\n    if f.flag:\n        return\n    if f.flag:\n        run(t)\n",
+                "is_relative_to",
+            ),
+            (
+                "java",
+                "A.java",
+                "class A { void m(String p) { if (p.startsWith(b) == true) { run(p); } \
+                 if (!p.startsWith(b) || !(q.startsWith(b))) { return; } run(p); \
+                 if (ok) { return; } if (ok) { run(p); } } }",
+                "startsWith",
+            ),
+            (
+                "javascript",
+                "a.js",
+                "function f(p) { if (p.startsWith(root + sep)) { run(p); } \
+                 if (!p.startsWith(`${root}/`)) { return; } while (p.startsWith(b)) { run(p); } }",
+                "startsWith",
+            ),
+            (
+                "php",
+                "a.php",
+                "<?php function f($p) { if (0 === strpos($p, $base) && $ok) { run($p); } \
+                 if (strpos($p, $base) !== 0) { exit; } run($p); }",
+                "strpos",
+            ),
+            (
+                "csharp",
+                "A.cs",
+                "class A { void M(string id) { if (!Guid.TryParse(id, out var _)) { id = null; } \
+                 if (p.StartsWith(b) is true) { Run(p); } if (!User.IsAuthenticated) { return; } \
+                 if (!User.IsAuthenticated) { Run(id); } } }",
+                "TryParse|StartsWith",
+            ),
+        ];
+        for (language, path, source, sanitizer) in cases {
+            let rules = [
+                rule(language, sanitizer),
+                rule(language, "nothing_named_so"),
+            ];
+            let proved = assert_two_steps_agree(language, path, source, &rules);
+            assert!(proved > 0, "{path}: nothing was compared");
+        }
+    }
 
     /// The text of the calls [`calls_true_with`] reads in the condition
     /// of the first `if` of `source`, parsed with `language`.

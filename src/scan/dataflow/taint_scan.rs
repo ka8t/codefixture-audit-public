@@ -15,7 +15,7 @@ use tree_sitter::Tree;
 use super::lattice::{SourceInfo, Taint, empty_state, state_set};
 use super::line_facts::{RuleLines, SourceLines};
 use super::prepared::PreparedFile;
-use super::summary::{FunctionInfo, prepare_python_file, route_source_params, rule_source_kinds};
+use super::summary::{FunctionInfo, prepare_python_file, rule_source_kinds};
 use super::transfer::{Finding, RuleSpecs};
 
 /// Runs a taint rule on an already-parsed Python file.
@@ -34,7 +34,6 @@ pub fn run_taint_rule(
 ) -> Vec<Finding> {
     run_taint_rule_prepared(
         &prepare_python_file(tree.root_node(), source),
-        source,
         specs,
         source_lines.map(|lines| RuleLines::new(lines, specs)),
     )
@@ -42,11 +41,10 @@ pub fn run_taint_rule(
 
 /// [`run_taint_rule`] on a file already prepared by
 /// `summary::prepare_python_file`: the scan prepares each file once for
-/// all its rules (ticket #192). `source` is the file's text, read for
-/// the route parameters of each function.
+/// all its rules (ticket #192). The route parameters of each function
+/// were read when it was collected (`FunctionInfo::route_params`).
 pub fn run_taint_rule_prepared(
     file: &PreparedFile<FunctionInfo>,
-    source: &[u8],
     specs: &RuleSpecs,
     rule_lines: Option<RuleLines>,
 ) -> Vec<Finding> {
@@ -68,15 +66,15 @@ pub fn run_taint_rule_prepared(
         // only) never sees them, otherwise every `.execute(` of a
         // FastAPI handler became "LLM output reaching a sink".
         let route_params = if http_rule {
-            route_source_params(fn_info, source)
+            fn_info.route_params.as_slice()
         } else {
-            Vec::new()
+            &[]
         };
         let init_state = if route_params.is_empty() {
             None
         } else {
             let mut state = empty_state();
-            for pname in &route_params {
+            for pname in route_params {
                 state = state_set(
                     &state,
                     pname,

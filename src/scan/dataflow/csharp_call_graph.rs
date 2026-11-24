@@ -37,8 +37,16 @@
 //! Not resolved (anti-FP, a missed flow rather than an invented one):
 //! virtual dispatch to an override (the body of the declared type is
 //! followed), `new A.B.C().M()` (qualified), `var x = Make()`, extension
-//! methods, delegates and lambdas, calls on the result of another call
+//! methods and delegates and lambdas, calls on the result of another call
 //! (`a.B().C()`), null-conditional calls (`x?.M()`).
+//!
+//! **Read from the tree file by file, linked without it (ticket #281)**:
+//! [`CSharpFile::extract`] reads from one file's tree everything the graph
+//! needs (its prepared methods, scope, declared types, and the calls of
+//! each method in the order its body lists them), so that the scan can
+//! drop the tree right after; [`CSharpCallGraph::build_from`] links the
+//! files from these facts alone, with the same edges as the former reading
+//! of the trees.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -57,7 +65,8 @@ use super::csharp_namespaces::{
 };
 use super::csharp_summary::{
     CSharpFunctionInfo, add_bare_name_aliases, collect_csharp_field_types,
-    collect_csharp_local_types, compute_csharp_summary_with, prepare_csharp_file,
+    collect_csharp_functions, compute_csharp_summary_with, local_types_of,
+    prepare_csharp_functions,
 };
 use super::csharp_visibility::CSharpVisibility;
 use super::line_facts::{LinesByFile, RuleLines};
@@ -98,6 +107,126 @@ fn dotted_identifiers(node: Node, source: &[u8]) -> Option<String> {
     }
 }
 
+/// One call of a method body, as the edges read it: what
+/// [`outgoing_edges`] used to read from the `invocation_expression` node
+/// (ticket #281). A call of another shape (a call on the result of
+/// another call, a null-conditional call, a qualified `new A.B.C()`) is
+/// not kept: no edge was ever drawn from it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CSharpCall {
+    /// `M(x)` or `M<T>(x)`: the bare identifier.
+    Bare(String),
+    /// `new C(...).M(x)`: `C` a simple class name, never empty, and the
+    /// method name as written (`M<T>`).
+    New { class: String, attr: String },
+    /// `receiver.M(x)`: `this`, `base` or a dotted chain of identifiers
+    /// ([`dotted_identifiers`]), and the method name as written.
+    Member { receiver: String, attr: String },
+}
+
+/// The calls of `body` in the order [`iter_invocations`] lists them, the
+/// order in which the first resolution of a local key wins.
+fn csharp_calls(body: Node, source: &[u8]) -> Vec<CSharpCall> {
+    let mut calls = Vec::new();
+    for call in iter_invocations(body) {
+        let Some(function) = call.child_by_field_name("function") else {
+            continue;
+        };
+        match function.kind() {
+            "identifier" => calls.push(CSharpCall::Bare(text(function, source))),
+            "generic_name" => {
+                // `M<T>(x)` is lowered to its bare identifier.
+                let mut w = function.walk();
+                if let Some(id) = function
+                    .named_children(&mut w)
+                    .find(|n| n.kind() == "identifier")
+                {
+                    calls.push(CSharpCall::Bare(text(id, source)));
+                }
+            }
+            "member_access_expression" => {
+                let (Some(receiver), Some(name_node)) = (
+                    function.child_by_field_name("expression"),
+                    function.child_by_field_name("name"),
+                ) else {
+                    continue;
+                };
+                // The key keeps the name as written (`M<T>`), as the
+                // lowering does.
+                let attr = text(name_node, source);
+                match receiver.kind() {
+                    "this" => calls.push(CSharpCall::Member {
+                        receiver: "this".to_string(),
+                        attr,
+                    }),
+                    "base" => calls.push(CSharpCall::Member {
+                        receiver: "base".to_string(),
+                        attr,
+                    }),
+                    "object_creation_expression" => {
+                        // `new C(...).M()`: the lowering keeps the class
+                        // (`csharp_lowering.rs::lower_constructor_chain`)
+                        // and `transfer.rs::eval_call` looks `C.M` up. A
+                        // qualified `new A.B.C()` is left out: the
+                        // analysis reads only a simple class name back.
+                        if let Some(class) = receiver
+                            .child_by_field_name("type")
+                            .map(|t| normalize_name(&text(t, source)))
+                            .filter(|c| !c.is_empty() && !c.contains('.'))
+                        {
+                            calls.push(CSharpCall::New { class, attr });
+                        }
+                    }
+                    _ => {
+                        if let Some(dotted) = dotted_identifiers(receiver, source) {
+                            calls.push(CSharpCall::Member {
+                                receiver: dotted,
+                                attr,
+                            });
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    calls
+}
+
+/// What the call graph needs from one C# file, read from its tree once
+/// ([`CSharpFile::extract`], ticket #281): no node of the tree is kept.
+pub struct CSharpFile {
+    /// The file's methods, prepared for every rule.
+    prepared: PreparedFile<CSharpFunctionInfo>,
+    /// The calls of each method of `prepared`, at the same index.
+    calls: Vec<Vec<CSharpCall>>,
+    /// Namespaces, `using` directives, classes and their bases.
+    scope: CSharpFileScope,
+    /// Field or local variable name → declared class (locals win).
+    type_map: BTreeMap<String, String>,
+}
+
+impl CSharpFile {
+    /// Reads the file whose tree is `root`, parsed from `source`.
+    pub fn extract(root: Node<'_>, source: &[u8]) -> Self {
+        let functions = collect_csharp_functions(root, source);
+        let calls = functions
+            .iter()
+            .map(|function| csharp_calls(function.body, source))
+            .collect();
+        // Locals take priority over fields, as in the analysis
+        // (`csharp_summary::collect_csharp_field_types`).
+        let mut type_map = collect_csharp_field_types(root, source);
+        type_map.extend(local_types_of(&functions, source));
+        CSharpFile {
+            scope: collect_csharp_scope(root, source),
+            type_map,
+            calls,
+            prepared: prepare_csharp_functions(functions, source),
+        }
+    }
+}
+
 /// What the edges of one file are resolved from, read once per file.
 struct FileContext<'a> {
     filepath: &'a str,
@@ -109,7 +238,7 @@ struct FileContext<'a> {
 
 /// The C# call graph of the files of a scan (see the module doc).
 #[derive(Default)]
-pub struct CSharpCallGraph<'tree> {
+pub struct CSharpCallGraph {
     /// Every method/constructor, by `(file, "Class.Method")`.
     pub nodes: BTreeMap<NodeKey, ()>,
     /// For each node, its resolved calls: local call key → target node.
@@ -121,77 +250,78 @@ pub struct CSharpCallGraph<'tree> {
     type_maps: BTreeMap<String, BTreeMap<String, String>>,
     /// Every file prepared once for all the rules of the scan (ticket
     /// #192).
-    prepared: PreparedFiles<'tree, CSharpFunctionInfo<'tree>>,
+    prepared: PreparedFiles<CSharpFunctionInfo>,
     caches: GraphCaches,
 }
 
-impl<'tree> CSharpCallGraph<'tree> {
-    /// Builds the graph of `files`, already parsed. Each file is read in
-    /// parallel (it only reads its own tree), then the classes are indexed
-    /// and the edges resolved, in parallel again.
-    pub fn build(files: &[FileInput<'tree>]) -> Self {
-        type PerFile<'t> = (
-            PreparedFile<'t, CSharpFunctionInfo<'t>>,
-            CSharpFileScope,
-            BTreeMap<String, String>,
-        );
-        let per_file: Vec<PerFile<'tree>> = files
-            .par_iter()
-            .map(|f| {
-                // Locals take priority over fields, as in the analysis
-                // (`csharp_summary::collect_csharp_field_types`).
-                let mut type_map = collect_csharp_field_types(f.root, f.source);
-                type_map.extend(collect_csharp_local_types(f.root, f.source));
-                (
-                    prepare_csharp_file(f.root, f.source),
-                    collect_csharp_scope(f.root, f.source),
-                    type_map,
-                )
-            })
-            .collect();
+impl CSharpCallGraph {
+    /// Builds the graph of `files`, already parsed: each file is read
+    /// ([`CSharpFile::extract`], in parallel), then linked
+    /// ([`Self::build_from`]).
+    pub fn build(files: &[FileInput<'_>]) -> Self {
+        Self::build_from(
+            files
+                .par_iter()
+                .map(|f| (f.filepath.clone(), CSharpFile::extract(f.root, f.source)))
+                .collect(),
+        )
+    }
 
+    /// Builds the graph from the files already read, by path, without any
+    /// tree (ticket #281): the classes are indexed, then the edges
+    /// resolved, in parallel.
+    pub fn build_from(files: Vec<(String, CSharpFile)>) -> Self {
         let mut graph = CSharpCallGraph::default();
         let mut scopes: BTreeMap<String, CSharpFileScope> = BTreeMap::new();
         let mut function_names: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-        for (f, (prepared, scope, type_map)) in files.iter().zip(per_file) {
+        let mut calls_by_file: Vec<(String, Vec<Vec<CSharpCall>>)> =
+            Vec::with_capacity(files.len());
+        for (filepath, file) in files {
+            let CSharpFile {
+                prepared,
+                calls,
+                scope,
+                type_map,
+            } = file;
             let mut names = BTreeSet::new();
             for (index, function) in prepared.functions.iter().enumerate() {
                 names.insert(function.info.name.clone());
-                let key = (f.filepath.clone(), function.info.name.clone());
+                let key = (filepath.clone(), function.info.name.clone());
                 graph.prepared.index_node(key.clone(), index);
                 graph.nodes.insert(key, ());
             }
-            graph.prepared.insert_file(f.filepath.clone(), prepared);
-            function_names.insert(f.filepath.clone(), names);
-            scopes.insert(f.filepath.clone(), scope);
-            graph.type_maps.insert(f.filepath.clone(), type_map);
+            graph.prepared.insert_file(filepath.clone(), prepared);
+            function_names.insert(filepath.clone(), names);
+            scopes.insert(filepath.clone(), scope);
+            graph.type_maps.insert(filepath.clone(), type_map);
+            calls_by_file.push((filepath, calls));
         }
         graph.visibility = Arc::new(CSharpVisibility::new(&scopes, function_names));
 
-        let edges: Vec<(NodeKey, BTreeMap<String, NodeKey>)> = files
+        let edges: Vec<(NodeKey, BTreeMap<String, NodeKey>)> = calls_by_file
             .par_iter()
-            .flat_map_iter(|f| {
-                let scope = &scopes[&f.filepath];
+            .flat_map_iter(|(filepath, calls)| {
+                let scope = &scopes[filepath];
                 let context = FileContext {
-                    filepath: &f.filepath,
+                    filepath,
                     bases: base_types_by_class(scope),
-                    type_map: &graph.type_maps[&f.filepath],
+                    type_map: &graph.type_maps[filepath],
                 };
                 let functions = &graph
                     .prepared
-                    .file(&f.filepath)
+                    .file(filepath)
                     .expect("every file was prepared above")
                     .functions;
                 let mut out = Vec::new();
                 let mut seen = BTreeSet::new();
                 // Homonyms (overloads): the node is the last one, as in
                 // `nodes` and `PreparedFiles::index_node`.
-                for function in functions.iter().rev() {
+                for (function, calls) in functions.iter().zip(calls).rev() {
                     if !seen.insert(function.info.name.clone()) {
                         continue;
                     }
-                    let key = (f.filepath.clone(), function.info.name.clone());
-                    let edges = outgoing_edges(&function.info, &context, &graph, f.source);
+                    let key = (filepath.clone(), function.info.name.clone());
+                    let edges = outgoing_edges(&function.info, calls, &context, &graph);
                     out.push((key, edges));
                 }
                 out
@@ -203,10 +333,7 @@ impl<'tree> CSharpCallGraph<'tree> {
 
     /// The prepared form of `filepath`, for the taint analysis of each
     /// rule (ticket #192).
-    pub fn prepared_file(
-        &self,
-        filepath: &str,
-    ) -> Option<&PreparedFile<'tree, CSharpFunctionInfo<'tree>>> {
+    pub fn prepared_file(&self, filepath: &str) -> Option<&PreparedFile<CSharpFunctionInfo>> {
         self.prepared.file(filepath)
     }
 
@@ -246,8 +373,8 @@ impl<'tree> CSharpCallGraph<'tree> {
                 last_positions: self.caches.last_positions(&self.nodes, &self.edges),
             },
             ClassLanguageHooks {
-                compute: |info: &CSharpFunctionInfo<'tree>,
-                          body: &PreparedCfg<'tree>,
+                compute: |info: &CSharpFunctionInfo,
+                          body: &PreparedCfg,
                           specs: &RuleSpecs,
                           lines: Option<&RuleLines>| {
                     compute_csharp_summary_with(info, body, specs, lines)
@@ -285,13 +412,14 @@ impl<'tree> CSharpCallGraph<'tree> {
     }
 }
 
-/// The outgoing edges of one method: one target per local key, the first
-/// resolution met winning (as in Java).
+/// The outgoing edges of one method from its `calls` ([`csharp_calls`]):
+/// one target per local key, the first resolution met winning (as in
+/// Java).
 fn outgoing_edges(
     fn_info: &CSharpFunctionInfo,
+    calls: &[CSharpCall],
     context: &FileContext,
     graph: &CSharpCallGraph,
-    source: &[u8],
 ) -> BTreeMap<String, NodeKey> {
     let filepath = context.filepath;
     let visibility = graph.visibility.as_ref();
@@ -321,80 +449,41 @@ fn outgoing_edges(
     };
 
     let mut edges: BTreeMap<String, NodeKey> = BTreeMap::new();
-    for call in iter_invocations(fn_info.body_node) {
-        let Some(function) = call.child_by_field_name("function") else {
-            continue;
-        };
-        let (local_key, target) = match function.kind() {
-            "identifier" | "generic_name" => {
-                // `M<T>(x)` is lowered to its bare identifier.
-                let name = if function.kind() == "identifier" {
-                    text(function, source)
-                } else {
-                    let mut w = function.walk();
-                    let Some(id) = function
-                        .named_children(&mut w)
-                        .find(|n| n.kind() == "identifier")
-                    else {
-                        continue;
-                    };
-                    text(id, source)
-                };
-                if edges.contains_key(&name) {
+    for call in calls {
+        let (local_key, target) = match call {
+            CSharpCall::Bare(name) => {
+                if edges.contains_key(name) {
                     continue;
                 }
-                let target =
-                    same_class(&name).or_else(|| visibility.static_method(filepath, &name));
-                (name, target)
+                let target = same_class(name).or_else(|| visibility.static_method(filepath, name));
+                (name.clone(), target)
             }
-            "member_access_expression" => {
-                let (Some(receiver), Some(name_node)) = (
-                    function.child_by_field_name("expression"),
-                    function.child_by_field_name("name"),
-                ) else {
+            CSharpCall::New {
+                class: created,
+                attr,
+            } => {
+                // `new C(...).M()`: the key is `C.M`, resolved as a static
+                // call (see [`csharp_calls`]); the method is its bare name.
+                let method = normalize_name(attr);
+                let local_key = format!("{created}.{attr}");
+                if edges.contains_key(&local_key) {
                     continue;
-                };
+                }
+                (local_key, class_method(created, &method))
+            }
+            CSharpCall::Member {
+                receiver: receiver_key,
+                attr,
+            } => {
                 // The key keeps the name as written (`M<T>`), as the
                 // lowering does; the method is its bare name.
-                let attr = text(name_node, source);
-                let method = normalize_name(&attr);
-                let receiver_key = match receiver.kind() {
-                    "this" => "this".to_string(),
-                    "base" => "base".to_string(),
-                    "object_creation_expression" => {
-                        // `new C(...).M()`: the lowering keeps the class
-                        // (`csharp_lowering.rs::lower_constructor_chain`)
-                        // and `transfer.rs::eval_call` looks `C.M` up, so
-                        // the key is `C.M`, resolved as a static call. A
-                        // qualified `new A.B.C()` is left out: the analysis
-                        // reads only a simple class name back.
-                        let Some(created) = receiver
-                            .child_by_field_name("type")
-                            .map(|t| normalize_name(&text(t, source)))
-                            .filter(|c| !c.is_empty() && !c.contains('.'))
-                        else {
-                            continue;
-                        };
-                        let local_key = format!("{created}.{attr}");
-                        if edges.contains_key(&local_key) {
-                            continue;
-                        }
-                        if let Some(target) = class_method(&created, &method) {
-                            edges.insert(local_key, target);
-                        }
-                        continue;
-                    }
-                    _ => match dotted_identifiers(receiver, source) {
-                        Some(dotted) => dotted,
-                        None => continue,
-                    },
-                };
+                let method = normalize_name(attr);
                 let local_key = format!("{receiver_key}.{attr}");
                 if edges.contains_key(&local_key) {
                     continue;
                 }
                 let target = resolve_member_call(
-                    &receiver_key,
+                    receiver_key,
                     &method,
                     enclosing,
                     context,
@@ -404,7 +493,6 @@ fn outgoing_edges(
                 );
                 (local_key, target)
             }
-            _ => continue,
         };
         if let Some(target) = target {
             edges.insert(local_key, target);
@@ -488,7 +576,189 @@ mod tests {
                 source: src.as_bytes(),
             })
             .collect();
-        f(&CSharpCallGraph::build(&inputs))
+        let graph = CSharpCallGraph::build(&inputs);
+        assert_edges_match_trees(&graph, &inputs);
+        f(&graph)
+    }
+
+    /// The edges of a method as the graph drew them from its tree before
+    /// ticket #281, when `outgoing_edges` walked the `invocation_expression`
+    /// nodes of the body itself: the reference the edges drawn from the
+    /// calls read once ([`csharp_calls`]) must equal. Kept as it was, but
+    /// for the body passed beside the metadata that held it.
+    fn edges_from_tree(
+        fn_info: &CSharpFunctionInfo,
+        body: Node,
+        context: &FileContext,
+        graph: &CSharpCallGraph,
+        source: &[u8],
+    ) -> BTreeMap<String, NodeKey> {
+        let filepath = context.filepath;
+        let visibility = graph.visibility.as_ref();
+        let enclosing = fn_info.name.rsplit_once('.').map(|(c, _)| c).unwrap_or("");
+        // A method of the enclosing class: in this file first, else in
+        // another file of the same (partial) class, else, for an abstract
+        // method of an abstract class, its single implementation.
+        let same_class = |method: &str| -> Option<NodeKey> {
+            let key = (filepath.to_string(), format!("{enclosing}.{method}"));
+            if graph.nodes.contains_key(&key) {
+                return Some(key);
+            }
+            let class = visibility.simple_class(filepath, enclosing)?;
+            visibility.dispatch_method(&class, method, filepath)
+        };
+        // A method of the class that `name` designates from this file.
+        let class_method = |name: &str, method: &str| -> Option<NodeKey> {
+            let class = visibility.class(filepath, name)?;
+            visibility.method_node(&class, method, filepath)
+        };
+        // The method an instance of declared type `name` runs: its own body,
+        // else the single implementation of an interface or abstract method
+        // (`CSharpVisibility::dispatch_method`).
+        let instance_method = |name: &str, method: &str| -> Option<NodeKey> {
+            let class = visibility.class(filepath, name)?;
+            visibility.dispatch_method(&class, method, filepath)
+        };
+
+        let mut edges: BTreeMap<String, NodeKey> = BTreeMap::new();
+        for call in iter_invocations(body) {
+            let Some(function) = call.child_by_field_name("function") else {
+                continue;
+            };
+            let (local_key, target) = match function.kind() {
+                "identifier" | "generic_name" => {
+                    // `M<T>(x)` is lowered to its bare identifier.
+                    let name = if function.kind() == "identifier" {
+                        text(function, source)
+                    } else {
+                        let mut w = function.walk();
+                        let Some(id) = function
+                            .named_children(&mut w)
+                            .find(|n| n.kind() == "identifier")
+                        else {
+                            continue;
+                        };
+                        text(id, source)
+                    };
+                    if edges.contains_key(&name) {
+                        continue;
+                    }
+                    let target =
+                        same_class(&name).or_else(|| visibility.static_method(filepath, &name));
+                    (name, target)
+                }
+                "member_access_expression" => {
+                    let (Some(receiver), Some(name_node)) = (
+                        function.child_by_field_name("expression"),
+                        function.child_by_field_name("name"),
+                    ) else {
+                        continue;
+                    };
+                    // The key keeps the name as written (`M<T>`), as the
+                    // lowering does; the method is its bare name.
+                    let attr = text(name_node, source);
+                    let method = normalize_name(&attr);
+                    let receiver_key = match receiver.kind() {
+                        "this" => "this".to_string(),
+                        "base" => "base".to_string(),
+                        "object_creation_expression" => {
+                            // `new C(...).M()`: the lowering keeps the class
+                            // (`csharp_lowering.rs::lower_constructor_chain`)
+                            // and `transfer.rs::eval_call` looks `C.M` up, so
+                            // the key is `C.M`, resolved as a static call. A
+                            // qualified `new A.B.C()` is left out: the analysis
+                            // reads only a simple class name back.
+                            let Some(created) = receiver
+                                .child_by_field_name("type")
+                                .map(|t| normalize_name(&text(t, source)))
+                                .filter(|c| !c.is_empty() && !c.contains('.'))
+                            else {
+                                continue;
+                            };
+                            let local_key = format!("{created}.{attr}");
+                            if edges.contains_key(&local_key) {
+                                continue;
+                            }
+                            if let Some(target) = class_method(&created, &method) {
+                                edges.insert(local_key, target);
+                            }
+                            continue;
+                        }
+                        _ => match dotted_identifiers(receiver, source) {
+                            Some(dotted) => dotted,
+                            None => continue,
+                        },
+                    };
+                    let local_key = format!("{receiver_key}.{attr}");
+                    if edges.contains_key(&local_key) {
+                        continue;
+                    }
+                    let target = resolve_member_call(
+                        &receiver_key,
+                        &method,
+                        enclosing,
+                        context,
+                        &same_class,
+                        &class_method,
+                        &instance_method,
+                    );
+                    (local_key, target)
+                }
+                _ => continue,
+            };
+            if let Some(target) = target {
+                edges.insert(local_key, target);
+            }
+        }
+        edges
+    }
+
+    /// Asserts that every node of `graph`, built from `files`, has the
+    /// edges its tree gave before ticket #281 ([`edges_from_tree`]), and
+    /// the declared types read from the trees. Returns the number of
+    /// edges compared.
+    fn assert_edges_match_trees(graph: &CSharpCallGraph, files: &[FileInput]) -> usize {
+        let mut compared = 0;
+        for f in files {
+            let mut type_map = collect_csharp_field_types(f.root, f.source);
+            type_map.extend(super::super::csharp_summary::collect_csharp_local_types(
+                f.root, f.source,
+            ));
+            assert_eq!(
+                graph.type_map(&f.filepath),
+                Some(&type_map),
+                "{}",
+                f.filepath
+            );
+            let scope = collect_csharp_scope(f.root, f.source);
+            let context = FileContext {
+                filepath: &f.filepath,
+                bases: base_types_by_class(&scope),
+                type_map: &type_map,
+            };
+            let functions = collect_csharp_functions(f.root, f.source);
+            let mut seen = BTreeSet::new();
+            // Homonyms (overloads): the node is the last one.
+            for function in functions.iter().rev() {
+                if !seen.insert(function.info.name.clone()) {
+                    continue;
+                }
+                let key = (f.filepath.clone(), function.info.name.clone());
+                let reference =
+                    edges_from_tree(&function.info, function.body, &context, graph, f.source);
+                assert_eq!(graph.edges[&key], reference, "{key:?}");
+                compared += reference.len();
+            }
+            assert_eq!(
+                seen.len(),
+                graph
+                    .nodes
+                    .range((f.filepath.clone(), String::new())..)
+                    .take_while(|((file, _), _)| *file == f.filepath)
+                    .count()
+            );
+        }
+        compared
     }
 
     fn key(file: &str, name: &str) -> NodeKey {

@@ -7,33 +7,46 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use super::{
-    TaintFindings, TaintLanguage, call_graph_inputs, file_summaries, source_lines_by_file,
+use super::{TaintFile, TaintFindings, TaintLanguage, file_summaries, missing_prepared_file};
+use crate::scan::dataflow::call_graph::{
+    CallGraph, NodeKey, PythonFile, ResolvedSummaries, SummaryReuse,
 };
-use crate::scan::dataflow::call_graph::{CallGraph, NodeKey, ResolvedSummaries, SummaryReuse};
 use crate::scan::dataflow::line_facts::{LinesByFile, RuleLines};
-use crate::scan::dataflow::taint_scan::{run_taint_rule, run_taint_rule_prepared};
+use crate::scan::dataflow::taint_scan::run_taint_rule_prepared;
 use crate::scan::dataflow::transfer::RuleSpecs;
 use crate::scan::dataflow::visibility::{FileSummaries, Visibility};
 use crate::scan::orchestrator::{ParsedFile, SourceLanguage};
+use tree_sitter::Node;
 
 /// Python files of the scan, linked by their call graph.
-pub(in crate::scan::orchestrator) struct PythonTaint<'a> {
-    call_graph: CallGraph<'a>,
+pub(in crate::scan::orchestrator) struct PythonTaint {
+    call_graph: CallGraph,
     source_lines: LinesByFile,
 }
 
-impl<'a> TaintLanguage<'a> for PythonTaint<'a> {
+impl TaintLanguage for PythonTaint {
+    type File = PythonFile;
     const NAME: &'static str = "python";
     const FILE_LANGUAGES: &'static [SourceLanguage] = &[SourceLanguage::Python];
     const RULE_LANGUAGE: SourceLanguage = SourceLanguage::Python;
     const PHASE_LABEL: (&'static str, &'static str) =
         ("scan_phase_c_python", "phase C - Python (taint)");
 
-    fn build(files: &[&'a ParsedFile]) -> Self {
+    fn extract(root: Node<'_>, source: &[u8]) -> PythonFile {
+        PythonFile::extract(root, source)
+    }
+
+    fn take(file: TaintFile) -> Option<PythonFile> {
+        match file {
+            TaintFile::Python(file) => Some(file),
+            _ => None,
+        }
+    }
+
+    fn build(files: Vec<(String, PythonFile)>, source_lines: LinesByFile) -> Self {
         PythonTaint {
-            call_graph: CallGraph::build(&call_graph_inputs(files)),
-            source_lines: source_lines_by_file(files),
+            call_graph: CallGraph::build_from(files),
+            source_lines,
         }
     }
 
@@ -74,16 +87,17 @@ impl<'a> TaintLanguage<'a> for PythonTaint<'a> {
         )));
         // The graph prepared every file of the pass once for all its
         // rules (ticket #192). A file it does not know cannot happen (the
-        // pass is built from the files it analyzes); it would still be
-        // analyzed, only prepared again for this rule.
-        match self.call_graph.prepared_file(&file.rel_path) {
-            Some(prepared) => run_taint_rule_prepared(
-                prepared,
-                file.bytes(),
-                specs,
-                Some(RuleLines::shared(&file.source, specs)),
-            ),
-            None => run_taint_rule(file.tree(), file.bytes(), specs, Some(&file.source)),
-        }
+        // pass is built from the files it analyzes); one would stop the
+        // scan naming the file rather than analyse it without its
+        // preparation: its tree is gone (ticket #281).
+        let prepared = self
+            .call_graph
+            .prepared_file(&file.rel_path)
+            .unwrap_or_else(|| missing_prepared_file(Self::NAME, &file.rel_path));
+        run_taint_rule_prepared(
+            prepared,
+            specs,
+            Some(RuleLines::shared(&file.source, specs)),
+        )
     }
 }

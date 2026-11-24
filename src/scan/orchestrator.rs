@@ -46,7 +46,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use rayon::prelude::*;
-use tree_sitter::{Parser as TsParser, Tree};
+use tree_sitter::Parser as TsParser;
 
 use crate::project::suppress::Suppressions;
 use crate::report::exports::sarif::{ReportFinding, TaintFlow, TaintStep};
@@ -1497,8 +1497,9 @@ impl FindingsByLine {
 }
 
 /// A file already read and parsed, kept in memory for the whole scan
-/// duration — needed for Phase C (the multi-file `CallGraph` borrows
-/// the tree-sitter trees of ALL files at once, not file by file).
+/// duration: its text for the pattern rules, the taint passes and the
+/// report, and, until its taint pass takes it, what that pass needs of
+/// its tree. The tree itself is never kept (ticket #281).
 struct ParsedFile {
     rel_path: String,
     filepath: PathBuf,
@@ -1509,12 +1510,18 @@ struct ParsedFile {
     /// report read it; the passes and call graphs hold the same
     /// allocation.
     source: Arc<SourceLines>,
-    /// The parse tree, `None` once no pass needs it (ticket #241): a
-    /// file whose language has no taint pass with a taint rule drops its
-    /// tree as soon as its lines of code are counted, the other files
-    /// when their language's pass ends. Only the taint passes read the
-    /// trees, through [`ParsedFile::tree`].
-    tree: Option<Tree>,
+    /// What the taint pass of the file's language needs of its tree
+    /// (`taint::TaintFile`: its prepared functions, imports, calls...),
+    /// read by phase A right after parsing, when that pass has a taint
+    /// rule; `None` otherwise, and once the pass has taken it. The tree
+    /// is dropped as soon as it is read (ticket #281): phase A holds at
+    /// most one tree per thread, where the scan used to keep the tree of
+    /// every file of a followed language until its pass ended, 38 to 45 %
+    /// of the peak memory on the Juliet suites (ticket #241 had already
+    /// dropped the trees of the other files once their lines of code were
+    /// counted). Boxed: it is several hundred bytes, most files have
+    /// none, and phase A moves each file once.
+    taint: Option<Box<taint::TaintFile>>,
     language: SourceLanguage,
 }
 
@@ -1532,20 +1539,6 @@ impl ParsedFile {
         self.source.text().as_bytes()
     }
 
-    /// The parse tree, for the taint pass of the file's language. The
-    /// scan keeps the tree of every file whose pass has a taint rule
-    /// until that pass ends (`run_scan`, `taint::language_has_taint_rule`),
-    /// so a pass never finds it released; if one did, this names the
-    /// file rather than analysing it without its tree.
-    fn tree(&self) -> &Tree {
-        self.tree.as_ref().unwrap_or_else(|| {
-            panic!(
-                "the parse tree of {} was released before its taint pass",
-                self.rel_path
-            )
-        })
-    }
-
     /// Both paths of the file, as the pattern rules need them:
     /// project-relative for folder conditions, on-disk for the
     /// governance-file walk (see `FileLocation`).
@@ -1558,10 +1551,10 @@ impl ParsedFile {
 }
 
 /// One taint pass of phase C (`taint::run_taint_pass` for one language):
-/// it borrows the parsed files only while it runs, so that the scan can
-/// release their trees after it (ticket #241).
-type TaintPass = for<'f> fn(
-    &'f [ParsedFile],
+/// it borrows the parsed files mutably while it runs, to drop the trees
+/// of its files as soon as it has read them (ticket #281).
+type TaintPass = fn(
+    &mut [ParsedFile],
     &[serde_json::Value],
     &mut PassContext<'_>,
     &mut taint::SeenTaint,
@@ -1619,13 +1612,15 @@ impl FileOutcome {
 /// counts. A saved web page (ADR-0046) and a minified file (ADR-0045)
 /// are recognized right after reading, before any parsing. Phase A runs it on every file in parallel;
 /// the tests build their files with it, so they see a file exactly as a
-/// scan does. The tree is kept when the file's language is one of
-/// `tree_languages` (ticket #241); otherwise it is dropped once the lines
-/// of code are counted.
+/// scan does. When the file's language is one of `tree_languages`, the
+/// taint pass of that language reads the tree here
+/// (`taint::TaintFile::extract`, ticket #281); the tree is then dropped,
+/// as it is for every other file once its lines of code are counted
+/// (ticket #241): no tree outlives this function.
 ///
 /// The debug log (ticket #282) gets the start and end of each file, with
-/// its outcome: lines of code, bytes, size of its tree and whether the
-/// tree is kept, or why the file was skipped or failed.
+/// its outcome: lines of code, bytes, size of its tree and whether its
+/// taint pass read it, or why the file was skipped or failed.
 fn parse_file(root: &Path, filepath: &Path, tree_languages: &[SourceLanguage]) -> FileOutcome {
     let step = crate::scan::debug_log::span("phase_a", || {
         format!("file path={:?}", project_relative_path(root, filepath))
@@ -1643,10 +1638,10 @@ fn parse_file(root: &Path, filepath: &Path, tree_languages: &[SourceLanguage]) -
     };
     step.end_with(|| match &outcome {
         FileOutcome::Parsed(loc, pf) => format!(
-            "outcome=parsed language={} loc={loc} bytes={} tree_kept={}",
+            "outcome=parsed language={} loc={loc} bytes={} taint_read={}",
             pf.language.rule_tag(),
             pf.source.text().len(),
-            pf.tree.is_some()
+            pf.taint.is_some()
         ),
         FileOutcome::Minified(_) => "outcome=skipped reason=minified".to_string(),
         FileOutcome::SavedPage(_) => "outcome=skipped reason=saved_page".to_string(),
@@ -1751,13 +1746,32 @@ fn read_and_parse(
         | SourceLanguage::WebConfig
         | SourceLanguage::PackageJson => count_js_loc(source_bytes, &tree),
     };
+    // Ticket #281: the taint pass of the file's language reads the tree
+    // here, once, and the tree is dropped at the end of this function.
+    let taint = if tree_languages.contains(&language) {
+        let read_started = crate::scan::debug_log::enabled().then(std::time::Instant::now);
+        let taint = taint::TaintFile::extract(language, tree.root_node(), source_bytes);
+        if let Some(started) = read_started {
+            crate::debug_log!(
+                "phase_a",
+                "file_taint_read path={rel_path:?} ms={}",
+                crate::scan::debug_log::ms_since(started)
+            );
+        }
+        Some(Box::new(taint.unwrap_or_else(|| {
+            panic!("{rel_path}: {language:?} has no taint pass to read its tree for")
+        })))
+    } else {
+        None
+    };
+    drop(tree);
     Ok(FileOutcome::Parsed(
         loc,
         ParsedFile {
             rel_path,
             filepath: filepath.to_path_buf(),
             source: Arc::new(SourceLines::from_text(source_text)),
-            tree: tree_languages.contains(&language).then_some(tree),
+            taint,
             language,
         },
     ))
@@ -2230,10 +2244,12 @@ pub fn run_scan(config: &ScanConfig) -> ScanReport {
         })
         .collect();
 
-    // Ticket #241: the languages whose parse trees phase C reads, those
+    // Ticket #241: the languages whose parse trees phase C needs, those
     // of a taint pass that has a taint rule. A tree takes about 17 times
-    // the size of its file and the trees were most of a scan's memory:
-    // the other files drop theirs once their lines of code are counted.
+    // the size of its file: phase A reads what the pass needs of the tree
+    // of these files right after parsing, then drops it (ticket #281),
+    // as the other files drop theirs once their lines of code are
+    // counted.
     let taint_passes: [(bool, &[SourceLanguage], SourceLanguage, TaintPass); 5] = [
         (
             taint_python_active,
@@ -2417,30 +2433,20 @@ pub fn run_scan(config: &ScanConfig) -> ScanReport {
     // order of the findings in the report). What each language does is in
     // its own file of `taint/`; selecting the files and rules, the cache
     // and the merge into the report are shared (`taint::run_taint_pass`).
-    // The passes are listed above (`taint_passes`). A pass borrows the
-    // parsed files (its call graph holds their trees) while it runs; once
-    // it ends, the trees of its files are released (ticket #241), so that
-    // the next pass does not run with them.
+    // The passes are listed above (`taint_passes`). A pass reads the trees
+    // of its files once, before building its call graph, and drops them
+    // then (ticket #281): its call graph and the analysis of each rule
+    // read no tree.
     let mut seen_taint = taint::SeenTaint::new();
-    for (active, file_languages, rule_language, pass) in taint_passes {
+    for (active, _, rule_language, pass) in taint_passes {
         if active {
             let pass_step = crate::scan::debug_log::span("phase_c", || {
                 format!("taint_pass language={}", rule_language.rule_tag())
             });
-            let (label, elapsed) = pass(&parsed_files, &rule_jsons, &mut passes, &mut seen_taint);
+            let (label, elapsed) =
+                pass(&mut parsed_files, &rule_jsons, &mut passes, &mut seen_taint);
             drop(pass_step);
             record_phase(&label, elapsed);
-            let mut released = 0usize;
-            for pf in &mut parsed_files {
-                if file_languages.contains(&pf.language) {
-                    released += usize::from(pf.tree.take().is_some());
-                }
-            }
-            crate::debug_log!(
-                "phase_c",
-                "trees_released language={} files={released}",
-                rule_language.rule_tag()
-            );
         }
     }
 

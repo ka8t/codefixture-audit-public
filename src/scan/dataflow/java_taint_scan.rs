@@ -121,7 +121,7 @@ pub fn run_taint_rule_java_prepared(
 
 /// The class of a collected method: its name up to the last dot
 /// (`Outer.badSink` → `Outer`).
-fn class_of<'a>(fn_info: &'a JavaFunctionInfo) -> &'a str {
+fn class_of(fn_info: &JavaFunctionInfo) -> &str {
     fn_info
         .name
         .rsplit_once('.')
@@ -142,7 +142,7 @@ fn field_taints_at_exit(
     if fn_info.class_fields.is_empty() {
         return written;
     }
-    let Some(exit_state) = state_in.get(&prepared.cfg().exit) else {
+    let Some(exit_state) = state_in.get(&prepared.exit()) else {
         return written;
     };
     for field in &fn_info.class_fields {

@@ -28,6 +28,15 @@
 //! `class_call_graph.rs`, shared with the C# graph (`csharp_call_graph.rs`),
 //! moved there unchanged; this file keeps what is Java: the edges and the
 //! visibility (packages, imports).
+//!
+//! **Read from the tree file by file, linked without it (ticket #281)**:
+//! [`JavaFile::extract`] reads from one file's tree everything the graph
+//! needs (its prepared methods, package, classes, imports, superclasses,
+//! declared types, and the calls of each method in the order its body
+//! lists them), so that the scan can drop the tree right after;
+//! [`JavaCallGraph::build_from`] then links the files from these facts
+//! alone. The edges are those the former reading of the trees gave: the
+//! same calls in the same order, resolved by the same code.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -47,8 +56,8 @@ use super::java_module_registry::{
     collect_java_superclass, collect_package,
 };
 use super::java_summary::{
-    JavaFunctionInfo, add_bare_name_aliases, collect_java_field_types, collect_java_local_types,
-    compute_java_summary_with, prepare_java_file,
+    JavaFunctionInfo, add_bare_name_aliases, collect_java_field_types, collect_java_functions,
+    compute_java_summary_with, local_types_of, prepare_java_functions,
 };
 use super::java_visibility::JavaVisibility;
 use super::line_facts::{LinesByFile, RuleLines};
@@ -85,6 +94,107 @@ fn iter_method_invocations<'tree>(body: Node<'tree>) -> Vec<Node<'tree>> {
     out
 }
 
+/// One method call of a body, as the edges read it: what
+/// [`outgoing_edges`] used to read from the `method_invocation` node
+/// (ticket #281). A call of another shape (`a.b.method()`, a call on the
+/// result of a call) is not kept: no edge was ever drawn from it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum JavaCall {
+    /// `name(...)`.
+    Bare(String),
+    /// `this.name(...)`.
+    This(String),
+    /// `super.name(...)`.
+    Super(String),
+    /// `new Class(...).name(...)`, `Class` the simple name of the type
+    /// created (never empty).
+    New { class: String, name: String },
+    /// `receiver.name(...)`, `receiver` an identifier.
+    Receiver { receiver: String, name: String },
+}
+
+/// The calls of `body` in the order [`iter_method_invocations`] lists
+/// them, the order in which the first resolution of a local key wins.
+fn java_calls(body: Node, source: &[u8]) -> Vec<JavaCall> {
+    let mut calls = Vec::new();
+    for call in iter_method_invocations(body) {
+        let Some(name_node) = call.child_by_field_name("name") else {
+            continue;
+        };
+        let name = text(name_node, source);
+        // `(new Helper()).run()` is `new Helper().run()`: the receiver is
+        // read through its parentheses, as the lowering does
+        // (`java_lowering::JavaLowerer::lower_callee`), so that the edge
+        // key matches the call key `eval_call` computes. Juliet writes
+        // every call to another class of a test case this way.
+        let Some(obj) = call.child_by_field_name("object").map(strip_parentheses) else {
+            calls.push(JavaCall::Bare(name));
+            continue;
+        };
+        match obj.kind() {
+            "this" => calls.push(JavaCall::This(name)),
+            "super" => calls.push(JavaCall::Super(name)),
+            "object_creation_expression" => {
+                if let Some(class) = obj
+                    .child_by_field_name("type")
+                    .map(|t| simple_type_text(t, source))
+                    .filter(|s| !s.is_empty())
+                {
+                    calls.push(JavaCall::New { class, name });
+                }
+            }
+            "identifier" => calls.push(JavaCall::Receiver {
+                receiver: text(obj, source),
+                name,
+            }),
+            // Multi-level chain (`a.b.method()`) or a form not handled
+            // in v1: left unresolved (anti-FP), see the module's
+            // non-goals.
+            _ => {}
+        }
+    }
+    calls
+}
+
+/// What the call graph needs from one Java file, read from its tree once
+/// ([`JavaFile::extract`], ticket #281): no node of the tree is kept.
+pub struct JavaFile {
+    /// The file's methods, prepared for every rule.
+    prepared: PreparedFile<JavaFunctionInfo>,
+    /// The calls of each method of `prepared`, at the same index.
+    calls: Vec<Vec<JavaCall>>,
+    /// Package, classes, imports, superclasses, declared types.
+    info: FileInfo,
+}
+
+impl JavaFile {
+    /// Reads the file whose tree is `root`, parsed from `source`.
+    pub fn extract(root: Node<'_>, source: &[u8]) -> Self {
+        let functions = collect_java_functions(root, source);
+        let calls = functions
+            .iter()
+            .map(|function| java_calls(function.body, source))
+            .collect();
+        // Locals take priority over fields (more precise scope) — the
+        // table the graph resolves `obj.method()` with is the one the
+        // analysis of the file reads (`JavaCallGraph::type_map`), see the
+        // doc of `java_summary.rs::collect_java_field_types`.
+        let mut type_map = collect_java_field_types(root, source);
+        type_map.extend(local_types_of(&functions, source));
+        JavaFile {
+            info: FileInfo {
+                package: collect_package(root, source),
+                class_names: collect_java_class_names(root, source),
+                imports: collect_java_imports(root, source),
+                superclass: collect_java_superclass(root, source),
+                type_map,
+            },
+            calls,
+            prepared: prepare_java_functions(functions, source),
+        }
+    }
+}
+
 /// Structural metadata for a Java file, computed once
 /// (independent of the rule specs — like `call_graph.rs`).
 struct FileInfo {
@@ -109,28 +219,35 @@ struct FileInfo {
 /// former per-file `import_bindings` map (ticket #239, see
 /// `java_visibility.rs`).
 #[derive(Default)]
-pub struct JavaCallGraph<'tree> {
-    pub nodes: BTreeMap<NodeKey, JavaFunctionInfo<'tree>>,
+pub struct JavaCallGraph {
+    pub nodes: BTreeMap<NodeKey, JavaFunctionInfo>,
     pub edges: BTreeMap<NodeKey, BTreeMap<String, NodeKey>>,
     visibility: Arc<JavaVisibility>,
-    source_by_file: BTreeMap<String, &'tree [u8]>,
     /// Every file of the graph prepared once for all the rules of the
     /// scan (ticket #192): read for the summaries and handed to the
     /// taint analysis of each file ([`Self::prepared_file`]).
-    prepared: PreparedFiles<'tree, JavaFunctionInfo<'tree>>,
+    prepared: PreparedFiles<JavaFunctionInfo>,
+    /// Variable or field name → declared class, per file: the table the
+    /// edges were resolved with, handed as `RuleSpecs::type_map` to the
+    /// analysis of the file ([`Self::type_map`]). The Java pass used to
+    /// compute the same table a second time from the trees (ticket #281).
+    type_maps: BTreeMap<String, BTreeMap<String, String>>,
     /// Lazy caches derived from the graph structure only, identical for
     /// every rule (see `class_call_graph::GraphCaches`).
     caches: GraphCaches,
 }
 
-impl<'tree> JavaCallGraph<'tree> {
+impl JavaCallGraph {
     /// The prepared form of `filepath`, one of the graph's files, for
     /// the taint analysis of each rule (ticket #192).
-    pub fn prepared_file(
-        &self,
-        filepath: &str,
-    ) -> Option<&PreparedFile<'tree, JavaFunctionInfo<'tree>>> {
+    pub fn prepared_file(&self, filepath: &str) -> Option<&PreparedFile<JavaFunctionInfo>> {
         self.prepared.file(filepath)
+    }
+
+    /// The declared types of the fields and local variables of
+    /// `filepath` (locals win), the table its edges were resolved with.
+    pub fn type_map(&self, filepath: &str) -> Option<&BTreeMap<String, String>> {
+        self.type_maps.get(filepath)
     }
 
     /// What each file of the graph sees of the others, shared with the
@@ -150,54 +267,55 @@ impl<'tree> JavaCallGraph<'tree> {
     }
 
     /// Builds the complete graph (nodes + edges + what each file sees)
-    /// from a set of already-parsed Java files.
-    pub fn build(files: &[FileInput<'tree>]) -> Self {
+    /// from a set of already-parsed Java files: each file is read
+    /// ([`JavaFile::extract`], in parallel), then linked
+    /// ([`Self::build_from`]).
+    pub fn build(files: &[FileInput<'_>]) -> Self {
+        Self::build_from(
+            files
+                .par_iter()
+                .map(|f| (f.filepath.clone(), JavaFile::extract(f.root, f.source)))
+                .collect(),
+        )
+    }
+
+    /// Builds the complete graph from the files already read, by path,
+    /// without any tree (ticket #281).
+    pub fn build_from(files: Vec<(String, JavaFile)>) -> Self {
         let mut graph = JavaCallGraph::default();
 
         let mut file_info: BTreeMap<String, FileInfo> = BTreeMap::new();
         let mut class_names_by_file: BTreeMap<String, (String, Vec<String>)> = BTreeMap::new();
         let mut file_function_names: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        // The calls of each node. Homonyms (overloads): the last one, as
+        // in `nodes` and `PreparedFiles::index_node`.
+        let mut calls_by_node: BTreeMap<NodeKey, Vec<JavaCall>> = BTreeMap::new();
+        let mut paths = Vec::with_capacity(files.len());
 
-        // Each file is prepared once for every rule of the scan (ticket
-        // #192), in parallel: a file only reads its own tree. Its
-        // collected methods are the graph nodes.
-        let per_file: Vec<_> = files
-            .par_iter()
-            .map(|f| prepare_java_file(f.root, f.source))
-            .collect();
-        for (f, prepared) in files.iter().zip(per_file) {
+        // Each file was prepared once for every rule of the scan (ticket
+        // #192). Its collected methods are the graph nodes.
+        for (filepath, file) in files {
+            let JavaFile {
+                prepared,
+                calls,
+                info,
+            } = file;
             let mut names = BTreeSet::new();
-            for (index, function) in prepared.functions.iter().enumerate() {
+            for (index, (function, calls)) in prepared.functions.iter().zip(calls).enumerate() {
                 names.insert(function.info.name.clone());
-                let key = (f.filepath.clone(), function.info.name.clone());
+                let key = (filepath.clone(), function.info.name.clone());
                 graph.prepared.index_node(key.clone(), index);
-                graph.nodes.insert(key, function.info.clone());
+                graph.nodes.insert(key.clone(), function.info.clone());
+                calls_by_node.insert(key, calls);
             }
-            graph.prepared.insert_file(f.filepath.clone(), prepared);
-            file_function_names.insert(f.filepath.clone(), names);
-            graph.source_by_file.insert(f.filepath.clone(), f.source);
-
-            let package = collect_package(f.root, f.source);
-            let class_names = collect_java_class_names(f.root, f.source);
-            class_names_by_file.insert(f.filepath.clone(), (package.clone(), class_names.clone()));
-
-            // Locals take priority over fields (more precise scope) —
-            // MUST stay in sync with the same merge done on the
-            // scan executor side (same logical dict), see the doc of
-            // `java_summary.rs::collect_java_field_types`.
-            let mut type_map = collect_java_field_types(f.root, f.source);
-            type_map.extend(collect_java_local_types(f.root, f.source));
-
-            file_info.insert(
-                f.filepath.clone(),
-                FileInfo {
-                    package,
-                    class_names,
-                    imports: collect_java_imports(f.root, f.source),
-                    superclass: collect_java_superclass(f.root, f.source),
-                    type_map,
-                },
+            graph.prepared.insert_file(filepath.clone(), prepared);
+            file_function_names.insert(filepath.clone(), names);
+            class_names_by_file.insert(
+                filepath.clone(),
+                (info.package.clone(), info.class_names.clone()),
             );
+            file_info.insert(filepath.clone(), info);
+            paths.push(filepath);
         }
 
         let fqcn_index = build_fqcn_index(&class_names_by_file);
@@ -212,29 +330,32 @@ impl<'tree> JavaCallGraph<'tree> {
             file_function_names,
         ));
 
-        for f in files {
-            let info = &file_info[&f.filepath];
+        for filepath in &paths {
+            let info = &file_info[filepath];
             let local_class_names: BTreeSet<String> = info.class_names.iter().cloned().collect();
-            let statics = graph.visibility.statics(&f.filepath);
-            let fn_keys: Vec<NodeKey> = graph.file_node_keys(&f.filepath).cloned().collect();
+            let statics = graph.visibility.statics(filepath);
+            let fn_keys: Vec<NodeKey> = graph.file_node_keys(filepath).cloned().collect();
             let mut file_edges = Vec::with_capacity(fn_keys.len());
             for key in fn_keys {
                 let enclosing_class = key.1.rsplit_once('.').map(|(c, _)| c).unwrap_or("");
                 let edges = outgoing_edges(
-                    &graph.nodes[&key],
-                    &f.filepath,
+                    &calls_by_node[&key],
+                    filepath,
                     enclosing_class,
                     &local_class_names,
                     info,
                     &graph.visibility,
                     statics,
                     &graph.nodes,
-                    f.source,
                 );
                 file_edges.push((key, edges));
             }
             graph.edges.extend(file_edges);
         }
+        graph.type_maps = file_info
+            .into_iter()
+            .map(|(file, info)| (file, info.type_map))
+            .collect();
 
         graph
     }
@@ -282,8 +403,8 @@ impl<'tree> JavaCallGraph<'tree> {
                 last_positions: self.caches.last_positions(&self.nodes, &self.edges),
             },
             ClassLanguageHooks {
-                compute: |info: &JavaFunctionInfo<'tree>,
-                          body: &PreparedCfg<'tree>,
+                compute: |info: &JavaFunctionInfo,
+                          body: &PreparedCfg,
                           specs: &RuleSpecs,
                           lines: Option<&RuleLines>| {
                     compute_java_summary_with(info, body, specs, lines)
@@ -334,20 +455,19 @@ fn resolve_class_target(
         .map(str::to_string)
 }
 
-/// Returns the outgoing edges of a method/constructor — one call
-/// site per local key (the first resolution encountered wins,
-/// as on the Python side).
+/// Returns the outgoing edges of a method/constructor from its `calls`
+/// ([`java_calls`]) — one call site per local key (the first resolution
+/// encountered wins, as on the Python side).
 #[allow(clippy::too_many_arguments)]
-fn outgoing_edges<'tree>(
-    fn_info: &JavaFunctionInfo<'tree>,
+fn outgoing_edges(
+    calls: &[JavaCall],
     filepath: &str,
     enclosing_class: &str,
     local_class_names: &BTreeSet<String>,
     info: &FileInfo,
     visibility: &JavaVisibility,
     static_bindings: &BTreeMap<String, NodeKey>,
-    all_nodes: &BTreeMap<NodeKey, JavaFunctionInfo<'tree>>,
-    source: &[u8],
+    all_nodes: &BTreeMap<NodeKey, JavaFunctionInfo>,
 ) -> BTreeMap<String, NodeKey> {
     let mut edges: BTreeMap<String, NodeKey> = BTreeMap::new();
 
@@ -360,41 +480,28 @@ fn outgoing_edges<'tree>(
         }
     };
 
-    for call in iter_method_invocations(fn_info.body_node) {
-        let Some(name_node) = call.child_by_field_name("name") else {
-            continue;
-        };
-        let name = text(name_node, source);
-        // `(new Helper()).run()` is `new Helper().run()`: the receiver is
-        // read through its parentheses, as the lowering does
-        // (`java_lowering::JavaLowerer::lower_callee`), so that the edge
-        // key matches the call key `eval_call` computes. Juliet writes
-        // every call to another class of a test case this way.
-        let obj = call.child_by_field_name("object").map(strip_parentheses);
-
-        let Some(obj) = obj else {
-            // Bare call: same class first, then static import.
-            if edges.contains_key(&name) {
-                continue;
+    for call in calls {
+        match call {
+            JavaCall::Bare(name) => {
+                // Bare call: same class first, then static import.
+                if edges.contains_key(name) {
+                    continue;
+                }
+                let target = try_same_class(name).or_else(|| static_bindings.get(name).cloned());
+                if let Some(t) = target {
+                    edges.insert(name.clone(), t);
+                }
             }
-            let target = try_same_class(&name).or_else(|| static_bindings.get(&name).cloned());
-            if let Some(t) = target {
-                edges.insert(name, t);
-            }
-            continue;
-        };
-
-        match obj.kind() {
-            "this" => {
+            JavaCall::This(name) => {
                 let local_key = format!("this.{name}");
                 if edges.contains_key(&local_key) {
                     continue;
                 }
-                if let Some(t) = try_same_class(&name) {
+                if let Some(t) = try_same_class(name) {
                     edges.insert(local_key, t);
                 }
             }
-            "super" => {
+            JavaCall::Super(name) => {
                 let local_key = format!("super.{name}");
                 if edges.contains_key(&local_key) {
                     continue;
@@ -409,19 +516,16 @@ fn outgoing_edges<'tree>(
                     }
                 }
             }
-            "object_creation_expression" => {
-                let ctor_type_text = obj
-                    .child_by_field_name("type")
-                    .map(|t| simple_type_text(t, source));
-                let Some(ctor_type_text) = ctor_type_text.filter(|s| !s.is_empty()) else {
-                    continue;
-                };
+            JavaCall::New {
+                class: ctor_type_text,
+                name,
+            } => {
                 let local_key = format!("{ctor_type_text}.{name}");
                 if edges.contains_key(&local_key) {
                     continue;
                 }
                 if let Some(target_file) =
-                    resolve_class_target(&ctor_type_text, filepath, local_class_names, visibility)
+                    resolve_class_target(ctor_type_text, filepath, local_class_names, visibility)
                 {
                     let target = (target_file, local_key.clone());
                     if all_nodes.contains_key(&target) {
@@ -429,8 +533,10 @@ fn outgoing_edges<'tree>(
                     }
                 }
             }
-            "identifier" => {
-                let recv = text(obj, source);
+            JavaCall::Receiver {
+                receiver: recv,
+                name,
+            } => {
                 let local_key = format!("{recv}.{name}");
                 if edges.contains_key(&local_key) {
                     continue;
@@ -438,11 +544,11 @@ fn outgoing_edges<'tree>(
                 // 1. `recv` is itself the name of a visible class
                 //    (qualified static call, e.g. `Helper.doThing()`).
                 let mut target_file =
-                    resolve_class_target(&recv, filepath, local_class_names, visibility);
+                    resolve_class_target(recv, filepath, local_class_names, visibility);
                 let mut resolved_class = recv.clone();
                 if target_file.is_none() {
                     // 2. `recv` is a variable/field with a known declared type.
-                    if let Some(declared_type) = info.type_map.get(&recv) {
+                    if let Some(declared_type) = info.type_map.get(recv) {
                         target_file = resolve_class_target(
                             declared_type,
                             filepath,
@@ -458,11 +564,6 @@ fn outgoing_edges<'tree>(
                         edges.insert(local_key, target);
                     }
                 }
-            }
-            _ => {
-                // Multi-level chain (`a.b.method()`) or a form not
-                // handled in v1 — left unresolved (anti-FP), see the
-                // module's non-goals.
             }
         }
     }
@@ -513,7 +614,185 @@ mod tests {
             })
             .collect();
         let graph = JavaCallGraph::build(&file_inputs);
+        assert_edges_match_trees(&graph, &file_inputs);
         f(&graph)
+    }
+
+    /// The edges of a method as the graph drew them from its tree before
+    /// ticket #281, when `outgoing_edges` walked the `method_invocation`
+    /// nodes of the body itself: the reference the edges drawn from the
+    /// calls read once ([`java_calls`]) must equal. Kept as it was, but
+    /// for the body passed instead of the metadata that held it.
+    #[allow(clippy::too_many_arguments)]
+    fn edges_from_tree(
+        body: Node,
+        filepath: &str,
+        enclosing_class: &str,
+        local_class_names: &BTreeSet<String>,
+        info: &FileInfo,
+        visibility: &JavaVisibility,
+        static_bindings: &BTreeMap<String, NodeKey>,
+        all_nodes: &BTreeMap<NodeKey, JavaFunctionInfo>,
+        source: &[u8],
+    ) -> BTreeMap<String, NodeKey> {
+        let mut edges: BTreeMap<String, NodeKey> = BTreeMap::new();
+        let try_same_class = |name: &str| -> Option<NodeKey> {
+            let key = (filepath.to_string(), format!("{enclosing_class}.{name}"));
+            if all_nodes.contains_key(&key) {
+                Some(key)
+            } else {
+                None
+            }
+        };
+        for call in iter_method_invocations(body) {
+            let Some(name_node) = call.child_by_field_name("name") else {
+                continue;
+            };
+            let name = text(name_node, source);
+            let obj = call.child_by_field_name("object").map(strip_parentheses);
+            let Some(obj) = obj else {
+                if edges.contains_key(&name) {
+                    continue;
+                }
+                let target = try_same_class(&name).or_else(|| static_bindings.get(&name).cloned());
+                if let Some(t) = target {
+                    edges.insert(name, t);
+                }
+                continue;
+            };
+            match obj.kind() {
+                "this" => {
+                    let local_key = format!("this.{name}");
+                    if edges.contains_key(&local_key) {
+                        continue;
+                    }
+                    if let Some(t) = try_same_class(&name) {
+                        edges.insert(local_key, t);
+                    }
+                }
+                "super" => {
+                    let local_key = format!("super.{name}");
+                    if edges.contains_key(&local_key) {
+                        continue;
+                    }
+                    if let Some(Some(super_name)) = info.superclass.get(enclosing_class)
+                        && let Some(target_file) = resolve_class_target(
+                            super_name,
+                            filepath,
+                            local_class_names,
+                            visibility,
+                        )
+                    {
+                        let target = (target_file, format!("{super_name}.{name}"));
+                        if all_nodes.contains_key(&target) {
+                            edges.insert(local_key, target);
+                        }
+                    }
+                }
+                "object_creation_expression" => {
+                    let ctor_type_text = obj
+                        .child_by_field_name("type")
+                        .map(|t| simple_type_text(t, source));
+                    let Some(ctor_type_text) = ctor_type_text.filter(|s| !s.is_empty()) else {
+                        continue;
+                    };
+                    let local_key = format!("{ctor_type_text}.{name}");
+                    if edges.contains_key(&local_key) {
+                        continue;
+                    }
+                    if let Some(target_file) = resolve_class_target(
+                        &ctor_type_text,
+                        filepath,
+                        local_class_names,
+                        visibility,
+                    ) {
+                        let target = (target_file, local_key.clone());
+                        if all_nodes.contains_key(&target) {
+                            edges.insert(local_key, target);
+                        }
+                    }
+                }
+                "identifier" => {
+                    let recv = text(obj, source);
+                    let local_key = format!("{recv}.{name}");
+                    if edges.contains_key(&local_key) {
+                        continue;
+                    }
+                    let mut target_file =
+                        resolve_class_target(&recv, filepath, local_class_names, visibility);
+                    let mut resolved_class = recv.clone();
+                    if target_file.is_none()
+                        && let Some(declared_type) = info.type_map.get(&recv)
+                    {
+                        target_file = resolve_class_target(
+                            declared_type,
+                            filepath,
+                            local_class_names,
+                            visibility,
+                        );
+                        resolved_class = declared_type.clone();
+                    }
+                    if let Some(tf) = target_file {
+                        let target = (tf, format!("{resolved_class}.{name}"));
+                        if all_nodes.contains_key(&target) {
+                            edges.insert(local_key, target);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        edges
+    }
+
+    /// Asserts that every node of `graph`, built from `files`, has the
+    /// edges its tree gave before ticket #281 ([`edges_from_tree`]), and
+    /// that the analysis gets the declared types the pass used to compute
+    /// from the trees. Returns the number of edges compared.
+    fn assert_edges_match_trees(graph: &JavaCallGraph, files: &[FileInput]) -> usize {
+        let mut compared = 0;
+        for f in files {
+            let mut type_map = collect_java_field_types(f.root, f.source);
+            type_map.extend(super::super::java_summary::collect_java_local_types(
+                f.root, f.source,
+            ));
+            assert_eq!(
+                graph.type_map(&f.filepath),
+                Some(&type_map),
+                "{}",
+                f.filepath
+            );
+            let info = FileInfo {
+                package: collect_package(f.root, f.source),
+                class_names: collect_java_class_names(f.root, f.source),
+                imports: collect_java_imports(f.root, f.source),
+                superclass: collect_java_superclass(f.root, f.source),
+                type_map,
+            };
+            let local_class_names: BTreeSet<String> = info.class_names.iter().cloned().collect();
+            // The body of each node: the last homonym, as the graph keeps.
+            let bodies: BTreeMap<String, Node> = collect_java_functions(f.root, f.source)
+                .into_iter()
+                .map(|function| (function.info.name, function.body))
+                .collect();
+            for key in graph.file_node_keys(&f.filepath) {
+                let enclosing_class = key.1.rsplit_once('.').map(|(c, _)| c).unwrap_or("");
+                let reference = edges_from_tree(
+                    bodies[&key.1],
+                    &f.filepath,
+                    enclosing_class,
+                    &local_class_names,
+                    &info,
+                    &graph.visibility,
+                    graph.visibility.statics(&f.filepath),
+                    &graph.nodes,
+                    f.source,
+                );
+                assert_eq!(graph.edges[key], reference, "{key:?}");
+                compared += reference.len();
+            }
+        }
+        compared
     }
 
     fn sqli_specs() -> RuleSpecs {

@@ -147,6 +147,83 @@ impl<'tree> Cfg<'tree> {
     pub fn predecessor_ids(&self, node_id: usize) -> Vec<usize> {
         self.predecessors(node_id).iter().map(|e| e.src).collect()
     }
+
+    /// The shape of this CFG without its syntax nodes ([`FlowGraph`]):
+    /// what the taint fixpoint walks once the CFG is prepared.
+    pub fn flow_graph(&self) -> FlowGraph {
+        FlowGraph {
+            nodes: self
+                .nodes
+                .iter()
+                .map(|(&id, node)| (id, node.kind))
+                .collect(),
+            edges: self.edges.clone(),
+            entry: self.entry,
+            exit: self.exit,
+        }
+    }
+}
+
+/// The shape of a [`Cfg`]: its node ids and kinds, its edges in the order
+/// they were added, and its entry, without any node of the syntax tree it
+/// was built from (ticket #281).
+///
+/// Everything the taint fixpoint (`worklist::analyze_prepared`) and the
+/// readers of its result (the exit state, `java_taint_scan`) need of a
+/// CFG once its statements are lowered to IR and its conditions read
+/// (`passed_check::ConditionFacts`): holding this instead of the CFG lets
+/// the scan drop the parse tree of a file as soon as the file is
+/// prepared. Its successor and predecessor lists are those of the CFG,
+/// in the same order, so the fixpoint visits the nodes in the same order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FlowGraph {
+    nodes: BTreeMap<usize, NodeKind>,
+    edges: Vec<CfgEdge>,
+    entry: usize,
+    exit: usize,
+}
+
+impl FlowGraph {
+    /// The entry node.
+    pub fn entry(&self) -> usize {
+        self.entry
+    }
+
+    /// The exit node, as `Cfg::exit`.
+    pub fn exit(&self) -> usize {
+        self.exit
+    }
+
+    /// Every node id with its kind, in id order (the order of
+    /// `Cfg::nodes`).
+    pub fn nodes(&self) -> impl Iterator<Item = (usize, NodeKind)> + '_ {
+        self.nodes.iter().map(|(&id, &kind)| (id, kind))
+    }
+
+    /// The edges leaving `node_id`, as [`Cfg::successors`].
+    pub fn successors(&self, node_id: usize) -> Vec<CfgEdge> {
+        self.edges
+            .iter()
+            .filter(|e| e.src == node_id)
+            .cloned()
+            .collect()
+    }
+
+    /// The nodes the edges leaving `node_id` reach, as
+    /// [`Cfg::successor_ids`].
+    pub fn successor_ids(&self, node_id: usize) -> Vec<usize> {
+        self.successors(node_id).iter().map(|e| e.dst).collect()
+    }
+
+    /// The nodes whose edges reach `node_id`, as
+    /// [`Cfg::predecessor_ids`].
+    pub fn predecessor_ids(&self, node_id: usize) -> Vec<usize> {
+        self.edges
+            .iter()
+            .filter(|e| e.dst == node_id)
+            .map(|e| e.src)
+            .collect()
+    }
 }
 
 /// Builds a CFG from an already-parsed `tree-sitter-python` tree

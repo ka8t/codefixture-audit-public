@@ -44,9 +44,13 @@ use super::{
     phase_label, taint_finding_to_report,
 };
 use crate::project::suppress::is_inline_ignored;
-use crate::scan::dataflow::call_graph::{FileInput, NodeKey, ResolvedSummaries, SummaryReuse};
+use crate::scan::dataflow::call_graph::{NodeKey, PythonFile, ResolvedSummaries, SummaryReuse};
+use crate::scan::dataflow::csharp_call_graph::CSharpFile;
 use crate::scan::dataflow::expr_table::ExprTable;
+use crate::scan::dataflow::java_call_graph::JavaFile;
+use crate::scan::dataflow::js_call_graph::JsFile;
 use crate::scan::dataflow::line_facts::LinesByFile;
+use crate::scan::dataflow::php_call_graph::PhpFile;
 use crate::scan::dataflow::rule_loader::rule_json_to_specs;
 use crate::scan::dataflow::summary::FunctionSummary;
 use crate::scan::dataflow::transfer::RuleSpecs;
@@ -67,12 +71,19 @@ pub(super) type SeenTaint = HashSet<(String, String, usize, Option<usize>)>;
 
 /// What one language brings to its taint pass; everything else is shared.
 ///
-/// A value of the type is built once per scan from the language's files
-/// (its call graph, its type tables), then queried by the shared pass for
-/// every taint rule. Each method states what the language does, even when
-/// it does nothing: no default implementation, so that what sets a
-/// language apart reads in its own file.
-pub(super) trait TaintLanguage<'a>: Sync + Sized {
+/// Each file of the language is read from its parse tree once, by phase
+/// A ([`Self::extract`]); a value of the type is then built once per scan
+/// from what the files gave (its call graph, its type tables), without
+/// any tree (ticket #281), and queried by the shared pass for every taint
+/// rule. Each method states what the language does, even when it does
+/// nothing: no default implementation, so that what sets a language apart
+/// reads in its own file.
+pub(super) trait TaintLanguage: Sync + Sized {
+    /// What one file brings to the pass, read from its tree by
+    /// [`Self::extract`]: its prepared functions and what the call graph
+    /// links (imports, calls...). It holds no node of the tree.
+    type File: Send;
+
     /// Name of the language in the cache file (`taint-<name>.json.gz`)
     /// and in the cache statistics. Changing it discards existing caches.
     const NAME: &'static str;
@@ -88,8 +99,17 @@ pub(super) trait TaintLanguage<'a>: Sync + Sized {
     /// when the pass ends.
     const PHASE_LABEL: (&'static str, &'static str);
 
-    /// Prepares the pass for `files`, all of [`Self::FILE_LANGUAGES`].
-    fn build(files: &[&'a ParsedFile]) -> Self;
+    /// Reads one file of [`Self::FILE_LANGUAGES`] from its tree `root`,
+    /// parsed from `source` (phase A, [`TaintFile::extract`]).
+    fn extract(root: tree_sitter::Node<'_>, source: &[u8]) -> Self::File;
+
+    /// What a file of the pass brings, `None` when `file` was read for
+    /// another language.
+    fn take(file: TaintFile) -> Option<Self::File>;
+
+    /// Prepares the pass for `files`, read by [`Self::extract`], by path,
+    /// with the lines of each (`source_lines`).
+    fn build(files: Vec<(String, Self::File)>, source_lines: LinesByFile) -> Self;
 
     /// What `file` resolves from the other files (imports, calls): when
     /// it changes, the file's cached findings no longer hold. Empty when
@@ -120,6 +140,49 @@ pub(super) trait TaintLanguage<'a>: Sync + Sized {
     /// #282): functions and call edges of the call graph, `None` for a
     /// language without one (C#).
     fn graph_size(&self) -> Option<(usize, usize)>;
+}
+
+/// What one file brings to the taint pass of its language, read from its
+/// tree by phase A right after parsing (ticket #281): the tree is dropped
+/// then, and the pass takes this ([`TaintLanguage::take`]) when it runs.
+pub(super) enum TaintFile {
+    /// A file of the Python pass.
+    Python(PythonFile),
+    /// A file of the Java pass.
+    Java(JavaFile),
+    /// A file of the JavaScript pass: JavaScript and TypeScript share it.
+    JavaScript(JsFile),
+    /// A file of the PHP pass.
+    Php(PhpFile),
+    /// A file of the C# pass.
+    CSharp(CSharpFile),
+}
+
+impl TaintFile {
+    /// Reads a file of `language` from its tree `root`, parsed from
+    /// `source`, for the taint pass of that language; `None` for a
+    /// language without taint pass.
+    pub(super) fn extract(
+        language: SourceLanguage,
+        root: tree_sitter::Node<'_>,
+        source: &[u8],
+    ) -> Option<Self> {
+        Some(match language {
+            SourceLanguage::Python => TaintFile::Python(PythonTaint::extract(root, source)),
+            SourceLanguage::Java => TaintFile::Java(JavaTaint::extract(root, source)),
+            SourceLanguage::JavaScript | SourceLanguage::TypeScript => {
+                TaintFile::JavaScript(JsTaint::extract(root, source))
+            }
+            SourceLanguage::Php => TaintFile::Php(PhpTaint::extract(root, source)),
+            SourceLanguage::CSharp => TaintFile::CSharp(CSharpTaint::extract(root, source)),
+            SourceLanguage::Html
+            | SourceLanguage::Yaml
+            | SourceLanguage::Dockerfile
+            | SourceLanguage::MavenPom
+            | SourceLanguage::WebConfig
+            | SourceLanguage::PackageJson => return None,
+        })
+    }
 }
 
 /// Most rules a taint pass runs at the same time (ticket #247), fewer when
@@ -184,10 +247,10 @@ fn run_in_lanes<T: Send>(
 }
 
 /// Whether `rule_jsons` hold a taint rule of `rule_language`: one that
-/// gives taint specs (`rule_loader::has_taint_specs`). The scan keeps the
-/// parse trees of a pass's files only when it does, and the pass only
-/// runs then (ticket #241): both ask this function, so a pass never
-/// meets a released tree.
+/// gives taint specs (`rule_loader::has_taint_specs`). Phase A reads a
+/// pass's files from their trees only when it does (ticket #281), and the
+/// pass only runs then (ticket #241): both ask this function, so a pass
+/// never meets a file phase A did not read for it.
 pub(super) fn language_has_taint_rule(
     rule_language: SourceLanguage,
     rule_jsons: &[serde_json::Value],
@@ -207,16 +270,13 @@ pub(super) fn graph_size<N>(
     (nodes.len(), edges.values().map(BTreeMap::len).sum())
 }
 
-/// The parsed files as a call graph takes them (path, tree, bytes).
-pub(super) fn call_graph_inputs<'a>(files: &[&'a ParsedFile]) -> Vec<FileInput<'a>> {
-    files
-        .iter()
-        .map(|pf| FileInput {
-            filepath: pf.rel_path.clone(),
-            root: pf.tree().root_node(),
-            source: pf.bytes(),
-        })
-        .collect()
+/// Stops the scan on a file that its language's pass did not prepare,
+/// naming it. Cannot happen: the pass is built from the files it
+/// analyses. Analysing such a file again from its tree is no longer
+/// possible (ticket #281: the tree is dropped once the file is read), and
+/// skipping it would lose its findings without a word.
+pub(super) fn missing_prepared_file(language: &str, file: &str) -> ! {
+    panic!("the {language} taint pass has no preparation of {file}, one of its files")
 }
 
 /// The source lines of every file, by path: summary resolution reads the
@@ -248,17 +308,14 @@ pub(super) fn file_summaries(
 /// its findings into `context.findings`, skipping the flows in `seen`
 /// (and adding the new ones to it). Returns the phase label, already
 /// translated, and the time the pass took, for the scan's phase timings.
-pub(super) fn run_taint_pass<'a, L: TaintLanguage<'a>>(
-    parsed_files: &'a [ParsedFile],
+pub(super) fn run_taint_pass<L: TaintLanguage>(
+    parsed_files: &mut [ParsedFile],
     rule_jsons: &[serde_json::Value],
     context: &mut PassContext<'_>,
     seen: &mut SeenTaint,
 ) -> (String, std::time::Duration) {
     let started = std::time::Instant::now();
-    let files: Vec<&ParsedFile> = parsed_files
-        .iter()
-        .filter(|pf| L::FILE_LANGUAGES.contains(&pf.language))
-        .collect();
+    let in_pass = |pf: &ParsedFile| L::FILE_LANGUAGES.contains(&pf.language);
     let rules: Vec<&serde_json::Value> = rule_jsons
         .iter()
         .filter(|r| r.get("language").and_then(|v| v.as_str()) == Some(L::RULE_LANGUAGE.rule_tag()))
@@ -272,7 +329,7 @@ pub(super) fn run_taint_pass<'a, L: TaintLanguage<'a>>(
             "phase_c",
             "no_taint_rule language={} files={}",
             L::NAME,
-            files.len()
+            parsed_files.iter().filter(|pf| in_pass(pf)).count()
         );
         let (key, french_fallback) = L::PHASE_LABEL;
         return (
@@ -280,6 +337,27 @@ pub(super) fn run_taint_pass<'a, L: TaintLanguage<'a>>(
             started.elapsed(),
         );
     }
+    // Phase A read each file of the pass from its tree (ticket #281): the
+    // pass takes what it read, and holds it only while it runs.
+    let extracted: Vec<(String, L::File)> = parsed_files
+        .iter_mut()
+        .filter(|pf| in_pass(pf))
+        .map(|pf| {
+            let file = pf
+                .taint
+                .take()
+                .and_then(|file| L::take(*file))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{}: phase A did not read it for the {} taint pass",
+                        pf.rel_path,
+                        L::NAME
+                    )
+                });
+            (pf.rel_path.clone(), file)
+        })
+        .collect();
+    let files: Vec<&ParsedFile> = parsed_files.iter().filter(|pf| in_pass(pf)).collect();
     let build_step = crate::scan::debug_log::span("phase_c", || {
         format!(
             "call_graph_build language={} files={} rules={}",
@@ -288,7 +366,7 @@ pub(super) fn run_taint_pass<'a, L: TaintLanguage<'a>>(
             rules.len()
         )
     });
-    let language = L::build(&files);
+    let language = L::build(extracted, source_lines_by_file(&files));
     build_step.end_with(|| match language.graph_size() {
         Some((functions, edges)) => format!("functions={functions} call_edges={edges}"),
         None => "no_call_graph".to_string(),
@@ -325,7 +403,7 @@ pub(super) fn run_taint_pass<'a, L: TaintLanguage<'a>>(
 /// nor what it resolves, nor any summary it reads changed. The result is
 /// one entry per rule (`None` for a rule without source or sink), each
 /// holding the findings of every file, in file order.
-fn cached_rule_runs<'a, L: TaintLanguage<'a>>(
+fn cached_rule_runs<L: TaintLanguage>(
     language: &L,
     files: &[&ParsedFile],
     rule_jsons: &[&serde_json::Value],

@@ -36,6 +36,14 @@
 //!     `JavaFunctionInfo` `Class.method` + a superclass map;
 //!     `PhpFunctionInfo` does not keep this class-method association)
 //!     — out of scope for this effort, documented rather than guessed.
+//!
+//! **Read from the tree file by file, linked without it (ticket #281)**:
+//! [`PhpFile::extract`] reads from one file's tree everything the graph
+//! needs (its prepared module and functions, its `require`s and classes,
+//! and the local names of the calls of each function in the order its
+//! body lists them), so that the scan can drop the tree right after;
+//! [`PhpCallGraph::build_from`] links the files from these facts alone,
+//! with the same edges as the former reading of the trees.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
@@ -49,7 +57,9 @@ use super::line_facts::{LinesByFile, RuleLinesByFile, rule_lines_by_file};
 use super::php_module_registry::{
     build_class_name_index, collect_php_class_names, collect_php_requires, resolve_required_file,
 };
-use super::php_summary::{PhpFunctionInfo, compute_php_summary_with, prepare_php_file};
+use super::php_summary::{
+    PhpFunctionInfo, collect_php_functions, compute_php_summary_with, prepare_php_functions,
+};
 use super::prepared::{PreparedFile, PreparedFiles};
 use super::transfer::{FunctionSummary, RuleSpecs};
 use super::visibility::{ImportVisibility, Visibility, graph_fingerprint};
@@ -123,7 +133,52 @@ fn walk_calls<'tree>(node: Node<'tree>, out: &mut Vec<Node<'tree>>) {
     }
 }
 
-/// Returns the outgoing edges of a PHP function. Resolves: a bare
+/// The local names ([`call_local_name`]) of the calls under `body`, in
+/// the order [`walk_calls`] lists them, the order in which the first
+/// resolution of a name wins (ticket #281). A call without a local name
+/// is not kept: no edge was ever drawn from it.
+fn call_names(body: Node, source: &[u8]) -> Vec<String> {
+    let mut calls = Vec::new();
+    walk_calls(body, &mut calls);
+    calls
+        .into_iter()
+        .filter_map(|call| call_local_name(call, source))
+        .collect()
+}
+
+/// What the call graph needs from one PHP file, read from its tree once
+/// ([`PhpFile::extract`], ticket #281): no node of the tree is kept.
+pub struct PhpFile {
+    /// The module top level and the functions, prepared for every rule.
+    prepared: PreparedFile<PhpFunctionInfo>,
+    /// The local names of the calls of each function of `prepared`, at
+    /// the same index ([`call_names`]).
+    calls: Vec<Vec<String>>,
+    /// The literal `require`/`include` specifiers, in source order.
+    requires: Vec<String>,
+    /// The classes the file declares.
+    class_names: Vec<String>,
+}
+
+impl PhpFile {
+    /// Reads the file whose tree is `root`, parsed from `source`.
+    pub fn extract(root: Node<'_>, source: &[u8]) -> Self {
+        let functions = collect_php_functions(root, source);
+        let calls = functions
+            .iter()
+            .map(|function| call_names(function.body, source))
+            .collect();
+        PhpFile {
+            requires: collect_php_requires(root, source),
+            class_names: collect_php_class_names(root, source),
+            calls,
+            prepared: prepare_php_functions(root, functions, source),
+        }
+    }
+}
+
+/// Returns the outgoing edges of a PHP function from the local names of
+/// its calls ([`call_names`]). Resolves: a bare
 /// call to a function in the same file, or one made available by a
 /// literal `require`/`include`/static-scope
 /// (`import_bindings`, see module doc for how the latter is built —
@@ -131,19 +186,14 @@ fn walk_calls<'tree>(node: Node<'tree>, out: &mut Vec<Node<'tree>>) {
 /// `self.`/`static.`/`this.` are resolved directly as same-file here
 /// (never via `import_bindings`, which does not contain them).
 fn outgoing_edges(
-    fn_info: &PhpFunctionInfo,
-    source: &[u8],
+    calls: &[String],
     filepath: &str,
     local_names: &BTreeSet<String>,
     visibility: &dyn Visibility,
 ) -> BTreeMap<String, NodeKey> {
     let mut edges = BTreeMap::new();
-    let mut calls = Vec::new();
-    walk_calls(fn_info.body_node, &mut calls);
-    for call_node in calls {
-        let Some(local_name) = call_local_name(call_node, source) else {
-            continue;
-        };
+    for local_name in calls {
+        let local_name = local_name.clone();
         if edges.contains_key(&local_name) {
             continue;
         }
@@ -239,28 +289,24 @@ fn resolve_require_targets(
 /// contract as `call_graph::CallGraph`/`js_call_graph::JsCallGraph`
 /// (see their doc for field details, identical here).
 #[derive(Default)]
-pub struct PhpCallGraph<'tree> {
-    pub nodes: BTreeMap<NodeKey, PhpFunctionInfo<'tree>>,
+pub struct PhpCallGraph {
+    pub nodes: BTreeMap<NodeKey, PhpFunctionInfo>,
     pub edges: BTreeMap<NodeKey, BTreeMap<String, NodeKey>>,
     /// The `require` targets of each file and the class index of the
     /// project, looked up on demand (ticket #239), instead of the former
     /// per-file map, which held every method of every class of the project
     /// for every file.
     visibility: Arc<ImportVisibility>,
-    source_by_file: BTreeMap<String, &'tree [u8]>,
     /// Every file of the graph prepared once for all the rules of the
     /// scan (ticket #192): read for the summaries and handed to the
     /// taint analysis of each file ([`Self::prepared_file`]).
-    prepared: PreparedFiles<'tree, PhpFunctionInfo<'tree>>,
+    prepared: PreparedFiles<PhpFunctionInfo>,
 }
 
-impl<'tree> PhpCallGraph<'tree> {
+impl PhpCallGraph {
     /// The prepared form of `filepath`, one of the graph's files, for
     /// the taint analysis of each rule (ticket #192).
-    pub fn prepared_file(
-        &self,
-        filepath: &str,
-    ) -> Option<&PreparedFile<'tree, PhpFunctionInfo<'tree>>> {
+    pub fn prepared_file(&self, filepath: &str) -> Option<&PreparedFile<PhpFunctionInfo>> {
         self.prepared.file(filepath)
     }
 
@@ -273,46 +319,54 @@ impl<'tree> PhpCallGraph<'tree> {
     /// the index once and looks a key up in it before the `require`
     /// bindings of the file, as the former per-file map, which merged the
     /// class bindings of the whole project into every file after them
-    /// (ticket #239).
-    pub fn build(files: &[FileInput<'tree>]) -> Self {
+    /// (ticket #239). Each file is read ([`PhpFile::extract`], in
+    /// parallel), then linked ([`Self::build_from`]).
+    pub fn build(files: &[FileInput<'_>]) -> Self {
+        Self::build_from(
+            files
+                .par_iter()
+                .map(|f| (f.filepath.clone(), PhpFile::extract(f.root, f.source)))
+                .collect(),
+        )
+    }
+
+    /// Builds the complete graph from the files already read, by path,
+    /// without any tree (ticket #281).
+    pub fn build_from(files: Vec<(String, PhpFile)>) -> Self {
         let mut graph = PhpCallGraph::default();
         let mut file_function_names: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         let mut requires_by_file: BTreeMap<String, Vec<String>> = BTreeMap::new();
         let mut class_names_by_file: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        // The calls of each node. Homonyms: the last one, as in `nodes`
+        // and `PreparedFiles::index_node`.
+        let mut calls_by_node: BTreeMap<NodeKey, Vec<String>> = BTreeMap::new();
 
-        // Each file is prepared once for every rule of the scan (ticket
-        // #192), in parallel: a file only reads its own tree. Its
-        // collected functions are the graph nodes.
-        let per_file: Vec<_> = files
-            .par_iter()
-            .map(|f| {
-                (
-                    prepare_php_file(f.root, f.source),
-                    collect_php_requires(f.root, f.source),
-                )
-            })
-            .collect();
-        for (f, (prepared, requires)) in files.iter().zip(per_file) {
+        // Each file was prepared once for every rule of the scan (ticket
+        // #192). Its collected functions are the graph nodes.
+        for (filepath, file) in files {
+            let PhpFile {
+                prepared,
+                calls,
+                requires,
+                class_names,
+            } = file;
             file_function_names.insert(
-                f.filepath.clone(),
+                filepath.clone(),
                 prepared
                     .functions
                     .iter()
                     .map(|function| function.info.name.clone())
                     .collect(),
             );
-            for (index, function) in prepared.functions.iter().enumerate() {
-                let key = (f.filepath.clone(), function.info.name.clone());
+            for (index, (function, calls)) in prepared.functions.iter().zip(calls).enumerate() {
+                let key = (filepath.clone(), function.info.name.clone());
                 graph.prepared.index_node(key.clone(), index);
-                graph.nodes.insert(key, function.info.clone());
+                graph.nodes.insert(key.clone(), function.info.clone());
+                calls_by_node.insert(key, calls);
             }
-            graph.prepared.insert_file(f.filepath.clone(), prepared);
-            requires_by_file.insert(f.filepath.clone(), requires);
-            class_names_by_file.insert(
-                f.filepath.clone(),
-                collect_php_class_names(f.root, f.source),
-            );
-            graph.source_by_file.insert(f.filepath.clone(), f.source);
+            graph.prepared.insert_file(filepath.clone(), prepared);
+            requires_by_file.insert(filepath.clone(), requires);
+            class_names_by_file.insert(filepath, class_names);
         }
 
         let known_files: Vec<String> = file_function_names.keys().cloned().collect();
@@ -343,7 +397,6 @@ impl<'tree> PhpCallGraph<'tree> {
                 .get(filepath)
                 .cloned()
                 .unwrap_or_default();
-            let source = graph.source_by_file[filepath];
             // This file's functions: a range of the sorted keys, not a scan
             // of every function of the project (as `call_graph.rs`).
             let fn_keys: Vec<NodeKey> = graph
@@ -354,8 +407,7 @@ impl<'tree> PhpCallGraph<'tree> {
                 .collect();
             for key in fn_keys {
                 let edges = outgoing_edges(
-                    &graph.nodes[&key],
-                    source,
+                    &calls_by_node[&key],
                     filepath,
                     &local_names,
                     graph.visibility.as_ref(),
@@ -551,6 +603,88 @@ mod tests {
     use crate::scan::dataflow::transfer::SinkSpec;
     use tree_sitter::Parser;
 
+    /// The edges of a function as the graph drew them from its tree
+    /// before ticket #281, when `outgoing_edges` walked the call nodes
+    /// under `node` itself: the reference the edges drawn from the local
+    /// names read once ([`call_names`]) must equal. Kept as it was, but for
+    /// the node passed instead of the metadata that held it.
+    fn edges_from_tree(
+        node: Node,
+        source: &[u8],
+        filepath: &str,
+        local_names: &BTreeSet<String>,
+        visibility: &dyn Visibility,
+    ) -> BTreeMap<String, NodeKey> {
+        let mut edges = BTreeMap::new();
+        let mut calls = Vec::new();
+        walk_calls(node, &mut calls);
+        for call_node in calls {
+            let Some(local_name) = call_local_name(call_node, source) else {
+                continue;
+            };
+            if edges.contains_key(&local_name) {
+                continue;
+            }
+            let same_file_target = ["this.", "self.", "static."]
+                .iter()
+                .find_map(|prefix| local_name.strip_prefix(prefix));
+            if let Some(method) = same_file_target {
+                if local_names.contains(method) {
+                    edges.insert(
+                        local_name.clone(),
+                        (filepath.to_string(), method.to_string()),
+                    );
+                }
+                continue;
+            }
+            if local_names.contains(&local_name) {
+                edges.insert(local_name.clone(), (filepath.to_string(), local_name));
+            } else if let Some(target) = visibility.binding(filepath, &local_name) {
+                edges.insert(local_name.clone(), target);
+            }
+        }
+        edges
+    }
+
+    /// Builds the graph of `files` and asserts that every node has the
+    /// edges its tree gave before ticket #281 ([`edges_from_tree`]).
+    fn build_checked(files: &[FileInput]) -> PhpCallGraph {
+        let graph = PhpCallGraph::build(files);
+        assert_edges_match_trees(&graph, files);
+        graph
+    }
+
+    /// See [`build_checked`]; returns the number of edges compared.
+    fn assert_edges_match_trees(graph: &PhpCallGraph, files: &[FileInput]) -> usize {
+        let mut compared = 0;
+        for f in files {
+            let functions = collect_php_functions(f.root, f.source);
+            let local_names: BTreeSet<String> = functions
+                .iter()
+                .map(|function| function.info.name.clone())
+                .collect();
+            // The node of each graph node: the last homonym, as the graph
+            // keeps.
+            let nodes: BTreeMap<String, Node> = functions
+                .iter()
+                .map(|function| (function.info.name.clone(), function.body))
+                .collect();
+            for (name, node) in &nodes {
+                let key = (f.filepath.clone(), name.clone());
+                let reference = edges_from_tree(
+                    *node,
+                    f.source,
+                    &f.filepath,
+                    &local_names,
+                    graph.visibility.as_ref(),
+                );
+                assert_eq!(graph.edges[&key], reference, "{key:?}");
+                compared += reference.len();
+            }
+        }
+        compared
+    }
+
     fn parse(src: &str) -> tree_sitter::Tree {
         let mut parser = Parser::new();
         let lang: tree_sitter::Language = tree_sitter_php::LANGUAGE_PHP.into();
@@ -584,7 +718,7 @@ mod tests {
             root: tree.root_node(),
             source: &src,
         }];
-        let graph = PhpCallGraph::build(&files);
+        let graph = build_checked(&files);
         let edges = &graph.edges[&("m.php".to_string(), "main".to_string())];
         assert_eq!(
             edges.get("helper"),
@@ -610,7 +744,7 @@ mod tests {
                 source: &src_u,
             },
         ];
-        let graph = PhpCallGraph::build(&files);
+        let graph = build_checked(&files);
         let edges = &graph.edges[&("a.php".to_string(), "main".to_string())];
         assert_eq!(
             edges.get("helper"),
@@ -636,7 +770,7 @@ mod tests {
                 source: &src_u,
             },
         ];
-        let graph = PhpCallGraph::build(&files);
+        let graph = build_checked(&files);
         let edges = &graph.edges[&("a.php".to_string(), "main".to_string())];
         assert_eq!(
             edges.get("Utils.helper"),
@@ -669,7 +803,7 @@ mod tests {
                 source: &src_u2,
             },
         ];
-        let graph = PhpCallGraph::build(&files);
+        let graph = build_checked(&files);
         let edges = &graph.edges[&("a.php".to_string(), "main".to_string())];
         assert!(edges.get("Utils.helper").is_none());
     }
@@ -683,7 +817,7 @@ mod tests {
             root: tree.root_node(),
             source: &src,
         }];
-        let graph = PhpCallGraph::build(&files);
+        let graph = build_checked(&files);
         let edges = &graph.edges[&("m.php".to_string(), "main".to_string())];
         assert_eq!(
             edges.get("self.helper"),
@@ -705,7 +839,7 @@ mod tests {
             root: tree.root_node(),
             source: &src,
         }];
-        let graph = PhpCallGraph::build(&files);
+        let graph = build_checked(&files);
         let edges = &graph.edges[&("m.php".to_string(), "main".to_string())];
         assert!(
             edges.is_empty(),
@@ -722,7 +856,7 @@ mod tests {
             root: tree.root_node(),
             source: &src,
         }];
-        let graph = PhpCallGraph::build(&files);
+        let graph = build_checked(&files);
         let edges = &graph.edges[&("m.php".to_string(), "main".to_string())];
         assert_eq!(
             edges.get("this.helper"),
@@ -739,7 +873,7 @@ mod tests {
             root: tree.root_node(),
             source: &src,
         }];
-        let graph = PhpCallGraph::build(&files);
+        let graph = build_checked(&files);
         let edges = &graph.edges[&("m.php".to_string(), "main".to_string())];
         assert!(edges.is_empty());
     }
@@ -764,7 +898,7 @@ mod tests {
                 source: &src_u,
             },
         ];
-        let graph = PhpCallGraph::build(&files);
+        let graph = build_checked(&files);
         let specs = specs_with(vec![SinkSpec::new("*.query")]);
         let (own, _extra) = graph.resolve_summaries(&specs, None);
 
@@ -790,7 +924,7 @@ mod tests {
             root: tree.root_node(),
             source: &src,
         }];
-        let graph = PhpCallGraph::build(&files);
+        let graph = build_checked(&files);
         let specs = specs_with(vec![]);
         let (own, _extra) = graph.resolve_summaries(&specs, None);
         assert!(own["m.php"].contains_key("f"));
@@ -834,7 +968,7 @@ mod tests {
                 source: src.as_bytes(),
             })
             .collect();
-        let graph = PhpCallGraph::build(&files);
+        let graph = build_checked(&files);
         let mut names: BTreeMap<String, BTreeSet<String>> = sources
             .iter()
             .map(|(path, _)| (path.to_string(), BTreeSet::new()))

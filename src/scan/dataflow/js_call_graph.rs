@@ -40,6 +40,14 @@
 //! here — and it is actually welcome for JS: the `js_summary.rs` doc
 //! already notes that most vulnerable JS code lives in callbacks passed
 //! as arguments, a pattern even more dominant than in Python.
+//!
+//! **Read from the tree file by file, linked without it (ticket #281)**:
+//! [`JsFile::extract`] reads from one file's tree everything the graph
+//! needs (its prepared module and functions, its imports, and the local
+//! names of the calls of each function in the order its body lists them),
+//! so that the scan can drop the tree right after;
+//! [`JsCallGraph::build_from`] links the files from these facts alone,
+//! with the same edges as the former reading of the trees.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
@@ -50,7 +58,9 @@ use tree_sitter::Node;
 
 pub use super::call_graph::{FileInput, MAX_SCC_FIXPOINT_ITER, NodeKey, SummariesByFile};
 use super::js_module_registry::{JsImportInfo, collect_js_imports, resolve_target_file};
-use super::js_summary::{JsFunctionInfo, compute_js_summary_with, prepare_js_file};
+use super::js_summary::{
+    JsFunctionInfo, collect_js_functions, compute_js_summary_with, prepare_js_functions,
+};
 use super::line_facts::{LinesByFile, RuleLinesByFile, rule_lines_by_file};
 use super::prepared::{PreparedFile, PreparedFiles};
 use super::transfer::{FunctionSummary, RuleSpecs};
@@ -189,25 +199,63 @@ fn walk_calls<'tree>(node: Node<'tree>, out: &mut Vec<Node<'tree>>) {
     }
 }
 
-/// Returns the outgoing edges of a JS function: local call name →
-/// target node. Resolves three cases: a call to a function in the
-/// **same file** (`local_names`), a call to an **imported** function
+/// The local names ([`call_local_name`]) of the calls under `body`, in
+/// the order [`walk_calls`] lists them, the order in which the first
+/// resolution of a name wins (ticket #281). A call without a local name
+/// is not kept: no edge was ever drawn from it.
+fn call_names(body: Node, source: &[u8]) -> Vec<String> {
+    let mut calls = Vec::new();
+    walk_calls(body, &mut calls);
+    calls
+        .into_iter()
+        .filter_map(|call| call_local_name(call, source))
+        .collect()
+}
+
+/// What the call graph needs from one JavaScript/TypeScript file, read
+/// from its tree once ([`JsFile::extract`], ticket #281): no node of the
+/// tree is kept.
+pub struct JsFile {
+    /// The module top level and the functions, prepared for every rule.
+    prepared: PreparedFile<JsFunctionInfo>,
+    /// The local names of the calls of each function of `prepared`, at
+    /// the same index ([`call_names`]).
+    calls: Vec<Vec<String>>,
+    /// The imports and `require`s, in source order.
+    imports: Vec<JsImportInfo>,
+}
+
+impl JsFile {
+    /// Reads the file whose tree is `root`, parsed from `source`.
+    pub fn extract(root: Node<'_>, source: &[u8]) -> Self {
+        let functions = collect_js_functions(root, source);
+        let calls = functions
+            .iter()
+            .map(|function| call_names(function.body, source))
+            .collect();
+        JsFile {
+            imports: collect_js_imports(root, source),
+            calls,
+            prepared: prepare_js_functions(root, functions, source),
+        }
+    }
+}
+
+/// Returns the outgoing edges of a JS function from the local names of
+/// its calls ([`call_names`]): local call name → target node. Resolves
+/// three cases: a call to a function in the **same file**
+/// (`local_names`), a call to an **imported** function
 /// (`import_bindings`), a `this.method()` call resolved in the current
 /// file (see module doc). Other forms remain unresolved.
 fn outgoing_edges(
-    fn_info: &JsFunctionInfo,
-    source: &[u8],
+    calls: &[String],
     filepath: &str,
     local_names: &BTreeSet<String>,
     visibility: &dyn Visibility,
 ) -> BTreeMap<String, NodeKey> {
     let mut edges = BTreeMap::new();
-    let mut calls = Vec::new();
-    walk_calls(fn_info.body_node, &mut calls);
-    for call_node in calls {
-        let Some(local_name) = call_local_name(call_node, source) else {
-            continue;
-        };
+    for local_name in calls {
+        let local_name = local_name.clone();
         if edges.contains_key(&local_name) {
             continue;
         }
@@ -237,65 +285,72 @@ fn outgoing_edges(
 /// contract as `call_graph::CallGraph` (see its doc for the detail of
 /// the fields, identical here).
 #[derive(Default)]
-pub struct JsCallGraph<'tree> {
-    pub nodes: BTreeMap<NodeKey, JsFunctionInfo<'tree>>,
+pub struct JsCallGraph {
+    pub nodes: BTreeMap<NodeKey, JsFunctionInfo>,
     pub edges: BTreeMap<NodeKey, BTreeMap<String, NodeKey>>,
     /// The resolved imports of each file, looked up on demand (ticket
     /// #239), instead of the former per-file map of every imported name.
     visibility: Arc<ImportVisibility>,
-    source_by_file: BTreeMap<String, &'tree [u8]>,
     /// Every file of the graph prepared once for all the rules of the
     /// scan (ticket #192): read for the summaries and handed to the
     /// taint analysis of each file ([`Self::prepared_file`]).
-    prepared: PreparedFiles<'tree, JsFunctionInfo<'tree>>,
+    prepared: PreparedFiles<JsFunctionInfo>,
 }
 
-impl<'tree> JsCallGraph<'tree> {
+impl JsCallGraph {
     /// The prepared form of `filepath`, one of the graph's files, for
     /// the taint analysis of each rule (ticket #192).
-    pub fn prepared_file(
-        &self,
-        filepath: &str,
-    ) -> Option<&PreparedFile<'tree, JsFunctionInfo<'tree>>> {
+    pub fn prepared_file(&self, filepath: &str) -> Option<&PreparedFile<JsFunctionInfo>> {
         self.prepared.file(filepath)
     }
 
     /// Builds the complete graph (nodes + edges + import bindings) from
-    /// a set of already-parsed JS/TS files.
-    pub fn build(files: &[FileInput<'tree>]) -> Self {
+    /// a set of already-parsed JS/TS files: each file is read
+    /// ([`JsFile::extract`], in parallel), then linked
+    /// ([`Self::build_from`]).
+    pub fn build(files: &[FileInput<'_>]) -> Self {
+        Self::build_from(
+            files
+                .par_iter()
+                .map(|f| (f.filepath.clone(), JsFile::extract(f.root, f.source)))
+                .collect(),
+        )
+    }
+
+    /// Builds the complete graph from the files already read, by path,
+    /// without any tree (ticket #281).
+    pub fn build_from(files: Vec<(String, JsFile)>) -> Self {
         let mut graph = JsCallGraph::default();
         let mut file_function_names: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         let mut imports_by_file: BTreeMap<String, Vec<JsImportInfo>> = BTreeMap::new();
+        // The calls of each node. Homonyms: the last one, as in `nodes`
+        // and `PreparedFiles::index_node`.
+        let mut calls_by_node: BTreeMap<NodeKey, Vec<String>> = BTreeMap::new();
 
-        // Each file is prepared once for every rule of the scan (ticket
-        // #192), in parallel: a file only reads its own tree. Its
-        // collected functions are the graph nodes.
-        let per_file: Vec<_> = files
-            .par_iter()
-            .map(|f| {
-                (
-                    prepare_js_file(f.root, f.source),
-                    collect_js_imports(f.root, f.source),
-                )
-            })
-            .collect();
-        for (f, (prepared, imports)) in files.iter().zip(per_file) {
+        // Each file was prepared once for every rule of the scan (ticket
+        // #192). Its collected functions are the graph nodes.
+        for (filepath, file) in files {
+            let JsFile {
+                prepared,
+                calls,
+                imports,
+            } = file;
             file_function_names.insert(
-                f.filepath.clone(),
+                filepath.clone(),
                 prepared
                     .functions
                     .iter()
                     .map(|function| function.info.name.clone())
                     .collect(),
             );
-            for (index, function) in prepared.functions.iter().enumerate() {
-                let key = (f.filepath.clone(), function.info.name.clone());
+            for (index, (function, calls)) in prepared.functions.iter().zip(calls).enumerate() {
+                let key = (filepath.clone(), function.info.name.clone());
                 graph.prepared.index_node(key.clone(), index);
-                graph.nodes.insert(key, function.info.clone());
+                graph.nodes.insert(key.clone(), function.info.clone());
+                calls_by_node.insert(key, calls);
             }
-            graph.prepared.insert_file(f.filepath.clone(), prepared);
-            imports_by_file.insert(f.filepath.clone(), imports);
-            graph.source_by_file.insert(f.filepath.clone(), f.source);
+            graph.prepared.insert_file(filepath.clone(), prepared);
+            imports_by_file.insert(filepath, imports);
         }
 
         let known_files: Vec<String> = file_function_names.keys().cloned().collect();
@@ -325,7 +380,6 @@ impl<'tree> JsCallGraph<'tree> {
                 .get(filepath)
                 .cloned()
                 .unwrap_or_default();
-            let source = graph.source_by_file[filepath];
             // This file's functions: a range of the sorted keys, not a scan
             // of every function of the project (as `call_graph.rs`).
             let fn_keys: Vec<NodeKey> = graph
@@ -336,8 +390,7 @@ impl<'tree> JsCallGraph<'tree> {
                 .collect();
             for key in fn_keys {
                 let edges = outgoing_edges(
-                    &graph.nodes[&key],
-                    source,
+                    &calls_by_node[&key],
                     filepath,
                     &local_names,
                     graph.visibility.as_ref(),
@@ -531,6 +584,85 @@ mod tests {
     use crate::scan::dataflow::transfer::SinkSpec;
     use tree_sitter::Parser;
 
+    /// The edges of a function as the graph drew them from its tree
+    /// before ticket #281, when `outgoing_edges` walked the call nodes
+    /// under `node` itself: the reference the edges drawn from the local
+    /// names read once ([`call_names`]) must equal. Kept as it was, but for
+    /// the node passed instead of the metadata that held it.
+    fn edges_from_tree(
+        node: Node,
+        source: &[u8],
+        filepath: &str,
+        local_names: &BTreeSet<String>,
+        visibility: &dyn Visibility,
+    ) -> BTreeMap<String, NodeKey> {
+        let mut edges = BTreeMap::new();
+        let mut calls = Vec::new();
+        walk_calls(node, &mut calls);
+        for call_node in calls {
+            let Some(local_name) = call_local_name(call_node, source) else {
+                continue;
+            };
+            if edges.contains_key(&local_name) {
+                continue;
+            }
+            if let Some(method) = local_name.strip_prefix("this.") {
+                if local_names.contains(method) {
+                    edges.insert(
+                        local_name.clone(),
+                        (filepath.to_string(), method.to_string()),
+                    );
+                }
+                continue;
+            }
+            if local_names.contains(&local_name) {
+                edges.insert(local_name.clone(), (filepath.to_string(), local_name));
+            } else if let Some(target) = visibility.binding(filepath, &local_name) {
+                edges.insert(local_name.clone(), target);
+            }
+        }
+        edges
+    }
+
+    /// Builds the graph of `files` and asserts that every node has the
+    /// edges its tree gave before ticket #281 ([`edges_from_tree`]).
+    fn build_checked(files: &[FileInput]) -> JsCallGraph {
+        let graph = JsCallGraph::build(files);
+        assert_edges_match_trees(&graph, files);
+        graph
+    }
+
+    /// See [`build_checked`]; returns the number of edges compared.
+    fn assert_edges_match_trees(graph: &JsCallGraph, files: &[FileInput]) -> usize {
+        let mut compared = 0;
+        for f in files {
+            let functions = collect_js_functions(f.root, f.source);
+            let local_names: BTreeSet<String> = functions
+                .iter()
+                .map(|function| function.info.name.clone())
+                .collect();
+            // The node of each graph node: the last homonym, as the graph
+            // keeps.
+            let nodes: BTreeMap<String, Node> = functions
+                .iter()
+                .map(|function| (function.info.name.clone(), function.body))
+                .collect();
+            for (name, node) in &nodes {
+                let key = (f.filepath.clone(), name.clone());
+                let reference = edges_from_tree(
+                    *node,
+                    f.source,
+                    &f.filepath,
+                    &local_names,
+                    graph.visibility.as_ref(),
+                );
+                assert_eq!(graph.edges[&key], reference, "{key:?}");
+                compared += reference.len();
+            }
+        }
+        compared
+    }
+
     fn parse(src: &str) -> tree_sitter::Tree {
         let mut parser = Parser::new();
         let lang: tree_sitter::Language = tree_sitter_javascript::LANGUAGE.into();
@@ -564,7 +696,7 @@ mod tests {
             root: tree.root_node(),
             source: &src,
         }];
-        let graph = JsCallGraph::build(&files);
+        let graph = build_checked(&files);
         let edges = &graph.edges[&("m.js".to_string(), "main".to_string())];
         assert_eq!(
             edges.get("helper"),
@@ -584,7 +716,7 @@ mod tests {
             root: tree.root_node(),
             source: &src,
         }];
-        let graph = JsCallGraph::build(&files);
+        let graph = build_checked(&files);
         assert_eq!(graph.nodes.len(), 2);
     }
 
@@ -606,7 +738,7 @@ mod tests {
                 source: &src_u,
             },
         ];
-        let graph = JsCallGraph::build(&files);
+        let graph = build_checked(&files);
         let edges = &graph.edges[&("a.js".to_string(), "main".to_string())];
         assert_eq!(
             edges.get("helper"),
@@ -633,7 +765,7 @@ mod tests {
                 source: &src_u,
             },
         ];
-        let graph = JsCallGraph::build(&files);
+        let graph = build_checked(&files);
         let edges = &graph.edges[&("a.js".to_string(), "main".to_string())];
         assert_eq!(
             edges.get("utils.helper"),
@@ -650,7 +782,7 @@ mod tests {
             root: tree.root_node(),
             source: &src,
         }];
-        let graph = JsCallGraph::build(&files);
+        let graph = build_checked(&files);
         let edges = &graph.edges[&("m.js".to_string(), "main".to_string())];
         assert_eq!(
             edges.get("this.helper"),
@@ -667,7 +799,7 @@ mod tests {
             root: tree_a.root_node(),
             source: &src_a,
         }];
-        let graph = JsCallGraph::build(&files);
+        let graph = build_checked(&files);
         let edges = &graph.edges[&("a.js".to_string(), "main".to_string())];
         assert!(edges.get("x.helper").is_none());
     }
@@ -693,7 +825,7 @@ mod tests {
                 source: &src_u,
             },
         ];
-        let graph = JsCallGraph::build(&files);
+        let graph = build_checked(&files);
         let specs = specs_with(vec![SinkSpec::new("db.query")]);
         let (own, _extra) = graph.resolve_summaries(&specs, None);
 
@@ -718,7 +850,7 @@ mod tests {
             root: tree.root_node(),
             source: &src,
         }];
-        let graph = JsCallGraph::build(&files);
+        let graph = build_checked(&files);
         let specs = specs_with(vec![]);
         let (own, _extra) = graph.resolve_summaries(&specs, None);
         assert!(own["m.js"].contains_key("f"));
@@ -743,7 +875,7 @@ mod tests {
                 source: &src_u,
             },
         ];
-        let graph = JsCallGraph::build(&files);
+        let graph = build_checked(&files);
         let specs = specs_with(vec![]);
         // An imported module function, even not called, is found by the
         // name `a.js` calls it with; since ticket #239 through the graph's
@@ -801,7 +933,7 @@ mod tests {
                 source: src.as_bytes(),
             })
             .collect();
-        let graph = JsCallGraph::build(&files);
+        let graph = build_checked(&files);
         let mut names: BTreeMap<String, BTreeSet<String>> = sources
             .iter()
             .map(|(path, _)| (path.to_string(), BTreeSet::new()))

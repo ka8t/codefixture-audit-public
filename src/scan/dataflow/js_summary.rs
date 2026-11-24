@@ -42,7 +42,7 @@
 //! require a synthetic single-node CFG, not built here for now).
 
 use super::line_facts::{RuleLines, SourceLines};
-use super::prepared::{PreparedCfg, PreparedFile, PreparedFunction};
+use super::prepared::{CollectedFunction, PreparedCfg, PreparedFile, PreparedFunction};
 use super::transfer::{FunctionSummary, RuleSpecs};
 use super::worklist::prepare_js_ir;
 use tree_sitter::Node;
@@ -57,12 +57,15 @@ use tree_sitter::Node;
 /// `app.get('/x', (req, res) => {...})`). NOT qualified by an enclosing
 /// class in v1 (unlike Java's `Class.method`) — not needed as long as
 /// no interprocedural resolution consumes this name.
+///
+/// Holds no node of the parse tree (ticket #281): the body (a
+/// `statement_block`), which `build_js_cfg` reads, is the `body` of the
+/// [`CollectedFunction`] the collection returns.
 // Clone: the call graph keeps a copy as its node, next to the
 // prepared function that owns the original (ticket #192).
 #[derive(Clone)]
-pub struct JsFunctionInfo<'tree> {
+pub struct JsFunctionInfo {
     pub name: String,
-    pub body_node: Node<'tree>,
     pub param_names: Vec<String>,
     pub lineno: usize,
     /// The first parameter of an AWS Lambda handler ([`is_lambda_handler`]),
@@ -149,7 +152,10 @@ fn inferred_name_from_context<'tree>(node: Node<'tree>, source: &[u8]) -> Option
 /// see module doc). A function whose body is not a `statement_block`
 /// (expression-bodied arrow) is skipped (accepted v1 limitation, see
 /// module doc).
-pub fn collect_js_functions<'tree>(root: Node<'tree>, source: &[u8]) -> Vec<JsFunctionInfo<'tree>> {
+pub fn collect_js_functions<'tree>(
+    root: Node<'tree>,
+    source: &[u8],
+) -> Vec<CollectedFunction<'tree, JsFunctionInfo>> {
     let mut handler_names = Vec::new();
     collect_exported_handler_names(root, source, &mut handler_names);
     let mut functions = Vec::new();
@@ -161,7 +167,7 @@ fn collect_functions_rec<'tree>(
     node: Node<'tree>,
     source: &[u8],
     handler_names: &[String],
-    out: &mut Vec<JsFunctionInfo<'tree>>,
+    out: &mut Vec<CollectedFunction<'tree, JsFunctionInfo>>,
 ) {
     if FUNCTION_LIKE_KINDS.contains(&node.kind())
         && let Some(body) = node.child_by_field_name("body")
@@ -172,12 +178,14 @@ fn collect_functions_rec<'tree>(
         let lambda_event = is_lambda_handler(node, source, handler_names)
             .then(|| param_names.first().cloned())
             .flatten();
-        out.push(JsFunctionInfo {
-            name,
-            body_node: body,
-            param_names,
-            lineno: node.start_position().row + 1,
-            lambda_event,
+        out.push(CollectedFunction {
+            info: JsFunctionInfo {
+                name,
+                param_names,
+                lineno: node.start_position().row + 1,
+                lambda_event,
+            },
+            body,
         });
     }
     let mut w = node.walk();
@@ -331,17 +339,17 @@ fn function_name(node: Node, source: &[u8]) -> String {
 /// then [`compute_js_summary_with`]. A caller that already holds the prepared
 /// body (the call graph, ticket #192) calls [`compute_js_summary_with`].
 pub fn compute_js_summary<'tree>(
-    fn_info: &JsFunctionInfo<'tree>,
+    function: &CollectedFunction<'tree, JsFunctionInfo>,
     specs: &RuleSpecs,
     source: &'tree [u8],
     source_lines: Option<&RuleLines>,
 ) -> FunctionSummary {
     let body = PreparedCfg::new(
-        super::js_cfg::build_js_cfg(fn_info.body_node, source),
+        super::js_cfg::build_js_cfg(function.body, source),
         source,
         prepare_js_ir,
     );
-    compute_js_summary_with(fn_info, &body, specs, source_lines)
+    compute_js_summary_with(&function.info, &body, specs, source_lines)
 }
 
 /// Summary of a JavaScript/TypeScript function whose body is already prepared
@@ -365,25 +373,35 @@ pub fn compute_js_summary_with(
 
 /// Prepares a JavaScript/TypeScript file for every taint rule of the scan (ticket
 /// #192): the module top level and every collected function.
-pub fn prepare_js_file<'tree>(
-    root: Node<'tree>,
-    source: &'tree [u8],
-) -> PreparedFile<'tree, JsFunctionInfo<'tree>> {
+pub fn prepare_js_file(root: Node<'_>, source: &[u8]) -> PreparedFile<JsFunctionInfo> {
+    prepare_js_functions(root, collect_js_functions(root, source), source)
+}
+
+/// Prepares the module top level `root` of a JavaScript/TypeScript file
+/// and its functions `functions`, already collected
+/// ([`collect_js_functions`]): what [`prepare_js_file`] does, for a caller
+/// that also reads the collected bodies (the call graph, ticket #281).
+/// The bodies are dropped once prepared.
+pub fn prepare_js_functions(
+    root: Node<'_>,
+    functions: Vec<CollectedFunction<'_, JsFunctionInfo>>,
+    source: &[u8],
+) -> PreparedFile<JsFunctionInfo> {
     PreparedFile {
         module: Some(PreparedCfg::new(
             super::js_cfg::build_js_cfg(root, source),
             source,
             prepare_js_ir,
         )),
-        functions: collect_js_functions(root, source)
+        functions: functions
             .into_iter()
-            .map(|info| PreparedFunction {
+            .map(|function| PreparedFunction {
                 body: Some(PreparedCfg::new(
-                    super::js_cfg::build_js_cfg(info.body_node, source),
+                    super::js_cfg::build_js_cfg(function.body, source),
                     source,
                     prepare_js_ir,
                 )),
-                info,
+                info: function.info,
             })
             .collect(),
     }
@@ -554,7 +572,7 @@ mod tests {
         let tree = parse_js(src);
         collect_js_functions(tree.root_node(), src.as_bytes())
             .into_iter()
-            .map(|f| (f.name, f.lambda_event))
+            .map(|f| (f.info.name, f.info.lambda_event))
             .collect()
     }
 
