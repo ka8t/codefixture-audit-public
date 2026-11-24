@@ -1065,6 +1065,13 @@ pub struct FunctionSummary {
     /// For each parameter index reaching a sink, a template finding
     /// to re-emit at the call site.
     pub sink_param_findings: BTreeMap<usize, Finding>,
+    /// For a parameter of `sink_param_findings` that reaches only sinks
+    /// limited to some source kinds (`kinds=` on a `sink` line), the kinds
+    /// that reach one; absent: every kind. Read at the call site, so that a
+    /// helper writing to any `Writer` does not take a file line for a
+    /// visitor's data (www.codefixture.com#5).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub sink_param_kinds: BTreeMap<usize, BTreeSet<String>>,
 }
 
 // ============================================================================
@@ -1224,7 +1231,15 @@ fn kinds_compatible(t: &Taint, sink_kinds: &[String]) -> bool {
         return true;
     }
     match t {
-        Taint::Top => true,
+        // A sink limited to some kinds asks which data reaches it; `Top`,
+        // the value a loop widened, no longer says (its kinds are lost), so
+        // it does not reach such a sink. Deliberate deviation from the
+        // Audit, where `Top` reached every sink: taint_xss limits its broad
+        // `print`/`write` sinks to visitor data, and a line read from a file
+        // in a loop (libgdx `HieroSettings`, Activiti `DbSchemaExport`)
+        // widened to `Top` passed them again (www.codefixture.com#5). An
+        // unlimited sink still takes `Top`.
+        Taint::Top => false,
         Taint::Tainted { kinds, .. } => kinds
             .iter()
             .any(|k| sink_kinds.iter().any(|sink| sink.as_str() == &**k)),
@@ -1515,14 +1530,36 @@ pub fn eval_call(
     }
 
     match resolved {
-        ResolvedSpec::Source(spec) => Taint::tainted(
-            [spec.kind.clone()],
-            SourceInfo {
-                line: lineno,
-                expr: callee_name.into(),
-                kind: spec.kind.as_str().into(),
-            },
-        ),
+        // A source read from an object already tainted keeps the earlier
+        // origin of that object: `readerBuffered.readLine()` on a reader
+        // built over `socket.getInputStream()` is network data, not the
+        // file data `\.readLine\s*\(` names when nothing came before it
+        // (Juliet's File source, added beside its socket sources). The join
+        // keeps the source of the earliest line, and the new one on the
+        // same line, so a receiver tainted on the line of the call
+        // (`request.args.get`) is reported as before. Deliberate deviation
+        // from the Audit, where a source always starts a new taint.
+        // The receiver is read again here, as a receiver: `callee_taint` is
+        // the source itself (`reader.readLine` matches the pattern). Only a
+        // receiver that is a plain name or member (`reader`, `this.reader`)
+        // is read, so that no call of the receiver runs twice.
+        ResolvedSpec::Source(spec) => {
+            let source = Taint::tainted(
+                [spec.kind.clone()],
+                SourceInfo {
+                    line: lineno,
+                    expr: callee_name.into(),
+                    kind: spec.kind.as_str().into(),
+                },
+            );
+            match callee {
+                Rhs::AttrRef { base, .. } if is_plain_read(base) => join(
+                    &source,
+                    &eval_read(base, SourceRead::Receiver, state, specs, findings, site),
+                ),
+                _ => source,
+            }
+        }
         ResolvedSpec::Sink(spec) => {
             check_sink(
                 spec,
@@ -1583,6 +1620,40 @@ pub fn eval_call(
                 summary = specs.summary(&callee_name);
             }
 
+            // An object handed to a summarized function carries the taint of
+            // its members (`c.containerOne = data; badSink(c);`): Juliet's
+            // flow variant 67 passes a container whose field holds the data
+            // to a method of another class, which reads `c.containerOne`
+            // from its parameter. Deliberate deviation from the Audit, where
+            // the object went to the callee clean. Only for a function of the
+            // project (a summary): a library call keeps the object's own
+            // taint, so `map.put(key, user)` or `render(request, ...)` do not
+            // take the taint of `user.name` or `request.session[...]`. Never
+            // for `this`/`self`, whose members are the whole state of the
+            // object, nor for an object whose members are sources of the
+            // rule (`request` for `request.path`): Django's
+            // `request.special_path = request.path; render(request, ...)`
+            // hands on the request, not its path.
+            let arg_taints: Vec<Taint> = if summary.is_some() {
+                args.iter()
+                    .zip(&arg_taints)
+                    .map(|(arg, t)| match arg {
+                        Rhs::VarRef(name)
+                            if !matches!(name.as_str(), "this" | "self" | "$this")
+                                && !specs.sources.iter().any(|s| {
+                                    s.pattern
+                                        .strip_prefix(name.as_str())
+                                        .is_some_and(|rest| rest.starts_with('.'))
+                                }) =>
+                        {
+                            join(t, &member_taints(state, name))
+                        }
+                        _ => t.clone(),
+                    })
+                    .collect()
+            } else {
+                arg_taints
+            };
             if let Some(s) = &summary {
                 findings.extend(apply_summary_at_call(
                     s,
@@ -1649,6 +1720,28 @@ pub fn eval_call(
     }
 }
 
+/// The join of the taints of the members of `name` in `state` (`c.value`,
+/// `c.inner.x`), found by a range of the sorted state as the indexed
+/// entries of `eval_read` are.
+fn member_taints(state: &State, name: &str) -> Taint {
+    let after_name = (std::ops::Bound::Excluded(name), std::ops::Bound::Unbounded);
+    state
+        .range::<str, _>(after_name)
+        .take_while(|(key, _)| key.starts_with(name))
+        .filter(|(key, _)| key.as_bytes().get(name.len()) == Some(&b'.'))
+        .fold(Taint::Clean, |acc, (_, t)| join(&acc, t))
+}
+
+/// Whether `rhs` is a name or a chain of members (`reader`, `this.reader`),
+/// whose evaluation runs no call.
+fn is_plain_read(rhs: &Rhs) -> bool {
+    match rhs {
+        Rhs::VarRef(_) => true,
+        Rhs::AttrRef { base, .. } => is_plain_read(base),
+        _ => false,
+    }
+}
+
 /// Builds "sink reached through a call" findings from a callee's
 /// summary. A tainted argument passed to a parameter that the summary
 /// marks as reaching a sink triggers a finding at the call site, with
@@ -1666,6 +1759,12 @@ fn apply_summary_at_call(
             continue;
         };
         if !arg_t.is_tainted() {
+            continue;
+        }
+        if let (Some(reaching), Taint::Tainted { kinds, .. }) =
+            (summary.sink_param_kinds.get(&param_idx), arg_t)
+            && !kinds.iter().any(|k| reaching.contains(&**k))
+        {
             continue;
         }
         let mut source_line = None;

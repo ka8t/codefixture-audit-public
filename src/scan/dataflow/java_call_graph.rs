@@ -41,6 +41,7 @@ use super::class_call_graph::{
     ClassGraphView, ClassLanguageHooks, GraphCaches, resolve_in_topological_order,
     topological_order,
 };
+use super::java_lowering::strip_parentheses;
 use super::java_module_registry::{
     JavaImportInfo, build_fqcn_index, collect_java_class_names, collect_java_imports,
     collect_java_superclass, collect_package,
@@ -364,7 +365,12 @@ fn outgoing_edges<'tree>(
             continue;
         };
         let name = text(name_node, source);
-        let obj = call.child_by_field_name("object");
+        // `(new Helper()).run()` is `new Helper().run()`: the receiver is
+        // read through its parentheses, as the lowering does
+        // (`java_lowering::JavaLowerer::lower_callee`), so that the edge
+        // key matches the call key `eval_call` computes. Juliet writes
+        // every call to another class of a test case this way.
+        let obj = call.child_by_field_name("object").map(strip_parentheses);
 
         let Some(obj) = obj else {
             // Bare call: same class first, then static import.
@@ -676,6 +682,24 @@ mod tests {
             &[(
                 "A.java",
                 "class A { void foo() { new Helper().run(); } } class Helper { void run() {} }",
+            )],
+            |graph| {
+                assert_eq!(
+                    graph.edges[&key("A.java", "A.foo")],
+                    BTreeMap::from([("Helper.run".to_string(), key("A.java", "Helper.run"))])
+                );
+            },
+        );
+    }
+
+    /// Juliet's form of a call to another class: the constructor in
+    /// parentheses, `(new Helper()).run()`.
+    #[test]
+    fn test_parenthesized_constructor_call_edge() {
+        with_graph(
+            &[(
+                "A.java",
+                "class A { void foo() { (new Helper()).run(); } } class Helper { void run() {} }",
             )],
             |graph| {
                 assert_eq!(

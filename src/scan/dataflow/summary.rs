@@ -16,7 +16,7 @@
 //! the recursion with a real SCC fixpoint, cf. Decision #3):
 //! intra-file recursion handled by a trivial fixpoint (2 passes).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use tree_sitter::Node;
 
@@ -678,6 +678,7 @@ pub fn compute_summary_prepared(
 
     let mut return_params = std::collections::BTreeSet::new();
     let mut sink_findings = BTreeMap::new();
+    let mut sink_kinds = BTreeMap::new();
     let first_kind = probe_kinds
         .first()
         .cloned()
@@ -702,6 +703,43 @@ pub fn compute_summary_prepared(
             .find(|f| !base_keys.contains(&(f.rule_id.clone(), f.line, f.source_line)))
         {
             sink_findings.insert(i, f.clone());
+            // A rule with a sink limited to some source kinds (`kinds=` on
+            // a `sink` line, www.codefixture.com#5): the probe above carries
+            // every kind of the rule, so it reached that sink whatever the
+            // kind of the caller's data. Each kind is probed alone, only for
+            // a parameter that reached a sink, and the kinds that reach one
+            // are kept: the call site re-emits the finding only for an
+            // argument of one of them (`apply_summary_at_call`). Without it,
+            // taint_xss's `\.write\s*\(  kinds=http,...` reached through a
+            // helper `save(Writer out)` raised a line read from a file.
+            if specs.sinks.iter().any(|s| !s.kinds.is_empty()) {
+                let mut reaching = BTreeSet::new();
+                for kind in &probe_kinds {
+                    let init = state_set(
+                        &empty_state(),
+                        pname,
+                        Taint::tainted(
+                            [kind.clone()],
+                            SourceInfo {
+                                line: fn_lineno,
+                                expr: format!("param:{pname}").into(),
+                                kind: kind.as_str().into(),
+                            },
+                        ),
+                    );
+                    let one = body.analyze(specs, Some(&init), source_lines);
+                    if one
+                        .findings
+                        .iter()
+                        .any(|f| !base_keys.contains(&(f.rule_id.clone(), f.line, f.source_line)))
+                    {
+                        reaching.insert(kind.clone());
+                    }
+                }
+                if reaching.len() < probe_kinds.len() {
+                    sink_kinds.insert(i, reaching);
+                }
+            }
         }
         let ret_i = return_taint_generic(return_nodes, &res, specs, source_lines);
         if ret_i.is_tainted() && !uncond {
@@ -716,6 +754,7 @@ pub fn compute_summary_prepared(
         return_kind: ret_kind,
         return_taint_params: return_params,
         sink_param_findings: sink_findings,
+        sink_param_kinds: sink_kinds,
     }
 }
 

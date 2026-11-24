@@ -749,6 +749,7 @@
   "taint_kind_stdin": "keyboard input",
   "taint_kind_file": "file",
   "taint_kind_network": "network",
+  "taint_kind_database": "database",
   "taint_badge_traced": "Traced",
   "taint_badge_builtin": "Builtin",
   "taint_badge_custom": "Custom",

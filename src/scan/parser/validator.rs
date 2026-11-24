@@ -34,7 +34,12 @@ pub const VALID_MODES_DSL: &[&str] = &[
     "file_contains",
     "python_hook",
 ];
-pub const VALID_SOURCE_KINDS: &[&str] = &["http", "cli", "env", "stdin", "file", "network"];
+/// The kinds a taint `source` may declare (`kind=`). `database`: a column
+/// read back from a database (`resultSet.getString(1)`), the source of a
+/// stored XSS or of a second-order injection; NIST Juliet's `database`
+/// source (added for the Juliet recall work, www.codefixture.com#5).
+pub const VALID_SOURCE_KINDS: &[&str] =
+    &["http", "cli", "env", "stdin", "file", "network", "database"];
 pub const VALID_TIERS: &[&str] = &["demo", "solo", "team", "enterprise"];
 
 fn valid_id(id: &str) -> bool {

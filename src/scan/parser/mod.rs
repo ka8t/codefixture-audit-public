@@ -448,8 +448,9 @@ impl<'a> DslParser<'a> {
     }
 
     /// Parses a `sink` line: the regular expression, then its options,
-    /// `arg_index=<n>` or `arg_index=all` (ticket #258), and `arg_name=<name>`
-    /// beside a numbered `arg_index` (ticket #261). An unknown option
+    /// `arg_index=<n>` or `arg_index=all` (ticket #258), `arg_name=<name>`
+    /// beside a numbered `arg_index` (ticket #261), and `kinds=<k>,<k>`, the
+    /// source kinds that reach the sink (www.codefixture.com#5). An unknown option
     /// or a value that is neither a non-negative integer nor `all` is an
     /// error naming the line: before ticket #221 both were dropped
     /// silently, an index read as 0, which made a typo in the option
@@ -459,12 +460,32 @@ impl<'a> DslParser<'a> {
         let (text, kvs) = self.parse_raw_with_kvs();
         let mut arg_index = None;
         let mut arg_name = None;
+        let mut kinds = Vec::new();
         let mut keys: Vec<&String> = kvs.keys().collect();
         keys.sort();
         for key in keys {
             let value = &kvs[key];
             if key == "arg_name" {
                 arg_name = Some(value.clone());
+                continue;
+            }
+            // `kinds=file,database`: the source kinds that reach this sink,
+            // each one a kind a `source` line may declare. An empty item or
+            // an unknown kind is an error naming the line, as a typo would
+            // otherwise silence the sink for every source.
+            if key == "kinds" {
+                for kind in value.split(',') {
+                    if !validator::VALID_SOURCE_KINDS.contains(&kind) {
+                        return Err(DslSyntaxError::new(
+                            DslMessage::new(keys::BAD_SINK_KINDS)
+                                .with("value", value.to_string())
+                                .with("kinds", validator::VALID_SOURCE_KINDS.join(", ")),
+                            ln,
+                            self.filename,
+                        ));
+                    }
+                    kinds.push(kind.to_string());
+                }
                 continue;
             }
             if key != "arg_index" {
@@ -509,6 +530,7 @@ impl<'a> DslParser<'a> {
             pattern: text,
             arg_index,
             arg_name,
+            kinds,
             line_number: ln,
         })
     }
@@ -1072,6 +1094,30 @@ mod tests {
         assert_eq!(rules[0]["sinks"][0]["arg_index"], 2);
         assert_eq!(rules[0]["sinks"][0]["arg_name"], "headers");
         assert_eq!(rules[0]["sinks"][0]["arg_explicit"], true);
+    }
+
+    /// `kinds=<k>,<k>` lists the source kinds that reach a sink, carried as
+    /// the JSON rules write them; without it, nothing is written (every
+    /// kind). An unknown or empty kind is an error naming the line.
+    #[test]
+    fn test_sink_kinds_are_carried_and_checked() {
+        let rule = TAINT_RULE.replace("SINK_LINE", "sink    \\.println\\s*\\(  kinds=http,env");
+        let rules = compile_sca_to_json(&rule, "java/security/t.sca").unwrap();
+        assert_eq!(
+            rules[0]["sinks"][0]["kinds"],
+            serde_json::json!(["http", "env"])
+        );
+        let plain = TAINT_RULE.replace("SINK_LINE", "sink    \\.println\\s*\\(");
+        let rules = compile_sca_to_json(&plain, "java/security/t.sca").unwrap();
+        assert!(rules[0]["sinks"][0].get("kinds").is_none());
+        for bad in ["kinds=htp", "kinds=http,"] {
+            let rule =
+                TAINT_RULE.replace("SINK_LINE", &format!("sink    \\.println\\s*\\(  {bad}"));
+            assert!(
+                compile_sca_to_json(&rule, "java/security/t.sca").is_err(),
+                "{bad} must be refused"
+            );
+        }
     }
 
     /// `arg_index=<n>` on a passthrough gives `args: [n]`, `arg_index=none`

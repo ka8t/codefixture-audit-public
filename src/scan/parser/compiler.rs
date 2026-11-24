@@ -154,6 +154,15 @@ pub fn compile_to_json(node: &RuleNode) -> Value {
                 // call for the line layer, as before.
                 None => json!({"pattern": s.pattern, "arg_index": 0}),
             })
+            .zip(&node.sinks)
+            // `kinds=`: the source kinds that reach the sink, read by the
+            // loader as the JSON rules write them (`"kinds": [...]`).
+            .map(|(mut sink, s)| {
+                if !s.kinds.is_empty() {
+                    sink["kinds"] = json!(s.kinds);
+                }
+                sink
+            })
             .collect();
         result.insert("sources".to_string(), json!(sources));
         result.insert("sinks".to_string(), json!(sinks));

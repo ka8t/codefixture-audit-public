@@ -79,6 +79,12 @@ pub struct JavaFunctionInfo<'tree> {
     /// parameters (`@QueryParam`, `@FormParam`...), see
     /// [`annotated_params`].
     pub annotated_params: Vec<(String, Vec<String>)>,
+    /// The `String` fields declared by the class that holds the method (its
+    /// own `field_declaration`s, not those of a nested or enclosing class,
+    /// see `own_field_names`).
+    /// `java_taint_scan` reads them to carry the taint a method writes into
+    /// a field to the other methods of the class (Juliet flow variant 45).
+    pub class_fields: Vec<String>,
 }
 
 fn text(node: Node, source: &[u8]) -> String {
@@ -371,16 +377,19 @@ fn collect_type_members<'tree>(
         return;
     };
     let class_name = text(name_node, source);
+    let fields = own_field_names(body, source);
     let mut w = body.walk();
     for member in body.named_children(&mut w) {
         match member.kind() {
             "method_declaration" => {
-                if let Some(fn_info) = method_info(member, &class_name, source) {
+                if let Some(mut fn_info) = method_info(member, &class_name, source) {
+                    fn_info.class_fields = fields.clone();
                     out.push(fn_info);
                 }
             }
             "constructor_declaration" => {
-                if let Some(fn_info) = constructor_info(member, &class_name, source) {
+                if let Some(mut fn_info) = constructor_info(member, &class_name, source) {
+                    fn_info.class_fields = fields.clone();
                     out.push(fn_info);
                 }
             }
@@ -390,6 +399,41 @@ fn collect_type_members<'tree>(
             _ => {}
         }
     }
+}
+
+/// The names of the `String` fields a class body declares itself
+/// (`private String dataBad;`, `String a, b;`), in declaration order.
+///
+/// Only `String` fields: the taint of a field is handed to every method of
+/// the class without knowing in which order they run, and an object field
+/// (a registry, a pool, a `File`) would hand on, through every call made on
+/// it, the over-approximation of an unknown call (its result takes the
+/// taint of its receiver). On the reference projects, those object fields
+/// made the new alerts (`socketPool.size()` logged, `abstractRegistry`
+/// calls in Dubbo's tests); Juliet's fields are `String`s.
+fn own_field_names(body: Node, source: &[u8]) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut w = body.walk();
+    for member in body.named_children(&mut w) {
+        if member.kind() != "field_declaration" {
+            continue;
+        }
+        let is_string = member
+            .child_by_field_name("type")
+            .is_some_and(|t| simple_type_name(t, source) == "String");
+        if !is_string {
+            continue;
+        }
+        let mut mw = member.walk();
+        for decl in member.named_children(&mut mw) {
+            if decl.kind() == "variable_declarator"
+                && let Some(name_node) = decl.child_by_field_name("name")
+            {
+                names.push(text(name_node, source));
+            }
+        }
+    }
+    names
 }
 
 fn method_info<'tree>(
@@ -414,6 +458,7 @@ fn method_info<'tree>(
             source,
         ),
         annotated_params: annotated_params(params_node, source),
+        class_fields: Vec::new(),
     })
 }
 
@@ -430,6 +475,7 @@ fn constructor_info<'tree>(
         lineno: node.start_position().row + 1,
         route_param_names: Vec::new(),
         annotated_params: annotated_params(node.child_by_field_name("parameters"), source),
+        class_fields: Vec::new(),
     })
 }
 

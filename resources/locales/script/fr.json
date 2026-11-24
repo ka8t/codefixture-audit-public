@@ -406,6 +406,7 @@
     "ast_pattern_expected": "Mot-clé 'pattern' attendu dans 'match ast', trouvé : '{found}'",
     "bad_arg_index": "'arg_index' doit être un entier positif ou nul ou 'all', trouvé : '{value}'",
     "bad_arg_name": "'arg_name' doit être le nom d'un argument nommé, écrit avec 'arg_index=<n>', trouvé : '{value}'",
+    "bad_sink_kinds": "'kinds' d'un sink doit lister des types de source parmi {kinds}, séparés par des virgules, trouvé : '{value}'",
     "block_not_closed": "Bloc '{block}' non fermé (manque 'end')",
     "category_unknown": "Catégorie inconnue : '{category}'",
     "confidence_not_integer": "'confidence' doit être un entier",
@@ -443,7 +444,7 @@
     "unknown_requires_file_key": "Clé inconnue dans un bloc 'requires' de fichier : '{key}'",
     "unknown_requires_key": "Clé 'requires' inconnue : '{key}'",
     "unknown_rule_keyword": "Mot-clé inconnu dans une règle : '{keyword}'",
-    "unknown_sink_option": "Option inconnue sur un sink : '{option}' (seules 'arg_index' et 'arg_name' existent)",
+    "unknown_sink_option": "Option inconnue sur un sink : '{option}' (seules 'arg_index', 'arg_name' et 'kinds' existent)",
     "unknown_passthrough_option": "Option inconnue sur un passthrough : '{option}' (seule 'arg_index' existe)",
     "bad_passthrough_arg_index": "'arg_index' d'un passthrough doit être un entier positif ou nul ou 'none', trouvé : '{value}'",
     "value_missing": "Valeur manquante après '{keyword}'"

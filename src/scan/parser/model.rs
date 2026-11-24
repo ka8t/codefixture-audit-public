@@ -95,6 +95,12 @@ pub struct SinkSpec {
     /// passed by keyword (Python `Response(body, headers=h)`), which the
     /// dataflow path and the line layer check as well (ticket #261).
     pub arg_name: Option<String>,
+    /// `kinds=<kind>,<kind>`: the source kinds this sink is reached by
+    /// (`kind=` of the `source` lines). Empty when not written: every kind.
+    /// A rule whose broad sinks (`\.println\s*\(`) also write files and the
+    /// console limits them to the kinds that are visitor data, and lets
+    /// its web-output sinks take every kind (taint_xss, www.codefixture.com#5).
+    pub kinds: Vec<String>,
     pub line_number: usize,
 }
 

@@ -367,39 +367,11 @@ impl<'src> JavaLowerer<'src> {
     /// still evaluated (taint/effects) via `lower_expr`'s normal
     /// recursion on a nested `CallRef`.
     fn lower_method_invocation(&mut self, expr: Node<'src>) -> Rhs {
-        let obj = expr.child_by_field_name("object");
         let name_node = expr.child_by_field_name("name");
         let name = name_node
             .map(|n| self.text(n))
             .unwrap_or_else(|| "?".to_string());
-
-        let is_ctor_chain = obj.is_some_and(|o| {
-            o.kind() == "object_creation_expression"
-                && !self.is_list_constructor(o.child_by_field_name("type"))
-        });
-
-        let callee: Rhs = if is_ctor_chain {
-            let ctor = obj.unwrap();
-            let ctor_type = ctor.child_by_field_name("type");
-            let ctor_args = self.lower_arg_list(ctor.child_by_field_name("arguments"));
-            let ctor_callee = self.type_to_rhs(ctor_type);
-            Rhs::AttrRef {
-                base: Box::new(Rhs::CallRef {
-                    callee: Box::new(ctor_callee),
-                    args: ctor_args,
-                    kwargs: Vec::new(),
-                }),
-                attr: name.clone(),
-            }
-        } else if let Some(o) = obj {
-            let base = self.lower_expr(Some(o));
-            Rhs::AttrRef {
-                base: Box::new(base),
-                attr: name.clone(),
-            }
-        } else {
-            Rhs::VarRef(name.clone())
-        };
+        let callee = self.lower_callee(expr.child_by_field_name("object"), name);
 
         let args = self.lower_arg_list(expr.child_by_field_name("arguments"));
         let tmp = self.fresh_temp();
@@ -421,6 +393,45 @@ impl<'src> JavaLowerer<'src> {
             lineno: call_lineno,
         });
         Rhs::VarRef(tmp)
+    }
+
+    /// The callee of a method call whose receiver is `obj` (`None` for a
+    /// bare call `name(...)`): `AttrRef(receiver, name)`, or `VarRef(name)`.
+    ///
+    /// A receiver that is a constructor (`new Test().doSomething(...)`)
+    /// keeps the constructor's `CallRef` inlined as the base, so that
+    /// `eval_call` (`transfer.rs`) recovers the class name and resolves the
+    /// `Test.doSomething` summary (see `lower_method_invocation`).
+    ///
+    /// The receiver is read through its parentheses first: Juliet writes
+    /// every call to another class of a test case as
+    /// `(new CWE23_..._51b()).badSink(data, ...)` (flow variants 51 to 54,
+    /// 61, 66 to 75), which used to give an opaque temporary and lose the
+    /// callee. Removing the parentheses changes nothing else: a
+    /// parenthesized expression is lowered as its content. Shared by the
+    /// call used as a value and the call used as a statement: the latter
+    /// (`new Helper().run(data);` on its own line) did not inline the
+    /// constructor either, and resolved no summary.
+    fn lower_callee(&mut self, obj: Option<Node<'src>>, name: String) -> Rhs {
+        let Some(obj) = obj.map(strip_parentheses) else {
+            return Rhs::VarRef(name);
+        };
+        let base = if obj.kind() == "object_creation_expression"
+            && !self.is_list_constructor(obj.child_by_field_name("type"))
+        {
+            let ctor_args = self.lower_arg_list(obj.child_by_field_name("arguments"));
+            Rhs::CallRef {
+                callee: Box::new(self.type_to_rhs(obj.child_by_field_name("type"))),
+                args: ctor_args,
+                kwargs: Vec::new(),
+            }
+        } else {
+            self.lower_expr(Some(obj))
+        };
+        Rhs::AttrRef {
+            base: Box::new(base),
+            attr: name,
+        }
     }
 
     fn lower_arg_list(&mut self, arg_list: Option<Node<'src>>) -> Vec<Rhs> {
@@ -693,20 +704,11 @@ impl<'src> JavaLowerer<'src> {
     /// Branch/Loop condition that is a direct call, e.g.
     /// `if (isValid(input))`).
     fn lower_call_as_statement(&mut self, call_node: Node<'src>) {
-        let obj = call_node.child_by_field_name("object");
         let name = call_node
             .child_by_field_name("name")
             .map(|n| self.text(n))
             .unwrap_or_else(|| "?".to_string());
-        let callee: Rhs = if let Some(o) = obj {
-            let base = self.lower_expr(Some(o));
-            Rhs::AttrRef {
-                base: Box::new(base),
-                attr: name,
-            }
-        } else {
-            Rhs::VarRef(name)
-        };
+        let callee = self.lower_callee(call_node.child_by_field_name("object"), name);
         let args = self.lower_arg_list(call_node.child_by_field_name("arguments"));
         self.emit(IrStmt::Call {
             callee,
@@ -859,6 +861,19 @@ pub fn lower_expr_switch_case<'src>(
     }
 }
 
+/// The expression inside any number of parentheses: `((x))` → `x`. A
+/// `parenthesized_expression` without a named child is returned as is.
+pub fn strip_parentheses(expr: Node<'_>) -> Node<'_> {
+    let mut unwrapped = expr;
+    while unwrapped.kind() == "parenthesized_expression" {
+        let Some(inner) = named_children(unwrapped).next() else {
+            break;
+        };
+        unwrapped = inner;
+    }
+    unwrapped
+}
+
 /// Lowers an expression used as a condition (Branch/Loop) into
 /// a list of IR statements — for taint propagation, not
 /// just its value.
@@ -881,16 +896,7 @@ pub fn lower_condition<'src>(source: &'src [u8], expr: Node<'src>) -> Vec<IrStmt
     // unwrap before testing the `method_invocation` case, otherwise
     // `if (isValid(input))` would never match and would fall through to
     // the buried Assign+temporary.
-    let mut unwrapped = expr;
-    loop {
-        if unwrapped.kind() != "parenthesized_expression" {
-            break;
-        }
-        let Some(inner) = named_children(unwrapped).next() else {
-            break;
-        };
-        unwrapped = inner;
-    }
+    let unwrapped = strip_parentheses(expr);
     if unwrapped.kind() == "method_invocation" {
         lowerer.lower_call_as_statement(unwrapped);
     } else {

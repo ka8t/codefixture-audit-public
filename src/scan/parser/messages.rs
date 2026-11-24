@@ -22,6 +22,9 @@ pub mod keys {
     pub const BAD_ARG_INDEX: &str = "dsl.bad_arg_index";
     /// 'arg_name' must be a keyword argument name written beside 'arg_index=<n>', found: '{value}'
     pub const BAD_ARG_NAME: &str = "dsl.bad_arg_name";
+    /// 'kinds' of a sink must list source kinds among {kinds}, separated by
+    /// commas, found: '{value}'
+    pub const BAD_SINK_KINDS: &str = "dsl.bad_sink_kinds";
     /// Block '{block}' not closed (missing 'end')
     pub const BLOCK_NOT_CLOSED: &str = "dsl.block_not_closed";
     /// Unknown category: '{category}'
@@ -96,8 +99,8 @@ pub mod keys {
     pub const UNKNOWN_REQUIRES_KEY: &str = "dsl.unknown_requires_key";
     /// Unknown keyword in a rule: '{keyword}'
     pub const UNKNOWN_RULE_KEYWORD: &str = "dsl.unknown_rule_keyword";
-    /// Unknown option on a sink: '{option}' (only 'arg_index' and
-    /// 'arg_name' exist)
+    /// Unknown option on a sink: '{option}' (only 'arg_index', 'arg_name'
+    /// and 'kinds' exist)
     pub const UNKNOWN_SINK_OPTION: &str = "dsl.unknown_sink_option";
     /// Unknown option on a passthrough: '{option}' (only 'arg_index'
     /// exists, ticket #256)
@@ -114,6 +117,7 @@ pub mod keys {
         AST_PATTERN_EXPECTED,
         BAD_ARG_INDEX,
         BAD_ARG_NAME,
+        BAD_SINK_KINDS,
         BLOCK_NOT_CLOSED,
         CATEGORY_UNKNOWN,
         CONFIDENCE_NOT_INTEGER,

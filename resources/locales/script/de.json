@@ -406,6 +406,7 @@
     "ast_pattern_expected": "Schlüsselwort 'pattern' in 'match ast' erwartet, gefunden: '{found}'",
     "bad_arg_index": "'arg_index' muss eine ganze Zahl ab 0 oder 'all' sein, gefunden: '{value}'",
     "bad_arg_name": "'arg_name' muss der Name eines Schlüsselwortarguments sein und neben 'arg_index=<n>' stehen, gefunden: '{value}'",
+    "bad_sink_kinds": "'kinds' eines Sinks muss Quellarten aus {kinds} aufzählen, durch Kommas getrennt, gefunden: '{value}'",
     "block_not_closed": "Block '{block}' nicht geschlossen ('end' fehlt)",
     "category_unknown": "Unbekannte Kategorie: '{category}'",
     "confidence_not_integer": "'confidence' muss eine ganze Zahl sein",
@@ -443,7 +444,7 @@
     "unknown_requires_file_key": "Unbekannter Schlüssel in einem Datei-Block 'requires': '{key}'",
     "unknown_requires_key": "Unbekannter 'requires'-Schlüssel: '{key}'",
     "unknown_rule_keyword": "Unbekanntes Schlüsselwort in einer Regel: '{keyword}'",
-    "unknown_sink_option": "Unbekannte Option an einem Sink: '{option}' (nur 'arg_index' und 'arg_name' gibt es)",
+    "unknown_sink_option": "Unbekannte Option an einem Sink: '{option}' (nur 'arg_index', 'arg_name' und 'kinds' gibt es)",
     "unknown_passthrough_option": "Unbekannte Option an einem Passthrough: '{option}' (nur 'arg_index' gibt es)",
     "bad_passthrough_arg_index": "'arg_index' eines Passthrough muss eine ganze Zahl ab 0 oder 'none' sein, gefunden: '{value}'",
     "value_missing": "Fehlender Wert nach '{keyword}'"

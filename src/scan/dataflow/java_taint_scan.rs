@@ -17,10 +17,14 @@
 
 use tree_sitter::Node;
 
+use std::collections::BTreeMap;
+
 use super::java_summary::{JavaFunctionInfo, prepare_java_file};
-use super::lattice::{SourceInfo, Taint, empty_state, state_set};
+use super::lattice::{
+    SourceInfo, State, Taint, empty_state, join, state_get, state_join, state_put, state_set,
+};
 use super::line_facts::{RuleLines, SourceLines};
-use super::prepared::PreparedFile;
+use super::prepared::{PreparedCfg, PreparedFile};
 use super::transfer::{Finding, RuleSpecs};
 
 /// Runs a taint rule on an already-parsed Java file.
@@ -55,71 +59,157 @@ pub fn run_taint_rule_java_prepared(
     rule_lines: Option<RuleLines>,
 ) -> Vec<Finding> {
     let mut all_findings: Vec<Finding> = Vec::new();
+    // Taint written into a field of its class by each method, joined per
+    // class: the first pass below collects it, the second hands it to the
+    // other methods of the class (see `field_taints_at_exit`).
+    let mut tainted_fields: BTreeMap<&str, State> = BTreeMap::new();
 
     for function in &file.functions {
         let Some(prepared) = function.body.as_ref() else {
             continue;
         };
         let fn_info = &function.info;
-
-        let mut state = empty_state();
-        let mut seeded = false;
-        for pname in &fn_info.route_param_names {
-            state = state_set(
-                &state,
-                pname,
-                Taint::tainted(
-                    ["http".to_string()],
-                    SourceInfo {
-                        line: fn_info.lineno,
-                        expr: format!("{}({pname})", fn_info.name).into(),
-                        kind: "http".into(),
-                    },
-                ),
-            );
-            seeded = true;
-        }
-        // A parameter whose annotation matches a source of the rule
-        // (`@FormParam("uid") String uid` for `source @FormParam\s*\(`),
-        // tested against its own annotations only, so `@Context
-        // HttpServletRequest request` beside it stays clean — the Audit's
-        // lexical reading of JAX-RS parameters (`java_summary::
-        // annotated_params`). A Spring route parameter keeps its seed.
-        for (pname, annotations) in &fn_info.annotated_params {
-            if fn_info.route_param_names.contains(pname) {
-                continue;
-            }
-            let matching = specs.sources.iter().find(|src| {
-                src.raw_regex
-                    .as_ref()
-                    .is_some_and(|re| annotations.iter().any(|a| re.is_match(a).unwrap_or(false)))
-            });
-            if let Some(src) = matching {
-                state = state_set(
-                    &state,
-                    pname,
-                    Taint::tainted(
-                        [src.kind.clone()],
-                        SourceInfo {
-                            line: fn_info.lineno,
-                            expr: format!("{}({pname})", fn_info.name).into(),
-                            kind: src.kind.as_str().into(),
-                        },
-                    ),
-                );
-                seeded = true;
-            }
-        }
-        let init_state = seeded.then_some(state);
-
+        let init_state = entry_state(fn_info, specs);
         let result = prepared.analyze(specs, init_state.as_ref(), rule_lines.as_ref());
+        let written = field_taints_at_exit(fn_info, prepared, &result.state_in);
+        if !written.is_empty() {
+            let class = tainted_fields.entry(class_of(fn_info)).or_default();
+            *class = state_join(class, &written);
+        }
         all_findings.extend(result.findings);
+    }
+
+    // Second pass, only for the classes where a method left a field
+    // tainted: every method of the class starts with those fields tainted.
+    // Juliet's flow variant 45 writes the source into `dataBad` in `bad()`
+    // and reads it in `badSink()`, which takes no argument. Deliberate
+    // deviation from the Audit, which analyzes each method alone and never
+    // follows a field from one method to another. Flow-insensitive on
+    // purpose: the order in which the methods run is not known, a field
+    // written tainted anywhere is read tainted everywhere in its class. One
+    // round only: a field copied from another tainted field in a third
+    // method is not followed further. Only the `String` fields of the class
+    // (`JavaFunctionInfo::class_fields`). A parameter of the same name as the
+    // field (`Foo(String name) { this.name = name; }`) is not seeded: the
+    // bare name is the parameter there.
+    if !tainted_fields.is_empty() {
+        for function in &file.functions {
+            let Some(prepared) = function.body.as_ref() else {
+                continue;
+            };
+            let fn_info = &function.info;
+            let Some(fields) = tainted_fields.get(class_of(fn_info)) else {
+                continue;
+            };
+            let mut state = entry_state(fn_info, specs).unwrap_or_else(empty_state);
+            for (name, taint) in fields {
+                if !fn_info.param_names.iter().any(|p| p.as_str() == &**name) {
+                    state_put(&mut state, name, taint.clone());
+                }
+                state_put(&mut state, &format!("this.{name}"), taint.clone());
+            }
+            let result = prepared.analyze(specs, Some(&state), rule_lines.as_ref());
+            all_findings.extend(result.findings);
+        }
     }
 
     let mut seen: std::collections::HashSet<(String, usize, Option<usize>)> =
         std::collections::HashSet::new();
     all_findings.retain(|f| seen.insert((f.rule_id.clone(), f.line, f.source_line)));
     all_findings
+}
+
+/// The class of a collected method: its name up to the last dot
+/// (`Outer.badSink` → `Outer`).
+fn class_of<'a>(fn_info: &'a JavaFunctionInfo) -> &'a str {
+    fn_info
+        .name
+        .rsplit_once('.')
+        .map_or(fn_info.name.as_str(), |(class, _)| class)
+}
+
+/// The fields of its class that a method leaves tainted when it returns,
+/// read on the state that enters the exit node of its CFG: the bare name
+/// (`dataBad = data;`) and the qualified one (`this.dataBad = data;`), both
+/// recorded under the bare name. A field named like one of the method's
+/// parameters is read only through `this.`: the bare name is the parameter.
+fn field_taints_at_exit(
+    fn_info: &JavaFunctionInfo,
+    prepared: &PreparedCfg,
+    state_in: &BTreeMap<usize, State>,
+) -> State {
+    let mut written = empty_state();
+    if fn_info.class_fields.is_empty() {
+        return written;
+    }
+    let Some(exit_state) = state_in.get(&prepared.cfg().exit) else {
+        return written;
+    };
+    for field in &fn_info.class_fields {
+        let mut taint = state_get(exit_state, &format!("this.{field}"));
+        if !fn_info.param_names.contains(field) {
+            taint = join(&taint, &state_get(exit_state, field));
+        }
+        if taint.is_tainted() {
+            state_put(&mut written, field, taint);
+        }
+    }
+    written
+}
+
+/// The state a method starts with: its Spring route parameters, and the
+/// parameters whose annotation matches a source of the rule, tainted;
+/// `None` when there is none.
+fn entry_state(fn_info: &JavaFunctionInfo, specs: &RuleSpecs) -> Option<State> {
+    let mut state = empty_state();
+    let mut seeded = false;
+    for pname in &fn_info.route_param_names {
+        state = state_set(
+            &state,
+            pname,
+            Taint::tainted(
+                ["http".to_string()],
+                SourceInfo {
+                    line: fn_info.lineno,
+                    expr: format!("{}({pname})", fn_info.name).into(),
+                    kind: "http".into(),
+                },
+            ),
+        );
+        seeded = true;
+    }
+    // A parameter whose annotation matches a source of the rule
+    // (`@FormParam("uid") String uid` for `source @FormParam\s*\(`),
+    // tested against its own annotations only, so `@Context
+    // HttpServletRequest request` beside it stays clean — the Audit's
+    // lexical reading of JAX-RS parameters (`java_summary::
+    // annotated_params`). A Spring route parameter keeps its seed.
+    for (pname, annotations) in &fn_info.annotated_params {
+        if fn_info.route_param_names.contains(pname) {
+            continue;
+        }
+        let matching = specs.sources.iter().find(|src| {
+            src.raw_regex
+                .as_ref()
+                .is_some_and(|re| annotations.iter().any(|a| re.is_match(a).unwrap_or(false)))
+        });
+        if let Some(src) = matching {
+            state = state_set(
+                &state,
+                pname,
+                Taint::tainted(
+                    [src.kind.clone()],
+                    SourceInfo {
+                        line: fn_info.lineno,
+                        expr: format!("{}({pname})", fn_info.name).into(),
+                        kind: src.kind.as_str().into(),
+                    },
+                ),
+            );
+            seeded = true;
+        }
+    }
+    seeded.then_some(state)
 }
 
 // ============================================================================
@@ -138,6 +228,7 @@ mod tests {
     use super::*;
     use crate::scan::dataflow::transfer::{FunctionSummary, SanitizerSpec, SinkSpec, SourceSpec};
     use std::collections::BTreeMap;
+    use std::sync::Arc;
     use tree_sitter::Parser;
 
     fn parse(src: &str) -> tree_sitter::Tree {
@@ -537,6 +628,170 @@ mod tests {
     #[test]
     fn test_container_type_not_seeded_even_on_mapped_handler() {
         let src = "class Api { @GetMapping(\"/x\") void handler(HttpServletRequest request, Statement db) { db.execute(request.toString()); } }";
+        assert!(run(src, &sqli_specs()).is_empty());
+    }
+
+    // ------------------------------------------------------------------
+    // Fields of the class (Juliet flow variant 45)
+    // ------------------------------------------------------------------
+
+    /// `bad()` writes the source into a field, `badSink()`, which takes no
+    /// argument, reads it: the finding is at the sink of `badSink()`.
+    #[test]
+    fn test_field_written_in_one_method_reaches_sink_in_another() {
+        let src = "class A {\n  private String dataBad;\n  void bad(HttpServletRequest req) {\n    String d = req.getParameter(\"q\");\n    dataBad = d;\n    badSink();\n  }\n  void badSink() {\n    String d = dataBad;\n    db.execute(d);\n  }\n}";
+        let findings = run(src, &sqli_specs());
+        assert_eq!(
+            findings.iter().map(|f| f.line).collect::<Vec<_>>(),
+            vec![10]
+        );
+    }
+
+    /// The same flow written through `this.`.
+    #[test]
+    fn test_field_written_through_this_reaches_sink_in_another() {
+        let src = "class A {\n  private String dataBad;\n  void bad(HttpServletRequest req) {\n    this.dataBad = req.getParameter(\"q\");\n  }\n  void badSink() {\n    db.execute(this.dataBad);\n  }\n}";
+        assert_eq!(
+            run(src, &sqli_specs())
+                .iter()
+                .map(|f| f.line)
+                .collect::<Vec<_>>(),
+            vec![7]
+        );
+    }
+
+    /// Juliet's good variant: another field, written with a constant.
+    #[test]
+    fn test_field_written_with_a_constant_stays_clean() {
+        let src = "class A {\n  private String dataBad;\n  private String dataGood;\n  void bad(HttpServletRequest req) {\n    dataBad = req.getParameter(\"q\");\n  }\n  void good() {\n    dataGood = \"foo\";\n  }\n  void goodSink() {\n    db.execute(dataGood);\n  }\n}";
+        assert!(run(src, &sqli_specs()).is_empty());
+    }
+
+    /// A parameter named like the field is the parameter: it is not
+    /// tainted by the field.
+    #[test]
+    fn test_parameter_named_like_a_tainted_field_stays_clean() {
+        let src = "class A {\n  private String name;\n  void set(HttpServletRequest req) {\n    name = req.getParameter(\"q\");\n  }\n  void use(String name) {\n    db.execute(name);\n  }\n}";
+        assert!(run(src, &sqli_specs()).is_empty());
+    }
+
+    /// Only `String` fields are handed on: an object field is not.
+    #[test]
+    fn test_object_field_is_not_shared() {
+        let src = "class A {\n  private Holder holder;\n  void bad(HttpServletRequest req) {\n    holder = req.getParameter(\"q\");\n  }\n  void sink() {\n    db.execute(holder.describe());\n  }\n}";
+        assert!(run(src, &sqli_specs()).is_empty());
+    }
+
+    /// A field of another class of the file is not one of this class.
+    #[test]
+    fn test_field_of_another_class_is_not_shared() {
+        let src = "class A {\n  private String data;\n  void bad(HttpServletRequest req) {\n    data = req.getParameter(\"q\");\n  }\n}\nclass B {\n  private String data;\n  void sink() {\n    db.execute(data);\n  }\n}";
+        assert!(run(src, &sqli_specs()).is_empty());
+    }
+
+    // ------------------------------------------------------------------
+    // Calls on a constructor in parentheses, objects whose member is
+    // tainted (Juliet flow variants 51 to 54 and 67)
+    // ------------------------------------------------------------------
+
+    fn sink_summary(name: &str) -> Arc<FunctionSummary> {
+        let mut summary = FunctionSummary {
+            name: name.to_string(),
+            param_names: vec!["value".to_string(), "db".to_string()],
+            ..Default::default()
+        };
+        summary.sink_param_findings.insert(
+            0,
+            Finding {
+                rule_id: "taint_sqli".to_string(),
+                severity: "HIGH".to_string(),
+                line: 1,
+                column: 0,
+                sink_text: "sink".to_string().into(),
+                source_line: None,
+                message: String::new(),
+                cwe: None,
+                flow: vec![],
+                source_kind: "unknown".to_string(),
+            },
+        );
+        summary.into()
+    }
+
+    /// `(new Runner()).run(q, db);` on its own line resolves the summary
+    /// of `Runner.run`, as `new Runner().run(q, db)` used as a value did.
+    #[test]
+    fn test_parenthesized_constructor_call_statement_resolves_summary() {
+        let mut specs = sqli_specs();
+        specs
+            .summaries
+            .insert("Runner.run".to_string(), sink_summary("Runner.run"));
+        let bad = "class Api { void handler(HttpServletRequest req, Statement db) { String q = req.getParameter(\"q\"); (new Runner()).run(q, db); } }";
+        assert!(!run(bad, &specs).is_empty());
+        let unparenthesized = "class Api { void handler(HttpServletRequest req, Statement db) { String q = req.getParameter(\"q\"); new Runner().run(q, db); } }";
+        assert!(!run(unparenthesized, &specs).is_empty());
+        let good = "class Api { void handler(HttpServletRequest req, Statement db) { String q = \"foo\"; (new Runner()).run(q, db); } }";
+        assert!(run(good, &specs).is_empty());
+    }
+
+    /// An object whose member holds the data, passed whole to a method
+    /// that reaches a sink with it, carries the taint of that member.
+    #[test]
+    fn test_object_with_tainted_member_passed_whole_carries_it() {
+        let mut specs = sqli_specs();
+        specs
+            .summaries
+            .insert("Runner.run".to_string(), sink_summary("Runner.run"));
+        let bad = "class Api { void handler(HttpServletRequest req, Statement db) { Container c = new Container(); c.value = req.getParameter(\"q\"); Runner.run(c, db); } }";
+        assert!(!run(bad, &specs).is_empty());
+        let good = "class Api { void handler(HttpServletRequest req, Statement db) { Container c = new Container(); c.value = \"foo\"; Runner.run(c, db); } }";
+        assert!(run(good, &specs).is_empty());
+        // `this` hands the whole state of the object: not its members.
+        let this = "class Api { String value; void handler(HttpServletRequest req, Statement db) { this.value = req.getParameter(\"q\"); Runner.run(this, db); } }";
+        assert!(run(this, &specs).is_empty());
+        // An object whose members are sources of the rule (`request` for
+        // `request.getParameter`) hands on the object, not its members.
+        specs.sources = vec![SourceSpec::new("request.getParameter", "http")];
+        let request = "class Api { void handler(HttpServletRequest request, Statement db) { request.extra = request.getParameter(\"q\"); Runner.run(request, db); } }";
+        assert!(run(request, &specs).is_empty());
+        let container = "class Api { void handler(HttpServletRequest request, Statement db) { Container c = new Container(); c.value = request.getParameter(\"q\"); Runner.run(c, db); } }";
+        assert!(!run(container, &specs).is_empty());
+    }
+
+    /// A library call (no summary) keeps the object's own taint: the sink
+    /// `db.execute(c)` is not reached by the taint of `c.value`.
+    #[test]
+    fn test_object_with_tainted_member_passed_to_a_library_call_stays_clean() {
+        let src = "class Api { void handler(HttpServletRequest req, Statement db) { Container c = new Container(); c.value = req.getParameter(\"q\"); db.execute(c); } }";
+        assert!(run(src, &sqli_specs()).is_empty());
+    }
+
+    /// A line read from a reader built over a socket keeps the origin of the
+    /// socket (`network`); read from a file, it is `file` data.
+    #[test]
+    fn test_line_read_from_a_tainted_reader_keeps_its_origin() {
+        let mut specs = sqli_specs();
+        specs.sources = vec![
+            SourceSpec::new("*.getInputStream", "network"),
+            SourceSpec::new("*.readLine", "file"),
+        ];
+        let socket = "class A {\n  void bad(Socket socket, Statement db) {\n    InputStreamReader in = new InputStreamReader(socket.getInputStream());\n    BufferedReader reader = new BufferedReader(in);\n    String d = reader.readLine();\n    db.execute(d);\n  }\n}";
+        let findings = run(socket, &specs);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].source_kind, "network");
+        assert_eq!(findings[0].source_line, Some(3));
+        let file = "class A {\n  void bad(File f, Statement db) {\n    BufferedReader reader = new BufferedReader(new FileReader(f));\n    String d = reader.readLine();\n    db.execute(d);\n  }\n}";
+        let findings = run(file, &specs);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].source_kind, "file");
+        assert_eq!(findings[0].source_line, Some(4));
+    }
+
+    /// Calling a method on that object does not give its result the taint
+    /// of the member: only the object read whole carries it.
+    #[test]
+    fn test_method_called_on_object_with_tainted_member_stays_clean() {
+        let src = "class Api { void handler(HttpServletRequest req, Statement db) { Container c = new Container(); c.value = req.getParameter(\"q\"); String r = c.describe(); db.execute(r); } }";
         assert!(run(src, &sqli_specs()).is_empty());
     }
 }

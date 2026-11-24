@@ -251,6 +251,7 @@ mod tests {
                 return_tainted_uncond: false,
                 return_kind: None,
                 return_taint_params: Default::default(),
+                sink_param_kinds: Default::default(),
                 sink_param_findings: {
                     let mut m = BTreeMap::new();
                     m.insert(

@@ -406,6 +406,7 @@
     "ast_pattern_expected": "Se esperaba la palabra clave 'pattern' en 'match ast', encontrado: '{found}'",
     "bad_arg_index": "'arg_index' debe ser un número entero mayor o igual que 0, o 'all', encontrado: '{value}'",
     "bad_arg_name": "'arg_name' debe ser el nombre de un argumento con nombre, escrito junto a 'arg_index=<n>', encontrado: '{value}'",
+    "bad_sink_kinds": "'kinds' de un sink debe enumerar tipos de fuente entre {kinds}, separados por comas, encontrado: '{value}'",
     "block_not_closed": "Bloque '{block}' sin cerrar (falta 'end')",
     "category_unknown": "Categoría desconocida: '{category}'",
     "confidence_not_integer": "'confidence' debe ser un número entero",
@@ -443,7 +444,7 @@
     "unknown_requires_file_key": "Clave desconocida en un bloque 'requires' de archivo: '{key}'",
     "unknown_requires_key": "Clave 'requires' desconocida: '{key}'",
     "unknown_rule_keyword": "Palabra clave desconocida en una regla: '{keyword}'",
-    "unknown_sink_option": "Opción desconocida en un sink: '{option}' (solo existen 'arg_index' y 'arg_name')",
+    "unknown_sink_option": "Opción desconocida en un sink: '{option}' (solo existen 'arg_index', 'arg_name' y 'kinds')",
     "unknown_passthrough_option": "Opción desconocida en un passthrough: '{option}' (solo existe 'arg_index')",
     "bad_passthrough_arg_index": "'arg_index' de un passthrough debe ser un número entero mayor o igual que 0, o 'none'; encontrado: '{value}'",
     "value_missing": "Falta el valor después de '{keyword}'"

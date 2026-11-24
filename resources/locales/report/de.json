@@ -749,6 +749,7 @@
   "taint_kind_stdin": "Tastatureingabe",
   "taint_kind_file": "Datei",
   "taint_kind_network": "Netzwerk",
+  "taint_kind_database": "Datenbank",
   "taint_badge_traced": "Verfolgt",
   "taint_badge_builtin": "Builtin",
   "taint_badge_custom": "Custom",

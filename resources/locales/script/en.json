@@ -406,6 +406,7 @@
     "ast_pattern_expected": "Keyword 'pattern' expected in 'match ast', found: '{found}'",
     "bad_arg_index": "'arg_index' must be a whole number of 0 or more, or 'all', found: '{value}'",
     "bad_arg_name": "'arg_name' must be a keyword argument name written beside 'arg_index=<n>', found: '{value}'",
+    "bad_sink_kinds": "'kinds' of a sink must list source kinds among {kinds}, separated by commas, found: '{value}'",
     "block_not_closed": "Block '{block}' not closed (missing 'end')",
     "category_unknown": "Unknown category: '{category}'",
     "confidence_not_integer": "'confidence' must be a whole number",
@@ -443,7 +444,7 @@
     "unknown_requires_file_key": "Unknown key in a file 'requires' block: '{key}'",
     "unknown_requires_key": "Unknown 'requires' key: '{key}'",
     "unknown_rule_keyword": "Unknown keyword in a rule: '{keyword}'",
-    "unknown_sink_option": "Unknown option on a sink: '{option}' (only 'arg_index' and 'arg_name' exist)",
+    "unknown_sink_option": "Unknown option on a sink: '{option}' (only 'arg_index', 'arg_name' and 'kinds' exist)",
     "unknown_passthrough_option": "Unknown option on a passthrough: '{option}' (only 'arg_index' exists)",
     "bad_passthrough_arg_index": "'arg_index' of a passthrough must be a whole number of 0 or more, or 'none', found: '{value}'",
     "value_missing": "Missing value after '{keyword}'"
