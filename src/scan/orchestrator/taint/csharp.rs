@@ -1,35 +1,35 @@
 //! C# taint pass: what sets C# apart from the other languages.
 //!
-//! **No link between files** (tickets #78-79, spec #77): there is no C#
-//! call graph yet, so a call resolves only to a function of the same file.
-//! The summaries of a file's functions are computed per rule on that file
-//! alone, and nothing is shared between files: a file depends only on
-//! itself, which is what the cache needs to know. Like Java, C# knows the
-//! declared type of each field and local variable.
+//! Calls are resolved across files by `dataflow::csharp_call_graph::
+//! CSharpCallGraph` (classes found through namespaces and `using`
+//! directives), built once per scan, and the summaries are computed once
+//! per rule in topological order and shared between files, as for Java
+//! (ticket #284, ADR-0060). Before that ticket a C# call resolved only to a
+//! method of the same file, each file depending only on itself. Like Java,
+//! C# knows the declared type of each field and local variable, so that
+//! `obj.Method()` resolves through the class of `obj`; the table comes from
+//! the call graph, which resolves its edges with the same one.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
+use std::sync::Arc;
 
-use rayon::prelude::*;
-
-use super::{TaintFindings, TaintLanguage};
-use crate::scan::dataflow::call_graph::{NodeKey, ResolvedSummaries, SummaryReuse};
-use crate::scan::dataflow::csharp_summary::{
-    CSharpFunctionInfo, collect_csharp_field_types, collect_csharp_local_types,
-    compute_csharp_file_summaries_prepared, prepare_csharp_file,
+use super::{
+    TaintFindings, TaintLanguage, call_graph_inputs, file_summaries, source_lines_by_file,
 };
-use crate::scan::dataflow::csharp_taint_scan::run_taint_rule_csharp_prepared;
-use crate::scan::dataflow::line_facts::RuleLines;
-use crate::scan::dataflow::prepared::PreparedFile;
+use crate::scan::dataflow::call_graph::{NodeKey, ResolvedSummaries, SummaryReuse};
+use crate::scan::dataflow::csharp_call_graph::CSharpCallGraph;
+use crate::scan::dataflow::csharp_taint_scan::{
+    run_taint_rule_csharp, run_taint_rule_csharp_prepared,
+};
+use crate::scan::dataflow::line_facts::{LinesByFile, RuleLines};
 use crate::scan::dataflow::transfer::RuleSpecs;
+use crate::scan::dataflow::visibility::{FileSummaries, Visibility};
 use crate::scan::orchestrator::{ParsedFile, SourceLanguage};
 
-/// C# files of the scan, each with its declared types.
+/// C# files of the scan, linked by their call graph.
 pub(in crate::scan::orchestrator) struct CSharpTaint<'a> {
-    /// Variable or field name → declared class, per file.
-    type_maps: BTreeMap<String, BTreeMap<String, String>>,
-    /// Every file prepared once for all the rules of the scan (ticket
-    /// #192); C# has no call graph to hold them.
-    prepared: BTreeMap<String, PreparedFile<'a, CSharpFunctionInfo<'a>>>,
+    call_graph: CSharpCallGraph<'a>,
+    source_lines: LinesByFile,
 }
 
 impl<'a> TaintLanguage<'a> for CSharpTaint<'a> {
@@ -40,86 +40,69 @@ impl<'a> TaintLanguage<'a> for CSharpTaint<'a> {
         ("scan_phase_c_csharp", "phase C - C# (taint)");
 
     fn build(files: &[&'a ParsedFile]) -> Self {
-        let type_maps = files
-            .iter()
-            .map(|pf| {
-                let root = pf.tree().root_node();
-                let mut type_map = collect_csharp_field_types(root, pf.bytes());
-                type_map.extend(collect_csharp_local_types(root, pf.bytes()));
-                (pf.rel_path.clone(), type_map)
-            })
-            .collect();
-        // In parallel: a file only reads its own tree.
-        let prepared = files
-            .par_iter()
-            .map(|pf| {
-                (
-                    pf.rel_path.clone(),
-                    prepare_csharp_file(pf.tree().root_node(), pf.bytes()),
-                )
-            })
-            .collect();
         CSharpTaint {
-            type_maps,
-            prepared,
+            call_graph: CSharpCallGraph::build(&call_graph_inputs(files)),
+            source_lines: source_lines_by_file(files),
         }
     }
 
-    /// A file resolves nothing from the others.
     fn graph_size(&self) -> Option<(usize, usize)> {
-        None // No call graph: each C# file is analysed alone.
+        Some(super::graph_size(
+            &self.call_graph.nodes,
+            &self.call_graph.edges,
+        ))
     }
 
-    fn dependency_fingerprint(&self, _file: &str) -> String {
-        String::new()
+    fn dependency_fingerprint(&self, file: &str) -> String {
+        self.call_graph.dependency_fingerprint(file)
     }
 
-    /// No summary is shared between files: each file computes its own in
-    /// [`Self::analyse_file`].
-    fn resolve(&self, _specs: &RuleSpecs, _reuse: Option<&SummaryReuse>) -> ResolvedSummaries {
-        ResolvedSummaries::default()
+    fn resolve(&self, specs: &RuleSpecs, reuse: Option<&SummaryReuse>) -> ResolvedSummaries {
+        self.call_graph
+            .resolve_summaries_incremental(specs, Some(&self.source_lines), reuse)
     }
 
-    /// A file reads no summary of another file.
-    fn readers(&self, _changed: &BTreeSet<NodeKey>) -> BTreeSet<String> {
-        BTreeSet::new()
+    fn readers(&self, changed: &BTreeSet<NodeKey>) -> BTreeSet<String> {
+        self.call_graph.readers(changed)
     }
 
     fn analyse_file(
         &self,
         file: &ParsedFile,
         specs: &mut RuleSpecs,
-        _resolved: &ResolvedSummaries,
+        resolved: &ResolvedSummaries,
     ) -> TaintFindings {
-        // Back to the rule's own specs (no summaries, no types) before
-        // computing this file's summaries, as fresh specs would be: the
-        // previous file left its own in `specs`.
-        specs.summaries = Default::default();
-        specs.type_map = Default::default();
-        // The file was prepared once for all the rules, in `build`; a
-        // file it does not know cannot happen, it would only be prepared
-        // again here.
-        let fresh;
-        let prepared = match self.prepared.get(&file.rel_path) {
-            Some(prepared) => prepared,
-            None => {
-                fresh = prepare_csharp_file(file.tree().root_node(), file.bytes());
-                &fresh
-            }
-        };
-        // The guard facts of the lines are shared by every rule (ticket
-        // #240); the other facts are bound to this rule.
-        let lines = &file.source;
-        specs.summaries = compute_csharp_file_summaries_prepared(
-            prepared,
-            specs,
-            Some(RuleLines::shared(lines, specs)),
-        );
+        specs.summaries = file_summaries(resolved, &file.rel_path);
+        // What the file sees through its namespaces and `using`
+        // directives, looked up only when `summaries` has no entry (as
+        // Java, ticket #239).
+        let visibility: Arc<dyn Visibility> = self.call_graph.visibility().clone();
+        specs.summary_fallback = Some(Arc::new(FileSummaries::new(
+            visibility,
+            &file.rel_path,
+            resolved.all.clone(),
+        )));
         specs.type_map = self
-            .type_maps
-            .get(&file.rel_path)
+            .call_graph
+            .type_map(&file.rel_path)
             .cloned()
             .unwrap_or_default();
-        run_taint_rule_csharp_prepared(prepared, specs, Some(RuleLines::shared(lines, specs)))
+        // The graph prepared every file of the pass once for all its
+        // rules (ticket #192). A file it does not know cannot happen (the
+        // pass is built from the files it analyzes); it would still be
+        // analyzed, only prepared again for this rule.
+        match self.call_graph.prepared_file(&file.rel_path) {
+            Some(prepared) => run_taint_rule_csharp_prepared(
+                prepared,
+                specs,
+                Some(RuleLines::shared(&file.source, specs)),
+            ),
+            None => run_taint_rule_csharp(
+                file.tree().root_node(),
+                file.bytes(),
+                specs,
+                Some(&file.source),
+            ),
+        }
     }
 }

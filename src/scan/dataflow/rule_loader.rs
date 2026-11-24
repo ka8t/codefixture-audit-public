@@ -98,6 +98,17 @@ const ANY_DEPTH: char = '\u{3}';
 /// [`sink_regex_to_dotted_patterns`].
 const CALL_PAREN: char = '\u{4}';
 
+/// Stand-in for an escaped dollar (`\$` in the regex) while the regex is
+/// rewritten, turned into one `$` at the end of [`to_dotted_patterns`],
+/// and kept apart from the unescaped `$` anchor that pass drops. A PHP
+/// variable starts with it, and the PHP conversion names `$_GET['id']`
+/// after its base `$_GET` and `$xpath->query(...)` `$xpath.query`; a
+/// JavaScript name may hold one (`prisma.$queryRaw`). Deviation from the
+/// Audit (ticket #271), which kept both characters: `\$_GET` named no
+/// variable, and the PHP sources and sinks written with a `$` were read by
+/// the line layer alone.
+const LITERAL_DOLLAR: char = '\u{5}';
+
 static CONSTRUCTOR_KEYWORD_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(^|[|(:]|\\b)new(?:\\s[+*]| +)").expect("regex statique valide"));
 
@@ -344,8 +355,20 @@ pub fn regex_to_dotted_patterns(regex_str: &str) -> Vec<String> {
 /// passthroughs keep it: nothing would check their arguments afterwards,
 /// and `file_get_contents\s*\(\s*['"]php://input` cut to
 /// `file_get_contents` would make every call of it a source.
+///
+/// A sink's pattern also ends at the `[` of a subscript: a sink written
+/// as an index write, `Response\.Headers\[.Set-Cookie.\]` or
+/// `response\.headers\[.*[Cc]ookie`, names the object written into
+/// (`Response.Headers`), which is the name the data flow gives the target
+/// of `Response.Headers["Set-Cookie"] = value` (`lhs_sink_target`). The key
+/// stays checked by the raw regex on the line, as the arguments of a call
+/// are. Deviation from the Audit (ticket #261), which kept the key text
+/// (`Response.Headers.Set-Cookie.`): no assignment target has that name,
+/// and the data flow never saw those sinks. Only sinks are cut there: a
+/// source such as `\[FromQuery\]` or `\.choices\[0\]\.message` would
+/// lose its name or its tail.
 pub fn sink_regex_to_dotted_patterns(regex_str: &str) -> Vec<String> {
-    to_dotted_patterns(regex_str, ArgumentText::CutAtCall).patterns
+    to_dotted_patterns(regex_str, ArgumentText::CutAtCallOrSubscript).patterns
 }
 
 /// The dotted patterns of a source's or a sanitizer's regex, and whether
@@ -383,6 +406,9 @@ enum ArgumentText {
     Keep,
     /// Dropped: the pattern ends at the call.
     CutAtCall,
+    /// Dropped: the pattern ends at the call or at the `[` of a
+    /// subscript, whichever comes first (sinks, ticket #261).
+    CutAtCallOrSubscript,
 }
 
 /// What [`to_dotted_patterns`] gives: the patterns, and whether they
@@ -390,7 +416,8 @@ enum ArgumentText {
 struct Conversion {
     patterns: Vec<String>,
     /// A look-around was removed, or an alternative had text after the
-    /// `(` of its call (with [`ArgumentText::CutAtCall`]).
+    /// `(` of its call (with [`ArgumentText::CutAtCall`]) or after the `[`
+    /// of a subscript (with [`ArgumentText::CutAtCallOrSubscript`]).
     dropped_constraint: bool,
 }
 
@@ -414,6 +441,10 @@ fn to_dotted_patterns(regex_str: &str, arguments: ArgumentText) -> Conversion {
     // An escaped backslash is a literal one, kept apart from the escapes
     // read below (see `LITERAL_BACKSLASH`).
     let stripped = stripped.replace(r"\\", &LITERAL_BACKSLASH.to_string());
+    // An escaped dollar is a literal one, read after the escaped backslash
+    // so that `\\$` stays a backslash followed by the end anchor (see
+    // `LITERAL_DOLLAR`).
+    let stripped = stripped.replace(r"\$", &LITERAL_DOLLAR.to_string());
     let stripped = NON_CAPTURING_GROUP_RE
         .replace_all(&stripped, "(")
         .into_owned();
@@ -421,6 +452,12 @@ fn to_dotted_patterns(regex_str: &str, arguments: ArgumentText) -> Conversion {
         ArgumentText::CutAtCall => EMPTY_CALL_RE
             .replace_all(&stripped, "")
             .replace(r"\(", &CALL_PAREN.to_string()),
+        // The `[` of a subscript ends the name as the `(` of a call does:
+        // both are read as `CALL_PAREN`, where `finalize_dotted` cuts.
+        ArgumentText::CutAtCallOrSubscript => EMPTY_CALL_RE
+            .replace_all(&stripped, "")
+            .replace(r"\(", &CALL_PAREN.to_string())
+            .replace(r"\[", &CALL_PAREN.to_string()),
         ArgumentText::Keep => stripped,
     };
     let clean = REGEX_NOISE_RE.replace_all(&stripped, "").into_owned();
@@ -453,7 +490,9 @@ fn to_dotted_patterns(regex_str: &str, arguments: ArgumentText) -> Conversion {
     let patterns = alternatives
         .into_iter()
         .filter_map(|p| {
-            let f = finalize_dotted(&p).replace(LITERAL_BACKSLASH, "\\");
+            let f = finalize_dotted(&p)
+                .replace(LITERAL_BACKSLASH, "\\")
+                .replace(LITERAL_DOLLAR, "$");
             if f.is_empty() { None } else { Some(f) }
         })
         .collect();
@@ -544,6 +583,22 @@ pub fn has_taint_specs(rule_json: &Value) -> bool {
     converts("sources") && converts("sinks")
 }
 
+/// Whether a source's regex ends with the escaped `[` of an index
+/// (`Request\[`, `\$_GET\[`), trailing blanks aside: the source is that
+/// collection, never the receiver of one of its members
+/// (`SourceSpec::subscript_only`, ticket #268). An escaped backslash before it (`\\[`) is a literal backslash
+/// followed by a character class, not an index.
+fn ends_with_index(regex: &str) -> bool {
+    let trimmed = regex.trim_end();
+    let Some(before) = trimmed.strip_suffix("\\[") else {
+        return false;
+    };
+    // The `\` of `\[` must not itself be escaped: count the backslashes
+    // that precede it.
+    let preceding = before.chars().rev().take_while(|c| *c == '\\').count();
+    preceding % 2 == 0
+}
+
 /// Converts a compiled SCA rule (JSON) into dataflow engine
 /// `RuleSpecs`. "Best-effort" conversion: each regex pattern
 /// generates 1..N dotted patterns. `None` if the rule doesn't have at
@@ -567,11 +622,28 @@ pub fn rule_json_to_specs(rule_json: &Value, lang: &str) -> Option<RuleSpecs> {
         };
         let compiled = safe_compile_regex(regex);
         let conversion = confirmed_regex_to_dotted_patterns(regex);
+        let subscript_only = ends_with_index(regex);
+        // The regex ends with a literal dot: "a member of" (see below).
+        let member_of = regex.trim_end().ends_with("\\.") && !regex.trim_end().ends_with("\\\\.");
         for dotted in conversion.patterns {
-            let mut spec = SourceSpec::new(dotted, kind);
-            spec.raw_regex = compiled.clone();
-            spec.confirm_on_line = conversion.confirm_on_line;
-            sources.push(spec);
+            // A source written as "a member of" (`req\.(query|body)\.`,
+            // dotted `req.query.*`) also names the object read whole, as an
+            // indexed source does (`SourceSpec::subscript_only`): `return
+            // req.query` hands every parameter to the caller, which reads
+            // `.cmd` on the result of the call. Ticket #268, deviation from
+            // the Audit, whose pattern met the members only.
+            let whole = member_of
+                .then(|| dotted.strip_suffix(".*"))
+                .flatten()
+                .filter(|base| !base.is_empty() && !base.ends_with('*'))
+                .map(str::to_string);
+            for pattern in std::iter::once(dotted).chain(whole) {
+                let mut spec = SourceSpec::new(pattern, kind);
+                spec.raw_regex = compiled.clone();
+                spec.confirm_on_line = conversion.confirm_on_line;
+                spec.subscript_only = subscript_only;
+                sources.push(spec);
+            }
         }
     }
 
@@ -610,12 +682,18 @@ pub fn rule_json_to_specs(rule_json: &Value, lang: &str) -> Option<RuleSpecs> {
                     .collect()
             })
             .unwrap_or_default();
+        // `arg_name`: the keyword form of the numbered argument (ticket #261).
+        let arg_name = s
+            .get("arg_name")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
         let compiled = safe_compile_regex(regex);
         for dotted in sink_regex_to_dotted_patterns(regex) {
             let mut spec = SinkSpec::new(dotted)
                 .with_args(args.clone())
                 .with_line_args(line_args.clone())
                 .with_kinds(kinds.clone());
+            spec.arg_name = arg_name.clone();
             spec.raw_regex = compiled.clone();
             sinks.push(spec);
         }
@@ -1069,6 +1147,24 @@ mod tests {
     }
 
     #[test]
+    fn test_escaped_dollar_is_part_of_the_name() {
+        // Ticket #271: the PHP conversion names `$_GET['id']` after its
+        // base `$_GET`, and `$xpath->query(...)` `$xpath.query`.
+        assert_eq!(regex_to_dotted_patterns(r"\$_GET\["), vec!["$_GET"]);
+        assert_eq!(
+            sink_regex_to_dotted_patterns(r"\$xpath->query\s*\("),
+            vec!["$xpath.query"]
+        );
+        let prisma = sink_regex_to_dotted_patterns(r"\.\$queryRaw\s*\(");
+        assert_eq!(prisma, vec!["**.$queryRaw"]);
+        assert!(compile_glob(&prisma[0]).is_match("prisma.$queryRaw"));
+        // An unescaped `$` is the end anchor, dropped; after an escaped
+        // backslash too.
+        assert_eq!(regex_to_dotted_patterns(r"^getenv$"), vec!["getenv"]);
+        assert_eq!(regex_to_dotted_patterns(r"App\\$"), vec![r"App\"]);
+    }
+
+    #[test]
     fn test_sink_with_every_argument_checks_them_all() {
         // `arg_index=all` compiles to an empty `args` list: the dataflow
         // path and the line layer both read every argument (ticket #258).
@@ -1154,6 +1250,111 @@ mod tests {
             regex_to_dotted_patterns(r#"file_get_contents\s*\(\s*['"]php://input"#),
             vec![r#"file_get_contents['"]php://input"#]
         );
+    }
+
+    #[test]
+    fn test_sink_pattern_ends_at_its_subscript() {
+        // An index write names the object written into, the target name of
+        // `Response.Headers["Set-Cookie"] = value`; the key is left to the
+        // raw regex (ticket #261).
+        assert_eq!(
+            sink_regex_to_dotted_patterns(r"Response\.Headers\[.Set-Cookie.\]"),
+            vec!["Response.Headers"]
+        );
+        assert_eq!(
+            sink_regex_to_dotted_patterns(r"response\.headers\[.*[Cc]ookie"),
+            vec!["response.headers"]
+        );
+        assert_eq!(
+            sink_regex_to_dotted_patterns(r"\.session\["),
+            vec!["**.session"]
+        );
+        // A `[` inside the arguments of a call comes after the cut.
+        assert_eq!(
+            sink_regex_to_dotted_patterns(
+                r#"header\s*\(\s*\$(?!_SERVER\s*\[\s*['"]SERVER_PROTOCOL)"#
+            ),
+            vec!["header"]
+        );
+        // A source is not cut there: `[FromQuery]` keeps its name.
+        assert_eq!(
+            confirmed_regex_to_dotted_patterns(r"\[FromQuery\]").patterns,
+            vec!["FromQuery"]
+        );
+    }
+
+    #[test]
+    fn test_member_of_source_also_names_the_object() {
+        // Ticket #268: `req\.query\.` names `req.query.*` and `req.query`.
+        let rule = serde_json::json!({
+            "id": "t",
+            "sources": [
+                {"pattern": r"req\.query\.", "kind": "http"},
+                {"pattern": r"event\.\w+", "kind": "http"},
+            ],
+            "sinks": [{"pattern": r"exec\s*\(", "arg_index": 0}],
+        });
+        let specs = rule_json_to_specs(&rule, "javascript").expect("taint specs");
+        let patterns: Vec<&str> = specs.sources.iter().map(|s| s.pattern.as_str()).collect();
+        assert_eq!(patterns, vec!["req.query.*", "req.query", "event.*"]);
+    }
+
+    #[test]
+    fn test_source_ending_with_an_index_is_subscript_only() {
+        // Ticket #268.
+        assert!(ends_with_index(r"Request\["));
+        assert!(ends_with_index(r"\$_GET\[ "));
+        assert!(ends_with_index(r"(?<!resp)\.Headers\["));
+        assert!(!ends_with_index(r"Request\.Cookies"));
+        assert!(!ends_with_index(r"\[FromQuery\]"));
+        assert!(!ends_with_index(r"path\\["));
+        let rule = serde_json::json!({
+            "id": "t",
+            "sources": [
+                {"pattern": r"Request\[", "kind": "http"},
+                {"pattern": r"Request\.Cookies", "kind": "http"},
+            ],
+            "sinks": [{"pattern": r"\.Execute\s*\(", "arg_index": 0}],
+        });
+        let specs = rule_json_to_specs(&rule, "csharp").expect("taint specs");
+        assert!(specs.sources[0].subscript_only);
+        assert!(!specs.sources[1].subscript_only);
+    }
+
+    #[test]
+    fn test_optional_constructor_keyword_names_the_class() {
+        // `(?:new\s+)?CookieOptions\b` (ticket #268): the class, with or
+        // without its keyword, and the raw regex accepts the bare name of a
+        // target-typed `new()` whose type is not on the line.
+        let patterns = sink_regex_to_dotted_patterns(r"(?:new\s+)?CookieOptions\b");
+        assert!(!patterns.is_empty());
+        assert!(
+            patterns.iter().all(|p| p == "CookieOptions"),
+            "{patterns:?}"
+        );
+        let raw = Regex::new(r"(?:new\s+)?CookieOptions\b").unwrap();
+        assert!(raw.is_match("CookieOptions").unwrap());
+        assert!(!raw.is_match("CookieOptionsBuilder").unwrap());
+    }
+
+    #[test]
+    fn test_subscript_sink_key_is_checked_on_the_line() {
+        // The key of the index write stays in the raw regex: the data flow
+        // names both writes `Response.Headers`, the line keeps only the
+        // cookie header.
+        let rule = serde_json::json!({
+            "id": "t",
+            "sources": [{"pattern": r"Request\.Query\[", "kind": "http"}],
+            "sinks": [{"pattern": r"Response\.Headers\[.Set-Cookie.\]", "arg_index": 0}],
+        });
+        let specs = rule_json_to_specs(&rule, "csharp").expect("taint specs");
+        assert_eq!(specs.sinks[0].pattern, "Response.Headers");
+        let raw = specs.sinks[0].raw_regex.as_ref().expect("raw regex");
+        assert!(
+            raw.is_match(r#"Response.Headers["Set-Cookie"] = v;"#)
+                .unwrap()
+        );
+        assert!(!raw.is_match(r#"Response.Headers["X-Lang"] = v;"#).unwrap());
     }
 
     #[test]

@@ -91,6 +91,10 @@ pub struct SinkSpec {
     /// path checks argument 0 and the line layer the whole call, as before
     /// the option was a decision of the rule.
     pub arg_index: Option<SinkArguments>,
+    /// `arg_name=<name>`, written with `arg_index=<n>`: the same argument
+    /// passed by keyword (Python `Response(body, headers=h)`), which the
+    /// dataflow path and the line layer check as well (ticket #261).
+    pub arg_name: Option<String>,
     pub line_number: usize,
 }
 

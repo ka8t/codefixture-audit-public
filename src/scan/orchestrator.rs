@@ -78,14 +78,12 @@ pub(crate) enum SourceLanguage {
     Php,
     /// C# (`.cs`) — detection/parsing/`match` mode (prefactor ticket
     /// #69/spec #68) AND native intra-procedural taint engine (tickets
-    /// #78-79/spec #77: dedicated CFG, intra-file interprocedural
-    /// summaries). **No C# call graph**
-    /// (`csharp_call_graph.rs` not built, explicitly out of scope for
-    /// ticket #77, consistent with the JS/PHP sequencing in this
-    /// repo — a call graph is a later follow-up effort):
-    /// unlike Java/JS/PHP, a `.sca` rule with `language csharp`
-    /// in `taint` mode resolves calls ONLY within the same file,
-    /// never to a summary computed in another file of the project.
+    /// #78-79/spec #77: dedicated CFG, interprocedural summaries). Since
+    /// ticket #284 (ADR-0060) a `.sca` rule with `language csharp` in
+    /// `taint` mode resolves calls across the files of the project, like
+    /// Java, through the C# call graph (`csharp_call_graph.rs`:
+    /// namespaces and `using` directives); before, only within the same
+    /// file.
     CSharp,
     /// HTML (`.html`/`.htm`).
     Html,
@@ -3557,6 +3555,24 @@ mod tests {
                 "Helper.java",
                 "package app;\nclass Helper {\n  void run(String cmd) {\n    stmt.executeQuery(\"x\");\n  }\n}\n",
                 "package app;\nclass Helper {\n  void run(String cmd) {\n    stmt.executeQuery(cmd);\n  }\n}\n",
+            ),
+        );
+    }
+
+    /// Ticket #284: the C# call graph links the files, so the cache must
+    /// redo the caller when the callee of another file changes.
+    #[test]
+    fn test_taint_cache_follows_cross_file_changes_in_csharp() {
+        assert_cache_follows_cross_file(
+            "rule taint_q\n  language  csharp\n  category  security\n  severity  HIGH\n  source  Request\\.Query\\[  kind=http\n  sink    Process\\.Start\\s*\\(\nend\n",
+            (
+                "Api.cs",
+                "using App.Data;\nnamespace App.Web {\n  class Api {\n    private Helper _helper;\n    void M() {\n      var cmd = Request.Query[\"q\"];\n      _helper.Run(cmd);\n    }\n  }\n}\n",
+            ),
+            (
+                "Helper.cs",
+                "namespace App.Data;\nclass Helper {\n  public void Run(string cmd) {\n    Process.Start(\"ls\");\n  }\n}\n",
+                "namespace App.Data;\nclass Helper {\n  public void Run(string cmd) {\n    Process.Start(cmd);\n  }\n}\n",
             ),
         );
     }

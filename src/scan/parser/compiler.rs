@@ -132,10 +132,18 @@ pub fn compile_to_json(node: &RuleNode) -> Value {
             .iter()
             .map(|s| match s.arg_index {
                 // Written by the rule: the dataflow path and the line layer
-                // both check only this argument (ticket #221).
-                Some(SinkArguments::Index(index)) => {
-                    json!({"pattern": s.pattern, "arg_index": index, "arg_explicit": true})
-                }
+                // both check only this argument (ticket #221), and its
+                // keyword form when `arg_name=` names it (ticket #261; the
+                // parser accepts `arg_name` beside a numbered index only).
+                Some(SinkArguments::Index(index)) => match &s.arg_name {
+                    Some(name) => json!({
+                        "pattern": s.pattern,
+                        "arg_index": index,
+                        "arg_name": name,
+                        "arg_explicit": true
+                    }),
+                    None => json!({"pattern": s.pattern, "arg_index": index, "arg_explicit": true}),
+                },
                 // `arg_index=all`: an empty `args` list, which the loader
                 // reads as every argument, for the dataflow path and the
                 // line layer alike (ticket #258).

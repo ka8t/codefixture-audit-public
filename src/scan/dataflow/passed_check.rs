@@ -48,7 +48,7 @@
 //! worklist.py`), whose fixpoint reads the TRUE/FALSE labels of the edges
 //! only to drop the dead ones (§9) and gives both edges the same state.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use tree_sitter::Node;
 
@@ -63,60 +63,87 @@ pub(crate) struct PassedChecks {
     /// the condition proves, without its string literals (a tainted name
     /// written inside a literal is not the variable).
     by_edge: HashMap<(usize, usize), Vec<String>>,
+    /// The edges no run can take: their condition was settled by an
+    /// earlier branch (see [`settled_edges`], ticket #268).
+    infeasible: HashSet<(usize, usize)>,
 }
 
 impl PassedChecks {
     /// Reads the condition of every branch of `cfg` (see the module
     /// doc). Without the source lines (`source_lines` is `None`: a test
-    /// of the bare fixpoint), or for a rule without a sanitizer, no edge
-    /// proves anything.
+    /// of the bare fixpoint) no edge proves anything; for a rule without a
+    /// sanitizer, only the settled conditions are read.
     pub(crate) fn compute(cfg: &Cfg, specs: &RuleSpecs, source_lines: Option<&RuleLines>) -> Self {
         let mut by_edge = HashMap::new();
         let Some(lines) = source_lines else {
-            return Self { by_edge };
+            return Self {
+                by_edge,
+                infeasible: HashSet::new(),
+            };
         };
-        if specs.sanitizers.iter().all(|san| san.raw_regex.is_none()) {
-            return Self { by_edge };
-        }
         let text = lines.lines().text();
+        let infeasible = settled_edges(cfg, text);
+        if specs.sanitizers.iter().all(|san| san.raw_regex.is_none()) {
+            return Self {
+                by_edge,
+                infeasible,
+            };
+        }
         for node in cfg.nodes.values() {
             let Some(condition) = boolean_condition(node) else {
                 continue;
             };
-            let mut calls = Vec::new();
-            calls_true_with(condition, text, &mut calls);
-            let checks: Vec<String> = calls
-                .into_iter()
-                .filter(|&call| {
-                    !has_literal_argument(call) && is_sanitizer_call(call, lines, specs)
-                })
-                .filter_map(|call| text.get(call.byte_range()))
-                .map(strip_plain_string_literals)
-                .collect();
-            if checks.is_empty() {
-                continue;
-            }
+            let checks_of = |calls: Vec<Node<'_>>| -> Vec<String> {
+                calls
+                    .into_iter()
+                    .filter(|&call| {
+                        !has_literal_argument(call) && is_sanitizer_call(call, lines, specs)
+                    })
+                    .filter_map(|call| text.get(call.byte_range()))
+                    .map(strip_plain_string_literals)
+                    .collect()
+            };
+            let mut true_calls = Vec::new();
+            calls_true_with(condition, text, &mut true_calls);
+            let mut false_calls = Vec::new();
+            calls_false_with(condition, text, &mut false_calls);
+            let by_label = [
+                (EdgeLabel::True, checks_of(true_calls)),
+                (EdgeLabel::False, checks_of(false_calls)),
+            ];
             let edges = cfg.successors(node.id);
-            for edge in &edges {
-                // An edge that is also the FALSE (or any other) edge to
-                // the same node, `if check(x): pass` with nothing after,
-                // proves nothing.
-                let only_true = edges
-                    .iter()
-                    .filter(|other| other.dst == edge.dst)
-                    .all(|other| other.label == EdgeLabel::True);
-                if edge.label == EdgeLabel::True && only_true {
-                    by_edge.insert((node.id, edge.dst), checks.clone());
+            for (label, checks) in by_label {
+                if checks.is_empty() {
+                    continue;
+                }
+                for edge in &edges {
+                    // An edge that is also the other (or any other) edge
+                    // to the same node, `if check(x): pass` with nothing
+                    // after, proves nothing.
+                    let only_this = edges
+                        .iter()
+                        .filter(|other| other.dst == edge.dst)
+                        .all(|other| other.label == label);
+                    if edge.label == label && only_this {
+                        by_edge.insert((node.id, edge.dst), checks.clone());
+                    }
                 }
             }
         }
-        Self { by_edge }
+        Self {
+            by_edge,
+            infeasible,
+        }
     }
 
     /// The state the edge `src → dst` carries, when it proves checks:
-    /// `state` without the tainted variables the checks mention. `None`
-    /// when the edge proves nothing (the state passes unchanged).
+    /// `state` without the tainted variables the checks mention; an empty
+    /// state (no taint) on an edge no run can take. `None` when the edge
+    /// proves nothing (the state passes unchanged).
     pub(crate) fn refine(&self, src: usize, dst: usize, state: &State) -> Option<State> {
+        if self.infeasible.contains(&(src, dst)) {
+            return Some(State::default());
+        }
         let checks = self.by_edge.get(&(src, dst))?;
         let mut refined = state.clone();
         refined.retain(|var_name, _| {
@@ -246,6 +273,293 @@ fn calls_true_with<'tree>(expr: Node<'tree>, text: &str, out: &mut Vec<Node<'tre
             }
         }
     }
+}
+
+/// Pushes to `out` the calls whose result is truthy whenever `expr` is
+/// FALSE: the checks of a negation, `!Guid.TryParse(id, out _)` or `not
+/// check(x)`, and those of either side of a disjunction (`!a || !b` false
+/// means both hold). Ticket #268: eShopOnWeb writes `if
+/// (!Guid.TryParse(userName, out var _)) userName = null;`, after which the
+/// FALSE edge carries a name that parsed as a GUID.
+fn calls_false_with<'tree>(expr: Node<'tree>, text: &str, out: &mut Vec<Node<'tree>>) {
+    let expr = strip_parentheses(expr);
+    if let Some(inner) = negated(expr, text) {
+        calls_true_with(inner, text, out);
+        return;
+    }
+    let (Some(left), Some(right)) = operands(expr) else {
+        return;
+    };
+    let Some(operator) = text.get(left.end_byte()..right.start_byte()).map(str::trim) else {
+        return;
+    };
+    if matches!(operator, "or" | "||") {
+        calls_false_with(left, text, out);
+        calls_false_with(right, text, out);
+    }
+}
+
+/// `node` without the parentheses around it.
+fn strip_parentheses(node: Node<'_>) -> Node<'_> {
+    let mut node = node;
+    while node.kind() == "parenthesized_expression" {
+        match only_named_child(node) {
+            Some(inner) => node = inner,
+            None => break,
+        }
+    }
+    node
+}
+
+/// The operand of a logical negation (`!e`, Python `not e`), `None` for
+/// any other expression. The negation is a `not_operator` (Python), a
+/// `prefix_unary_expression` (C#), a `unary_expression` (Java,
+/// JavaScript) or a `unary_op_expression` (PHP) whose operator is `!`.
+fn negated<'tree>(expr: Node<'tree>, text: &str) -> Option<Node<'tree>> {
+    match expr.kind() {
+        "not_operator" => expr.child_by_field_name("argument"),
+        "prefix_unary_expression" | "unary_expression" | "unary_op_expression" => {
+            let operator = expr.child(0)?;
+            if node_text(operator, text)? != "!" {
+                return None;
+            }
+            let mut cursor = expr.walk();
+            expr.named_children(&mut cursor)
+                .filter(|child| child.kind() != "comment")
+                .last()
+        }
+        _ => None,
+    }
+}
+
+// ----------------------------------------------------------------------
+// Settled conditions (ticket #268)
+// ----------------------------------------------------------------------
+
+/// The edges no run can take because an earlier branch settled their
+/// condition. eShopOnWeb's `GetOrSetBasketCookieAndUserName` returns at
+/// once when `Request.HttpContext.User.Identity.IsAuthenticated` holds,
+/// then tests `!Request.HttpContext.User.Identity.IsAuthenticated` again
+/// before checking the cookie with `Guid.TryParse`: the skip of that second
+/// test cannot happen, and the fixpoint, which reads no condition, let the
+/// unchecked cookie through it.
+///
+/// A condition is settled at a branch B by a branch A that tests the same
+/// operand (`C` or `!C`, the same text once blanks are removed) when:
+///   - every path from the entry to B goes through A (A dominates B);
+///   - from one edge of A, B is reached without going back to A, and from
+///     the other edge it is not (that edge leaves: a `return`, a `throw`);
+///   - the operand reads no call and no name the function assigns
+///     ([`settled_operand`]): its value cannot change between A and B.
+///
+/// B's edge that contradicts the value A's reaching edge gives the operand
+/// is then infeasible. Deliberate deviation from the Audit
+/// (`Audit/sca/dataflow/worklist.py`), whose fixpoint drops only the edges
+/// of a constant condition (§9).
+fn settled_edges(cfg: &Cfg, text: &str) -> HashSet<(usize, usize)> {
+    let mut infeasible = HashSet::new();
+    // Each branch with a settled-able operand: (id, operand text, negated).
+    let mut branches: Vec<(usize, String, bool)> = Vec::new();
+    for node in cfg.nodes.values() {
+        let Some(condition) = boolean_condition(node) else {
+            continue;
+        };
+        let condition = strip_parentheses(condition);
+        let (operand, is_negated) = match negated(condition, text) {
+            Some(inner) => (strip_parentheses(inner), true),
+            None => (condition, false),
+        };
+        let Some(operand_text) = node_text(operand, text) else {
+            continue;
+        };
+        if !settled_operand(operand, operand_text, cfg, text) {
+            continue;
+        }
+        let key: String = operand_text
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        branches.push((node.id, key, is_negated));
+    }
+    for (a, key_a, negated_a) in &branches {
+        for (b, key_b, negated_b) in &branches {
+            if a == b || key_a != key_b {
+                continue;
+            }
+            // A dominates B: B is unreachable from the entry once A is
+            // removed.
+            if reachable(cfg, cfg.entry, *b, *a) {
+                continue;
+            }
+            let edges_a = cfg.successors(*a);
+            let edge_to = |label| edges_a.iter().find(|e| e.label == label).map(|e| e.dst);
+            let (Some(true_dst), Some(false_dst)) =
+                (edge_to(EdgeLabel::True), edge_to(EdgeLabel::False))
+            else {
+                continue;
+            };
+            let from_true = reachable(cfg, true_dst, *b, *a);
+            let from_false = reachable(cfg, false_dst, *b, *a);
+            // The value of the operand at B: the label of A's edge that
+            // reaches B, read through A's negation.
+            let operand_value = match (from_true, from_false) {
+                (true, false) => !*negated_a,
+                (false, true) => *negated_a,
+                _ => continue,
+            };
+            // B's condition is then `operand_value` (or its negation): the
+            // edge of the other label is never taken.
+            let condition_b = operand_value != *negated_b;
+            let dead_label = if condition_b {
+                EdgeLabel::False
+            } else {
+                EdgeLabel::True
+            };
+            for edge in cfg.successors(*b) {
+                if edge.label == dead_label {
+                    infeasible.insert((*b, edge.dst));
+                }
+            }
+        }
+    }
+    infeasible
+}
+
+/// Whether `to` is reached from `from` without going through `avoid`
+/// (`from` itself may not be `avoid`).
+fn reachable(cfg: &Cfg, from: usize, to: usize, avoid: usize) -> bool {
+    if from == avoid {
+        return false;
+    }
+    let mut seen = HashSet::from([from]);
+    let mut queue = VecDeque::from([from]);
+    while let Some(node) = queue.pop_front() {
+        if node == to {
+            return true;
+        }
+        for next in cfg.successor_ids(node) {
+            if next != avoid && seen.insert(next) {
+                queue.push_back(next);
+            }
+        }
+    }
+    false
+}
+
+/// The node kinds that change a value or may: an assignment, a
+/// declaration, an increment, a call.
+const WRITE_KINDS: &[&str] = &[
+    "assignment",
+    "augmented_assignment",
+    "assignment_expression",
+    "augmented_assignment_expression",
+    "variable_declarator",
+    "update_expression",
+    "postfix_unary_expression",
+];
+
+/// Whether the value of `operand` cannot change between two branches of
+/// the function: a name or a chain of members (`a.b.c`), no call, no
+/// subscript; its first name is assigned nowhere in the statements or
+/// conditions of `cfg`, nor passed as `ref`/`out`; and no call of the
+/// function has the object of the last member as its receiver
+/// (`stack.Pop()` can change `stack.IsEmpty`; `Guard.Against.Null(
+/// Request.HttpContext.User.Identity.Name, …)` cannot change
+/// `Request.HttpContext.User.Identity.IsAuthenticated`).
+fn settled_operand(operand: Node<'_>, operand_text: &str, cfg: &Cfg, text: &str) -> bool {
+    let root: String = operand_text
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '$')
+        .collect();
+    if root.is_empty()
+        || !operand_text
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '$' || c == '.' || c.is_whitespace())
+        || has_descendant(operand, &|n| CALL_KINDS.contains(&n.kind()))
+    {
+        return false;
+    }
+    let assigns_root = |node: Node<'_>| {
+        // C#'s null-forgiving `x!` is a `postfix_unary_expression` too: only
+        // an increment or a decrement writes.
+        let increments = matches!(
+            node.kind(),
+            "postfix_unary_expression" | "update_expression"
+        ) && node_text(node, text)
+            .is_some_and(|t| t.contains("++") || t.contains("--"));
+        (increments
+            || (WRITE_KINDS.contains(&node.kind())
+                && !matches!(
+                    node.kind(),
+                    "postfix_unary_expression" | "update_expression"
+                )))
+            && node
+                .named_child(0)
+                .and_then(|target| node_text(target, text))
+                .is_some_and(|target| {
+                    target.starts_with(root.as_str())
+                        && !target[root.len()..]
+                            .starts_with(|c: char| c.is_alphanumeric() || c == '_')
+                })
+    };
+    // The object whose member the operand reads: `a.b` for `a.b.c`; none
+    // for a bare name.
+    let compact: String = operand_text
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    let object = compact
+        .rsplit_once('.')
+        .map(|(object, _)| format!("{object}."));
+    let may_change = |node: Node<'_>| {
+        if assigns_root(node) {
+            return true;
+        }
+        let Some(node_source) = node_text(node, text) else {
+            return false;
+        };
+        if node.kind() == "argument" {
+            let compact_argument: String =
+                node_source.split_whitespace().collect::<Vec<_>>().join(" ");
+            if compact_argument == format!("ref {root}")
+                || compact_argument == format!("out {root}")
+            {
+                return true;
+            }
+        }
+        if let Some(object) = &object
+            && CALL_KINDS.contains(&node.kind())
+        {
+            // The text before the arguments: `stack.Pop`, `$this->items->pop`.
+            let callee = node
+                .child_by_field_name("arguments")
+                .and_then(|arguments| text.get(node.start_byte()..arguments.start_byte()))
+                .unwrap_or("");
+            let callee: String = callee.chars().filter(|c| !c.is_whitespace()).collect();
+            if callee.starts_with(object.as_str()) {
+                return true;
+            }
+        }
+        false
+    };
+    !cfg.nodes.values().any(|node| {
+        node.statements
+            .iter()
+            .chain(node.condition.iter())
+            .any(|statement| has_descendant(*statement, &may_change))
+    })
+}
+
+/// Whether `node` or one of its descendants satisfies `predicate`.
+fn has_descendant(node: Node<'_>, predicate: &dyn Fn(Node<'_>) -> bool) -> bool {
+    if predicate(node) {
+        return true;
+    }
+    let mut cursor = node.walk();
+    let children: Vec<Node<'_>> = node.children(&mut cursor).collect();
+    children
+        .into_iter()
+        .any(|child| has_descendant(child, predicate))
 }
 
 /// The two operands of a binary operation: the `left`/`right` fields
@@ -397,6 +711,57 @@ mod tests {
         ] {
             assert!(proved(python(), source).is_empty(), "{source}");
         }
+    }
+
+    /// The text of the calls [`calls_false_with`] reads in the condition
+    /// of the first `if` of `source` (ticket #268).
+    fn proved_when_false(language: tree_sitter::Language, source: &str) -> Vec<String> {
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&language).expect("valid grammar");
+        let tree = parser.parse(source, None).expect("parsed");
+        let mut stack = vec![tree.root_node()];
+        let mut condition = None;
+        while let Some(node) = stack.pop() {
+            if node.kind() == "if_statement" {
+                condition = node.child_by_field_name("condition");
+                break;
+            }
+            let mut cursor = node.walk();
+            let children: Vec<_> = node.children(&mut cursor).collect();
+            stack.extend(children.into_iter().rev());
+        }
+        let mut calls = Vec::new();
+        calls_false_with(condition.expect("an if"), source, &mut calls);
+        calls
+            .iter()
+            .map(|call| source[call.byte_range()].to_string())
+            .collect()
+    }
+
+    #[test]
+    fn test_calls_false_with_reads_negations() {
+        let csharp = || tree_sitter_c_sharp::LANGUAGE.into();
+        let negated = "class A { void M() { if (!Guid.TryParse(id, out var _)) { id = null; } } }";
+        assert_eq!(
+            proved_when_false(csharp(), negated),
+            ["Guid.TryParse(id, out var _)"]
+        );
+        let either = "class A { void M() { if (!a.Ok() || !(b.Ok())) { } } }";
+        assert_eq!(proved_when_false(csharp(), either), ["a.Ok()", "b.Ok()"]);
+        let python = || tree_sitter_python::LANGUAGE.into();
+        assert_eq!(
+            proved_when_false(python(), "if not t.is_relative_to(B):\n    pass\n"),
+            ["t.is_relative_to(B)"]
+        );
+        // A plain call or a conjunction proves nothing when false.
+        assert!(proved_when_false(csharp(), "class A { void M() { if (a.Ok()) { } } }").is_empty());
+        assert!(
+            proved_when_false(
+                csharp(),
+                "class A { void M() { if (!a.Ok() && !b.Ok()) { } } }"
+            )
+            .is_empty()
+        );
     }
 
     /// The text literal arguments that keep a call from proving a check.

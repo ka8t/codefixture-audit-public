@@ -453,10 +453,12 @@ impl<'src> PhpLowerer<'src> {
     }
 
     /// Array literal element (`array_element_initializer`) — the key
-    /// in a `key => value` form is ignored in v1 (only the value is
+    /// in a `key => value` form is ignored here (only the value is
     /// lowered, the same simplification as `DictRef` not being
     /// modeled for PHP associative arrays — an array remains a
     /// `ListRef` of its values, the value's taint is what matters).
+    /// A literal of constant keys assigned to a variable is lowered key
+    /// by key instead, see [`Self::lower_keyed_array_assignment`].
     fn lower_array_element(&mut self, node: Node<'src>) -> Rhs {
         let inner = if node.kind() == "array_element_initializer" {
             // Last named child = the value (the `key => value` form
@@ -567,6 +569,13 @@ impl<'src> PhpLowerer<'src> {
         let left_node = expr.child_by_field_name("left");
         let right_node = expr.child_by_field_name("right");
 
+        if base_op == "="
+            && let (Some(left), Some(right)) = (left_node, right_node)
+            && let Some(assigned) = self.lower_keyed_array_assignment(left, right)
+        {
+            return assigned;
+        }
+
         let mut rhs = self.lower_expr(right_node);
         if base_op != "=" {
             let read_target = self.lower_expr(left_node);
@@ -591,6 +600,79 @@ impl<'src> PhpLowerer<'src> {
             lineno: self.line(expr),
         });
         rhs
+    }
+
+    /// `$x = array('k' => v, ...)` or `$x = ['k' => v, ...]` where every
+    /// element has a constant key (`'k'`, `"k"`, `0`): lowered as one
+    /// write per key, `$x['k'] = v`, after `$x` itself is set to an empty
+    /// associative array (`DictRef`, which the constant pass does not
+    /// evaluate, unlike a `ListRef`, and which the line layer never marks,
+    /// see `transfer::holds_no_data`), so that reading `$x['status']` takes the taint of that entry
+    /// only and reading `$x` joins them all (§9.bis). Returns the value of
+    /// the assignment expression, `$x`, or `None` when the form does not
+    /// apply (another target than a variable, an element without a key, a
+    /// computed key, a spread `...$y`): the array is then one `ListRef` of
+    /// its values, which marks the whole array as soon as one value is
+    /// tainted (ticket #271, `array('name' => $x, 'status' => 'active')`
+    /// made `$x['status']` tainted).
+    ///
+    /// The values are lowered before `$x` is written, so that
+    /// `$x = ['a' => $x['b']]` reads the former entry. Entries of an earlier
+    /// value of `$x` under keys the new literal does not hold are kept, an
+    /// over-approximation. No equivalent in the Audit, which has no PHP
+    /// data flow (ADR-0007).
+    fn lower_keyed_array_assignment(&mut self, left: Node<'src>, right: Node<'src>) -> Option<Rhs> {
+        if left.kind() != "variable_name" || right.kind() != "array_creation_expression" {
+            return None;
+        }
+        let mut keyed: Vec<(Rhs, Node<'src>, Node<'src>)> = Vec::new();
+        for element in named_children(right) {
+            if element.kind() != "array_element_initializer" {
+                return None;
+            }
+            let mut parts = named_children(element);
+            let (Some(key), Some(value), None) = (parts.next(), parts.next(), parts.next()) else {
+                return None;
+            };
+            keyed.push((self.constant_array_key(key)?, value, element));
+        }
+        let name = self.text(left);
+        let values: Vec<(Rhs, Rhs, usize)> = keyed
+            .into_iter()
+            .map(|(key, value, element)| (key, self.lower_expr(Some(value)), self.line(element)))
+            .collect();
+        self.emit(IrStmt::Assign {
+            lhs: Lhs::VarLhs(name.clone()),
+            rhs: Rhs::DictRef(Vec::new()),
+            lineno: self.line(left),
+        });
+        for (key, value, lineno) in values {
+            self.emit(IrStmt::Assign {
+                lhs: Lhs::SubscriptLhs {
+                    base: Box::new(Rhs::VarRef(name.clone())),
+                    key: Box::new(key),
+                },
+                rhs: value,
+                lineno,
+            });
+        }
+        Some(Rhs::VarRef(name))
+    }
+
+    /// The constant value of an array key written as a literal: a
+    /// single-quoted string, a double-quoted one without interpolation, an
+    /// integer. Lowered the way a read `$x['k']` lowers its key, so that
+    /// both name the same entry. `None` for any other key.
+    fn constant_array_key(&mut self, key: Node<'src>) -> Option<Rhs> {
+        let plain_encapsed = key.kind() == "encapsed_string"
+            && named_children(key).all(|part| matches!(part.kind(), "string_content"));
+        if !matches!(key.kind(), "string" | "integer") && !plain_encapsed {
+            return None;
+        }
+        match self.lower_expr(Some(key)) {
+            constant @ Rhs::Const(_) => Some(constant),
+            _ => None,
+        }
     }
 
     // --- lowering the target (LHS) --------------------------------------
@@ -1422,14 +1504,54 @@ mod tests {
         );
     }
 
+    /// Ticket #271: an array literal of constant keys assigned to a
+    /// variable is one write per key, after the variable is reset.
     #[test]
-    fn test_array_literal_keyed_value_still_propagates() {
-        let ir = lower(r#"$a = ["k" => $input];"#);
-        let a = assigns(&ir);
-        let IrStmt::Assign { rhs, .. } = a[0] else {
-            panic!()
+    fn test_array_literal_with_constant_keys_writes_each_key() {
+        let ir = lower("$a = [\"k\" => $input, 'status' => 'on', 3 => $n];");
+        let entry = |key: ConstValue, rhs: Rhs| IrStmt::Assign {
+            lhs: Lhs::SubscriptLhs {
+                base: Box::new(var("$a")),
+                key: Box::new(Rhs::Const(key)),
+            },
+            rhs,
+            lineno: 2,
         };
-        assert_eq!(*rhs, Rhs::ListRef(vec![var("$input")]));
+        assert_eq!(
+            ir,
+            vec![
+                IrStmt::Assign {
+                    lhs: Lhs::VarLhs("$a".to_string()),
+                    rhs: Rhs::DictRef(Vec::new()),
+                    lineno: 2,
+                },
+                entry(ConstValue::Str("k".to_string()), var("$input")),
+                entry(
+                    ConstValue::Str("status".to_string()),
+                    Rhs::Const(ConstValue::Str("on".to_string()))
+                ),
+                entry(ConstValue::Int(3), var("$n")),
+            ]
+        );
+    }
+
+    /// An element without a key, a computed key or a target other than a
+    /// variable keeps the array one `ListRef` of its values.
+    #[test]
+    fn test_array_literal_without_constant_keys_stays_a_list() {
+        for src in [
+            "$a = ['k' => $input, $other];",
+            "$a = [$key => $input];",
+            "$a = [\"k$i\" => $input];",
+            "$this->a = ['k' => $input];",
+        ] {
+            let ir = lower(src);
+            let last = ir.last().expect("one assignment");
+            let IrStmt::Assign { rhs, .. } = last else {
+                panic!("expected Assign for {src}")
+            };
+            assert!(matches!(rhs, Rhs::ListRef(_)), "{src}: {rhs:?}");
+        }
     }
 
     #[test]

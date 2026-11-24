@@ -403,7 +403,37 @@ Quand la mémoire est juste, l'analyse fait d'abord tourner moins de règles de 
 - fermer d'autres programmes, puis relancer ;
 - lancer quand même avec `--skip-memory-check`, en sachant que le système peut échanger sur le disque et se figer.
 
-`--max-memory <Go>` fixe la mémoire la plus haute que l'analyse peut prendre, en dessous de celle de la machine : par exemple `--max-memory 8` sur un portable de 16 Go laisse de la place au navigateur. La mémoire disponible est lue sous Linux, macOS et Windows ; sur un système qui ne l'indique pas, `--max-memory` est la seule borne.
+Par défaut, l'analyse prend au plus 75 % de la mémoire installée, et `--max-memory` fixe une autre borne, en Go ou en part de la mémoire installée : voir [Fils d'exécution et mémoire de l'analyse](#fils-dexécution-et-mémoire-de-lanalyse). La mémoire disponible est lue sous Linux, macOS et Windows ; sur un système qui ne l'indique pas, seul `--max-memory` en Go borne l'analyse.
+
+### Fils d'exécution et mémoire de l'analyse
+
+Par défaut, l'analyse laisse de la place sur la machine pour le reste du travail : elle tourne sur tous les cœurs sauf un, et prend au plus 75 % de la mémoire installée (12 Go d'une machine de 16 Go), moins quand il y en a moins de disponible. Chaque analyse dit ce qu'elle utilise :
+
+```text
+[codefixture-audit] Mémoire : environ 4,6 Go prévus.
+[codefixture-audit] Cette machine a 13,0 Go disponibles sur 16,0 Go.
+[codefixture-audit] Plafond : 12,0 Go (par défaut : 75 % de la mémoire installée).
+[codefixture-audit] Fils d'exécution : 7 sur 8 cœurs (par défaut : tous les cœurs sauf un).
+```
+
+Deux options le changent, chacune en nombre ou en part de la machine :
+
+| Option | Effet |
+|---|---|
+| `--cpu 4`, `--cpu 50%` | au plus 4 fils d'exécution, ou la moitié des cœurs (arrondi à l'inférieur, au moins 1). Moins de fils d'exécution font aussi tourner moins de règles de suivi de données à la fois, et prennent donc un peu moins de mémoire. `--cpu 100%` prend tous les cœurs ; un nombre supérieur aux cœurs est ramené à eux. |
+| `--max-memory 8`, `--max-memory 50%` | au plus 8 Go (avec un point pour les décimales : `7.5`), ou la moitié de la mémoire installée. Au-delà, l'analyse fait d'abord tourner moins de règles de suivi de données à la fois, puis s'arrête avant de lire les fichiers (voir [Mémoire d'un gros projet](#mémoire-dun-gros-projet)). `--max-memory 100%` lève le plafond par défaut. |
+
+Moins de fils d'exécution rendent l'analyse plus longue, jamais différente : les résultats sont les mêmes. Mesuré sur le projet de référence `Java` (20 680 fichiers, une machine de 8 cœurs, 2026-11-24) : 101 s avec les 7 fils d'exécution par défaut, 139 s avec `--cpu 50%`, 353 s avec `--cpu 1` ; un pic de mémoire de 4,6, 4,2 et 4,1 Go ; les mêmes 14 627 résultats.
+
+Une valeur que le moteur ne comprend pas (`0`, `150%`, `7,5`, `8GB`) l'arrête aussitôt, avec le code de sortie 2 et un message qui nomme l'option et la valeur.
+
+Pour fixer les limites une fois pour toutes les analyses d'une machine, utilisez les variables d'environnement `CODEFIXTURE_AUDIT_CPU` et `CODEFIXTURE_AUDIT_MAX_MEMORY`, avec les mêmes valeurs que les options. Une option sur la ligne de commande l'emporte sur sa variable, et la console dit d'où vient chaque limite (`fixé par --cpu 2`, `fixé par la variable d'environnement CODEFIXTURE_AUDIT_CPU=50%`, `par défaut`). Le `audit.config.json` du projet ne contient aucune limite : il appartient au projet, les limites à la machine.
+
+- macOS (zsh, le shell par défaut) : `echo 'export CODEFIXTURE_AUDIT_CPU=50%' >> ~/.zshrc`, puis ouvrez un nouveau terminal.
+- Linux (bash) : `echo 'export CODEFIXTURE_AUDIT_CPU=50%' >> ~/.bashrc`, puis ouvrez un nouveau terminal ; `~/.profile` la fixe plutôt pour toutes les sessions, graphiques comprises.
+- Windows : `setx CODEFIXTURE_AUDIT_CPU 50%` dans PowerShell ou l'invite de commandes, puis ouvrez un nouveau terminal (`setx` enregistre la variable pour votre utilisateur ; le terminal où elle a été lancée garde l'ancienne valeur). Même chose par Paramètres, Système, Informations système, Paramètres avancés du système, Variables d'environnement.
+
+De même pour `CODEFIXTURE_AUDIT_MAX_MEMORY`. Pour une seule analyse : `CODEFIXTURE_AUDIT_CPU=2 ./target/release/codefixture-audit scan …` sous macOS et Linux, `$env:CODEFIXTURE_AUDIT_CPU = "2"` avant la commande dans PowerShell.
 
 ### Si l'analyse plante ou fige la machine
 

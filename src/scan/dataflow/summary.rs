@@ -524,13 +524,6 @@ pub fn route_source_params(fn_info: &FunctionInfo, source: &[u8]) -> Vec<String>
 // Function summaries — interprocedural propagation (component 2)
 // ============================================================================
 
-/// Anti-FP — source kinds that do NOT propagate through an
-/// unconditional interprocedural return. A CLI/stdin/env input
-/// propagated between calls triggers too many false sinks (e.g.
-/// `input()` → `re.search` mistaken for an LDAP sink); these sources
-/// stay detected intra-procedurally but do not cross a `return`.
-const INTERPROC_BLOCKED_RETURN_KINDS: &[&str] = &["stdin", "cli", "env"];
-
 /// The source kinds a rule accepts (`kind=` of its `source` lines),
 /// `http` when it declares none.
 pub(crate) fn rule_source_kinds(specs: &RuleSpecs) -> Vec<String> {
@@ -669,15 +662,18 @@ pub fn compute_summary_prepared(
         .map(|f| (f.rule_id.clone(), f.line, f.source_line))
         .collect();
     let ret_base = return_taint_generic(return_nodes, &base, specs, source_lines);
-    let mut uncond = ret_base.is_tainted();
+    // Every source kind crosses a `return`: `def arguments(): return
+    // sys.argv` taints its callers. Deliberate deviation from the Audit
+    // (ticket #268), whose `_INTERPROC_BLOCKED_RETURN_KINDS` kept the
+    // stdin/cli/env kinds inside the function that reads them, against
+    // false sinks such as `input()` reaching `re.search`, taken for an
+    // LDAP sink; that sink was a pattern too broad, a matter for its rule,
+    // and the block hid every helper returning `sys.argv`,
+    // `os.environ`, `input()` or `System.getenv()`.
+    let uncond = ret_base.is_tainted();
     let mut ret_kind: Option<String> = None;
     if let Taint::Tainted { source: src, .. } = &ret_base {
         ret_kind = Some(src.kind.to_string());
-    }
-    if let Some(k) = &ret_kind
-        && INTERPROC_BLOCKED_RETURN_KINDS.contains(&k.as_str())
-    {
-        uncond = false;
     }
 
     let mut return_params = std::collections::BTreeSet::new();
@@ -1060,14 +1056,15 @@ mod tests {
     }
 
     #[test]
-    fn test_compute_summary_blocks_cli_kind_from_uncond_return() {
-        // Anti-FP: an internal stdin/cli/env source does NOT make the
-        // return unconditionally tainted at the interprocedural level.
+    fn test_compute_summary_returns_a_cli_source() {
+        // Ticket #268: a stdin/cli/env source crosses the return like any
+        // other (the Audit blocked these kinds).
         let specs = specs_with(vec![SourceSpec::new("input", "cli")], vec![]);
         let (tree, src) = build("def get_input(x):\n    return input()\n");
         let fns = collect_functions(tree.root_node(), &src);
         let summary = compute_summary(&fns[0], &specs, &src, None).unwrap();
-        assert!(!summary.return_tainted_uncond);
+        assert!(summary.return_tainted_uncond);
+        assert_eq!(summary.return_kind.as_deref(), Some("cli"));
     }
 
     #[test]

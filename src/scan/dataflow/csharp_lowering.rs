@@ -64,6 +64,14 @@
 //!     `member_access_expression` wraps `name`. Treated as an
 //!     ordinary member access for taint purposes — the `?.` short-circuit
 //!     itself carries no information relevant to this engine.
+//!   - `object_creation_expression` exposes `type`/`arguments`/
+//!     `initializer` fields; the `initializer` (`{ Domain = d }`, no Java
+//!     equivalent) is an `initializer_expression` whose elements are
+//!     `assignment_expression`s (object initializer), plain expressions or
+//!     nested `initializer_expression`s (collection initializer). Its
+//!     values become arguments of the constructor call — a deviation from
+//!     the Python source, which drops them (ticket #268, see
+//!     `lower_initializer_values`).
 //!   - `cast_expression` exposes `type`/`value` fields (like Java).
 //!   - `is_expression` (`x is Foo`, the `instanceof` equivalent) exposes
 //!     `left`/`right` fields (same naming as Java's
@@ -233,7 +241,13 @@ impl<'src> CSharpLowerer<'src> {
 
         if t == "object_creation_expression" {
             let type_node = expr.child_by_field_name("type");
-            let args = self.lower_arg_list(expr.child_by_field_name("arguments"));
+            let mut args = self.lower_arg_list(expr.child_by_field_name("arguments"));
+            // `new CookieOptions { Domain = d }`: the values of the object
+            // initializer are arguments of the constructor, after its own
+            // (see `lower_initializer_values`).
+            if let Some(init) = expr.child_by_field_name("initializer") {
+                args.extend(self.lower_initializer_values(init));
+            }
             let callee = self.type_to_rhs(type_node);
             let tmp = self.fresh_temp();
             self.emit(IrStmt::Assign {
@@ -396,12 +410,20 @@ impl<'src> CSharpLowerer<'src> {
         }
 
         // `new(path, mode)`: a constructor call whose type is written on the
-        // other side of the assignment.
+        // other side of the assignment. It is named after that type when
+        // the code declares it (`target_type`), `new` otherwise.
         if t == "implicit_object_creation_expression" {
+            let callee = match self.target_type(expr) {
+                Some(type_node) => self.type_to_rhs(Some(type_node)),
+                None => Rhs::VarRef("new".to_string()),
+            };
             let mut args = Vec::new();
             for child in named_children(expr) {
                 match child.kind() {
                     "argument_list" => args.extend(self.lower_arg_list(Some(child))),
+                    "initializer_expression" => {
+                        args.extend(self.lower_initializer_values(child));
+                    }
                     _ => args.push(self.lower_expr(Some(child))),
                 }
             }
@@ -409,7 +431,7 @@ impl<'src> CSharpLowerer<'src> {
             self.emit(IrStmt::Assign {
                 lhs: Lhs::VarLhs(tmp.clone()),
                 rhs: Rhs::CallRef {
-                    callee: Box::new(Rhs::VarRef("new".to_string())),
+                    callee: Box::new(callee),
                     args,
                     kwargs: Vec::new(),
                 },
@@ -453,7 +475,7 @@ impl<'src> CSharpLowerer<'src> {
     fn lower_invocation(&mut self, expr: Node<'src>) -> Rhs {
         let function = expr.child_by_field_name("function");
         let args = self.lower_arg_list(expr.child_by_field_name("arguments"));
-        let callee = self.lower_expr(function);
+        let callee = self.lower_callee(function);
         // Call line: for a `member_access_expression` receiver,
         // prefer the line of the `.name` part (mirrors the
         // Java round-8 fix for call chains spread over
@@ -479,6 +501,51 @@ impl<'src> CSharpLowerer<'src> {
         Rhs::VarRef(tmp)
     }
 
+    /// The callee of an invocation: `new C(...).M` keeps its class
+    /// ([`Self::lower_constructor_chain`]), any other one is an expression.
+    fn lower_callee(&mut self, function: Option<Node<'src>>) -> Rhs {
+        match function {
+            Some(f) if Self::is_constructor_chain(f) => self.lower_constructor_chain(f),
+            _ => self.lower_expr(function),
+        }
+    }
+
+    /// Whether `function`, the callee of an invocation, is `new C(...).M`:
+    /// a member of an object created on the spot.
+    fn is_constructor_chain(function: Node) -> bool {
+        function.kind() == "member_access_expression"
+            && function
+                .child_by_field_name("expression")
+                .is_some_and(|o| o.kind() == "object_creation_expression")
+    }
+
+    /// `new Repo(...).Find(...)` (ticket #284), lowered as Java lowers it
+    /// (`java_lowering.rs::lower_method_invocation`): the constructor's
+    /// `CallRef` is kept as the base of the `AttrRef` instead of a
+    /// temporary, so that `transfer.rs::eval_call` reads the class `Repo`
+    /// back from it and resolves the summary of `Repo.Find`, and the C# call
+    /// graph names the call `Repo.Find` alike. The constructor's arguments
+    /// are still evaluated, through the nested `CallRef`.
+    fn lower_constructor_chain(&mut self, function: Node<'src>) -> Rhs {
+        let creation = function
+            .child_by_field_name("expression")
+            .expect("checked by is_constructor_chain");
+        let ctor_args = self.lower_arg_list(creation.child_by_field_name("arguments"));
+        let ctor_callee = self.type_to_rhs(creation.child_by_field_name("type"));
+        let attr = function
+            .child_by_field_name("name")
+            .map(|f| self.text(f))
+            .unwrap_or_else(|| "?".to_string());
+        Rhs::AttrRef {
+            base: Box::new(Rhs::CallRef {
+                callee: Box::new(ctor_callee),
+                args: ctor_args,
+                kwargs: Vec::new(),
+            }),
+            attr,
+        }
+    }
+
     /// Lowers each element of an `argument_list`, unwrapped from its
     /// `argument` node (unlike Java, see module doc).
     fn lower_arg_list(&mut self, arg_list: Option<Node<'src>>) -> Vec<Rhs> {
@@ -502,6 +569,55 @@ impl<'src> CSharpLowerer<'src> {
             Some(a) => self.lower_wrapped_argument(a),
             None => Rhs::Opaque,
         }
+    }
+
+    /// The values an object or collection initializer stores in the object
+    /// it builds, in written order, each lowered: `{ Domain = d, Path = p }`
+    /// gives `d`, `p`; `{ a, b }` gives `a`, `b`; `{ ["k"] = v }` gives the
+    /// key then `v`; a nested initializer (`Inner = { X = x }`, `{ { k, v } }`)
+    /// gives its own values. Its callers pass them as arguments of the
+    /// constructor call, after the constructor's own arguments.
+    ///
+    /// Deliberate deviation from the Audit (ticket #268):
+    /// `csharp_to_ir.py` drops the initializer of `new T(...) { ... }`, so
+    /// `new CookieOptions { Domain = Request.Query["d"] }` reached the
+    /// `new CookieOptions` sink with no argument, and an object built from
+    /// request data in its initializer carried no taint. Arguments rather
+    /// than member writes on the result: a constructor sink reads the
+    /// arguments of its call (a rule writes `arg_index=all` to read the
+    /// initializer values, which follow the constructor's own), and an
+    /// unknown constructor's result carries the taint of its arguments
+    /// either way. The member names (`Domain`) are not lowered: the former
+    /// path of `implicit_object_creation_expression` read each `Domain = d`
+    /// as an assignment to a local `Domain`, which overwrote a local of
+    /// that name.
+    fn lower_initializer_values(&mut self, init: Node<'src>) -> Vec<Rhs> {
+        let mut values = Vec::new();
+        for element in named_children(init) {
+            match element.kind() {
+                "assignment_expression" => {
+                    // `["k"] = v`: the key is part of what is stored too.
+                    if let Some(left) = element.child_by_field_name("left")
+                        && left.kind() == "element_binding_expression"
+                    {
+                        for key in named_children(left) {
+                            values.push(self.lower_wrapped_argument(key));
+                        }
+                    }
+                    match element.child_by_field_name("right") {
+                        Some(right) if right.kind() == "initializer_expression" => {
+                            values.extend(self.lower_initializer_values(right));
+                        }
+                        right => values.push(self.lower_expr(right)),
+                    }
+                }
+                "initializer_expression" => {
+                    values.extend(self.lower_initializer_values(element));
+                }
+                _ => values.push(self.lower_expr(Some(element))),
+            }
+        }
+        values
     }
 
     /// Every expression under `node`, lowered: the parts of a value built
@@ -567,7 +683,13 @@ impl<'src> CSharpLowerer<'src> {
             return Rhs::VarRef("?".to_string());
         };
         let text = self.text(type_node);
-        let before_generic = text.split('<').next().unwrap_or(&text).trim();
+        // A nullable type (`CookieOptions?`) names its underlying type.
+        let before_generic = text
+            .split('<')
+            .next()
+            .unwrap_or(&text)
+            .trim()
+            .trim_end_matches('?');
         let mut parts = before_generic.split('.');
         let Some(first) = parts.next() else {
             return Rhs::VarRef("?".to_string());
@@ -887,7 +1009,7 @@ impl<'src> CSharpLowerer<'src> {
     /// call, e.g. `if (IsValid(input))`).
     fn lower_call_as_statement(&mut self, call_node: Node<'src>) {
         let function = call_node.child_by_field_name("function");
-        let callee = self.lower_expr(function);
+        let callee = self.lower_callee(function);
         let args = self.lower_arg_list(call_node.child_by_field_name("arguments"));
         self.emit(IrStmt::Call {
             callee,
@@ -968,6 +1090,286 @@ fn parse_csharp_numeric(text: &str) -> ConstValue {
         Ok(v) => ConstValue::Int(v),
         Err(_) => ConstValue::Str(text.to_string()),
     }
+}
+
+// ============================================================================
+// Target type of `new()` (ticket #268)
+// ============================================================================
+
+/// Methods, constructors and local functions: the nodes whose parameters
+/// and locals a name inside them can refer to.
+const CALLABLE_KINDS: [&str; 3] = [
+    "method_declaration",
+    "constructor_declaration",
+    "local_function_statement",
+];
+
+/// Type declarations whose members (fields, properties, methods) a name
+/// inside them can refer to.
+const TYPE_DECLARATION_KINDS: [&str; 4] = [
+    "class_declaration",
+    "struct_declaration",
+    "record_declaration",
+    "interface_declaration",
+];
+
+impl<'src> CSharpLowerer<'src> {
+    /// The type a target-typed `new(...)` / `new() { ... }` builds, read
+    /// from where the expression is written, or `None` when the code does
+    /// not say it:
+    ///   - the initializer of a declaration, `CookieOptions o = new() {..}`
+    ///     (a local or a field; `var` cannot hold a `new()`);
+    ///   - the initializer of a property, `CookieOptions O { get; } = new()`;
+    ///   - the right side of an assignment to a name whose declaration the
+    ///     code holds: a local, a parameter, a field or a property of the
+    ///     enclosing type (`o = new() {..}`, `this.o = new() {..}`);
+    ///   - an argument of a method of the enclosing type, by position or by
+    ///     name, `Remember(new() { Domain = d })`;
+    ///   - the value returned by a method or a local function.
+    ///
+    /// An argument of a library method (`Response.Cookies.Append("k", v,
+    /// new() { .. })`) has no declaration in the code: its type stays
+    /// unknown and the call keeps the name `new`. The lookup is syntactic
+    /// (no overload resolution beyond the argument count): the first
+    /// method of that name and arity wins.
+    ///
+    /// Deliberate deviation from the Audit (ticket #268): `csharp_to_ir.py`
+    /// predates target-typed `new` (C# 9) and names every such call `new`,
+    /// so a constructor sink (`new\s+CookieOptions\b`) never met it.
+    fn target_type(&self, expr: Node<'src>) -> Option<Node<'src>> {
+        let parent = expr.parent()?;
+        match parent.kind() {
+            // `(new() { .. })`: the type of the enclosing expression.
+            "parenthesized_expression" => self.target_type(parent),
+            "variable_declarator" => {
+                let declaration = parent.parent()?;
+                explicit_type(declaration.child_by_field_name("type")?)
+            }
+            "property_declaration" => explicit_type(parent.child_by_field_name("type")?),
+            "assignment_expression" => {
+                let right = parent.child_by_field_name("right")?;
+                if right.id() != expr.id() {
+                    return None;
+                }
+                let left = parent.child_by_field_name("left")?;
+                let name = match left.kind() {
+                    "identifier" => self.text(left),
+                    "member_access_expression"
+                        if left
+                            .child_by_field_name("expression")
+                            .is_some_and(|e| e.kind() == "this") =>
+                    {
+                        self.text(left.child_by_field_name("name")?)
+                    }
+                    _ => return None,
+                };
+                self.declared_type_of(&name, parent)
+            }
+            "argument" => self.parameter_type(parent),
+            "return_statement" => self.return_type(parent),
+            "arrow_expression_clause" => {
+                let owner = parent.parent()?;
+                match owner.kind() {
+                    "method_declaration" => explicit_type(owner.child_by_field_name("returns")?),
+                    "local_function_statement" | "property_declaration" => {
+                        explicit_type(owner.child_by_field_name("type")?)
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// The declared type of `name` as seen from `from`: a local declared in
+    /// the enclosing method (before `from`), one of its parameters, then a
+    /// field or a property of the enclosing type.
+    fn declared_type_of(&self, name: &str, from: Node<'src>) -> Option<Node<'src>> {
+        let mut node = from.parent();
+        while let Some(current) = node {
+            if CALLABLE_KINDS.contains(&current.kind()) {
+                if let Some(t) = self.local_type(current, name, from.start_byte()) {
+                    return Some(t);
+                }
+                if let Some(params) = current.child_by_field_name("parameters")
+                    && let Some(t) = named_children(params)
+                        .filter(|p| p.kind() == "parameter")
+                        .find(|p| {
+                            p.child_by_field_name("name")
+                                .is_some_and(|n| self.text(n) == name)
+                        })
+                        .and_then(|p| p.child_by_field_name("type"))
+                        .and_then(explicit_type)
+                {
+                    return Some(t);
+                }
+            }
+            if TYPE_DECLARATION_KINDS.contains(&current.kind()) {
+                return self.member_type(current, name);
+            }
+            node = current.parent();
+        }
+        None
+    }
+
+    /// The type of the first local `name` declared in `callable` before the
+    /// byte `before`, searched in its whole body.
+    fn local_type(&self, callable: Node<'src>, name: &str, before: usize) -> Option<Node<'src>> {
+        let body = callable.child_by_field_name("body")?;
+        let mut stack = vec![body];
+        let mut found: Option<(usize, Node<'src>)> = None;
+        while let Some(node) = stack.pop() {
+            if node.start_byte() >= before {
+                continue;
+            }
+            // A nested local function or lambda has its own locals.
+            if node.id() != body.id()
+                && (CALLABLE_KINDS.contains(&node.kind()) || node.kind() == "lambda_expression")
+            {
+                continue;
+            }
+            if node.kind() == "variable_declaration"
+                && let Some(t) = node.child_by_field_name("type").and_then(explicit_type)
+                && named_children(node)
+                    .filter(|d| d.kind() == "variable_declarator")
+                    .any(|d| {
+                        d.child_by_field_name("name")
+                            .is_some_and(|n| self.text(n) == name)
+                    })
+                && found.is_none_or(|(start, _)| node.start_byte() < start)
+            {
+                found = Some((node.start_byte(), t));
+            }
+            stack.extend(named_children(node));
+        }
+        found.map(|(_, t)| t)
+    }
+
+    /// The type of the field or property `name` of the type declaration
+    /// `owner`.
+    fn member_type(&self, owner: Node<'src>, name: &str) -> Option<Node<'src>> {
+        let body = owner.child_by_field_name("body")?;
+        for member in named_children(body) {
+            match member.kind() {
+                "field_declaration" => {
+                    let Some(declaration) =
+                        named_children(member).find(|c| c.kind() == "variable_declaration")
+                    else {
+                        continue;
+                    };
+                    let declares = named_children(declaration)
+                        .filter(|d| d.kind() == "variable_declarator")
+                        .any(|d| {
+                            d.child_by_field_name("name")
+                                .is_some_and(|n| self.text(n) == name)
+                        });
+                    if declares {
+                        return declaration
+                            .child_by_field_name("type")
+                            .and_then(explicit_type);
+                    }
+                }
+                "property_declaration"
+                    if member
+                        .child_by_field_name("name")
+                        .is_some_and(|n| self.text(n) == name) =>
+                {
+                    return member.child_by_field_name("type").and_then(explicit_type);
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// The parameter type an `argument` is passed to, when the call names a
+    /// method of the enclosing type (`Remember(...)`, `this.Remember(...)`)
+    /// declared with that many parameters: by the argument's name when it
+    /// has one (`options: new() {..}`), by its position otherwise.
+    fn parameter_type(&self, argument: Node<'src>) -> Option<Node<'src>> {
+        let list = argument.parent()?;
+        let call = list.parent()?;
+        if call.kind() != "invocation_expression" {
+            return None;
+        }
+        let function = call.child_by_field_name("function")?;
+        let method_name = match function.kind() {
+            "identifier" => self.text(function),
+            "member_access_expression"
+                if function
+                    .child_by_field_name("expression")
+                    .is_some_and(|e| e.kind() == "this") =>
+            {
+                self.text(function.child_by_field_name("name")?)
+            }
+            _ => return None,
+        };
+        let arguments: Vec<Node<'src>> = named_children(list)
+            .filter(|a| a.kind() == "argument")
+            .collect();
+        let position = arguments.iter().position(|a| a.id() == argument.id())?;
+        let argument_name = argument.child_by_field_name("name").map(|n| self.text(n));
+        let mut node = call.parent();
+        while let Some(current) = node {
+            if TYPE_DECLARATION_KINDS.contains(&current.kind()) {
+                let body = current.child_by_field_name("body")?;
+                for method in named_children(body).filter(|m| m.kind() == "method_declaration") {
+                    if !method
+                        .child_by_field_name("name")
+                        .is_some_and(|n| self.text(n) == method_name)
+                    {
+                        continue;
+                    }
+                    let Some(params) = method.child_by_field_name("parameters") else {
+                        continue;
+                    };
+                    let params: Vec<Node<'src>> = named_children(params)
+                        .filter(|p| p.kind() == "parameter")
+                        .collect();
+                    if params.len() != arguments.len() {
+                        continue;
+                    }
+                    let param = match &argument_name {
+                        Some(wanted) => params.iter().copied().find(|p| {
+                            p.child_by_field_name("name")
+                                .is_some_and(|n| &self.text(n) == wanted)
+                        }),
+                        None => params.get(position).copied(),
+                    }?;
+                    return param.child_by_field_name("type").and_then(explicit_type);
+                }
+                return None;
+            }
+            node = current.parent();
+        }
+        None
+    }
+
+    /// The return type of the method or local function a `return` leaves;
+    /// `None` inside a lambda, whose type the code does not write.
+    fn return_type(&self, statement: Node<'src>) -> Option<Node<'src>> {
+        let mut node = statement.parent();
+        while let Some(current) = node {
+            match current.kind() {
+                "method_declaration" => {
+                    return current
+                        .child_by_field_name("returns")
+                        .and_then(explicit_type);
+                }
+                "local_function_statement" => {
+                    return current.child_by_field_name("type").and_then(explicit_type);
+                }
+                "lambda_expression" | "anonymous_method_expression" => return None,
+                _ => node = current.parent(),
+            }
+        }
+        None
+    }
+}
+
+/// `type_node` unless it is `var` (`implicit_type`), which names no type.
+fn explicit_type(type_node: Node<'_>) -> Option<Node<'_>> {
+    (type_node.kind() != "implicit_type").then_some(type_node)
 }
 
 // ============================================================================
@@ -1560,6 +1962,178 @@ mod tests {
         assert_eq!(*args, vec![var("input")]);
     }
 
+    /// The callee and the arguments of the first call built in `ir`.
+    fn first_creation(ir: &[IrStmt]) -> (Rhs, Vec<Rhs>) {
+        ir.iter()
+            .find_map(|s| match s {
+                IrStmt::Assign {
+                    rhs: Rhs::CallRef { callee, args, .. },
+                    ..
+                } => Some(((**callee).clone(), args.clone())),
+                _ => None,
+            })
+            .expect("an object creation")
+    }
+
+    /// Whether `ir` assigns a local of that name.
+    fn assigns_local(ir: &[IrStmt], name: &str) -> bool {
+        ir.iter().any(|s| {
+            matches!(
+                s,
+                IrStmt::Assign { lhs: Lhs::VarLhs(local), .. } if local == name
+            )
+        })
+    }
+
+    #[test]
+    fn test_object_initializer_values_are_constructor_arguments() {
+        // Ticket #268: the property values follow the constructor's own
+        // arguments, and the member names are not assigned as locals.
+        let ir = lower("var o = new CookieOptions(n) { Domain = input, HttpOnly = true };");
+        let (callee, args) = first_creation(&ir);
+        assert_eq!(callee, var("CookieOptions"));
+        assert_eq!(
+            args,
+            vec![var("n"), var("input"), Rhs::Const(ConstValue::Bool(true))]
+        );
+        assert!(!assigns_local(&ir, "Domain"), "{ir:?}");
+        assert!(!assigns_local(&ir, "HttpOnly"), "{ir:?}");
+    }
+
+    #[test]
+    fn test_object_initializer_without_parentheses_over_several_lines() {
+        let ir =
+            lower("var o = new CookieOptions\n{\n    HttpOnly = true,\n    Domain = input\n};");
+        let (callee, args) = first_creation(&ir);
+        assert_eq!(callee, var("CookieOptions"));
+        assert_eq!(args, vec![Rhs::Const(ConstValue::Bool(true)), var("input")]);
+        // The call is on the line of `new`.
+        let line = ir.iter().find_map(|s| match s {
+            IrStmt::Assign {
+                rhs: Rhs::CallRef { .. },
+                lineno,
+                ..
+            } => Some(*lineno),
+            _ => None,
+        });
+        assert_eq!(line, Some(1));
+    }
+
+    #[test]
+    fn test_collection_and_nested_initializer_values() {
+        let ir =
+            lower("var d = new Dictionary<string, string> { [\"k\"] = input, { \"a\", \"b\" } };");
+        let (callee, args) = first_creation(&ir);
+        assert_eq!(callee, var("Dictionary"));
+        assert_eq!(
+            args,
+            vec![
+                Rhs::Const(ConstValue::Str("k".to_string())),
+                var("input"),
+                Rhs::Const(ConstValue::Str("a".to_string())),
+                Rhs::Const(ConstValue::Str("b".to_string())),
+            ]
+        );
+        let ir = lower("var p = new Process { StartInfo = { FileName = input } };");
+        let (_, args) = first_creation(&ir);
+        assert_eq!(args, vec![var("input")]);
+        assert!(!assigns_local(&ir, "FileName"), "{ir:?}");
+    }
+
+    #[test]
+    fn test_implicit_object_creation_initializer_values() {
+        let ir = lower("CookieOptions o = new() { Domain = input };");
+        let (callee, args) = first_creation(&ir);
+        assert_eq!(callee, var("CookieOptions"));
+        assert_eq!(args, vec![var("input")]);
+        assert!(!assigns_local(&ir, "Domain"), "{ir:?}");
+    }
+
+    /// The callee of every target-typed `new(...)` of the class `src`, in
+    /// source order.
+    fn target_typed_callees(src: &str) -> Vec<Rhs> {
+        let tree = parse_csharp(src);
+        assert!(
+            !tree.root_node().has_error(),
+            "syntaxe C# invalide : {src:?}"
+        );
+        let mut nodes = Vec::new();
+        let mut stack = vec![tree.root_node()];
+        while let Some(node) = stack.pop() {
+            if node.kind() == "implicit_object_creation_expression" {
+                nodes.push(node);
+            }
+            let mut w = node.walk();
+            let children: Vec<Node> = node.children(&mut w).collect();
+            stack.extend(children.into_iter().rev());
+        }
+        nodes
+            .into_iter()
+            .map(|node| {
+                let mut lowerer = CSharpLowerer::new(src.as_bytes());
+                lowerer.lower_expr(Some(node));
+                first_creation(&lowerer.output).0
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_target_typed_new_takes_the_declared_type() {
+        // Ticket #268: a field, a property, a nullable local, a later
+        // assignment to a local, a parameter and a field, an argument of a
+        // method of the class (by position and by name), a returned value.
+        let src = r#"
+class C {
+    private CookieOptions field = new() { Domain = "a" };
+    public Options.Cookie Prop { get; set; } = new();
+    CookieOptions Make() { return new() { Domain = "b" }; }
+    CookieOptions Arrow() => new();
+    void Keep(string key, CookieOptions options) { }
+    void T(HttpOptions p) {
+        CookieOptions? local = new();
+        CookieOptions later;
+        later = new() { Domain = "c" };
+        p = new();
+        this.field = new();
+        Keep("k", new());
+        Keep(options: new(), key: "k");
+    }
+}"#;
+        assert_eq!(
+            target_typed_callees(src),
+            vec![
+                var("CookieOptions"),
+                attr(var("Options"), "Cookie"),
+                var("CookieOptions"),
+                var("CookieOptions"),
+                var("CookieOptions"),
+                var("CookieOptions"),
+                var("HttpOptions"),
+                var("CookieOptions"),
+                var("CookieOptions"),
+                var("CookieOptions"),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_target_typed_new_without_a_declared_type_stays_new() {
+        // An argument of a library method, a lambda's return value, an
+        // assignment to a name the code does not declare.
+        let src = r#"
+class C {
+    void T() {
+        Response.Cookies.Append("k", "v", new() { Domain = "d" });
+        Func<CookieOptions> f = () => { return new(); };
+        unknown = new();
+    }
+}"#;
+        assert_eq!(
+            target_typed_callees(src),
+            vec![var("new"), var("new"), var("new")]
+        );
+    }
+
     #[test]
     fn test_qualified_object_creation() {
         let ir = lower("var o = new System.IO.FileStream(input);");
@@ -1597,6 +2171,38 @@ mod tests {
         let (callee, args) = call.unwrap();
         assert_eq!(**callee, attr(var("obj"), "Method"));
         assert_eq!(*args, vec![var("a"), var("b")]);
+    }
+
+    /// Ticket #284: `new Repo(x).Find(id)` keeps the constructor call as
+    /// the receiver (as Java does), so the class `Repo` can be read back;
+    /// no temporary stands for the created object.
+    #[test]
+    fn test_constructor_chain_keeps_the_class() {
+        let ir = lower("var r = new Repo(x).Find(id);");
+        let a = assigns(&ir);
+        let call = a.iter().find_map(|s| {
+            let IrStmt::Assign { rhs, .. } = s else {
+                return None;
+            };
+            if let Rhs::CallRef { callee, args, .. } = rhs {
+                Some((callee, args))
+            } else {
+                None
+            }
+        });
+        let (callee, args) = call.unwrap();
+        assert_eq!(
+            **callee,
+            Rhs::AttrRef {
+                base: Box::new(Rhs::CallRef {
+                    callee: Box::new(var("Repo")),
+                    args: vec![var("x")],
+                    kwargs: Vec::new(),
+                }),
+                attr: "Find".to_string(),
+            }
+        );
+        assert_eq!(*args, vec![var("id")]);
     }
 
     // ---------------------------------------------- conditional access (?.)

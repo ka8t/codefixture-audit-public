@@ -403,7 +403,37 @@ When memory is short, the analysis first runs fewer data flow rules at a time: i
 - close other programs, then run it again;
 - run it anyway with `--skip-memory-check`, knowing that the system may swap and freeze.
 
-`--max-memory <GB>` sets the most memory the analysis may take, below what the machine has: for example `--max-memory 8` on a 16 GB laptop leaves room for a browser. The available memory is read on Linux, macOS and Windows; on a system that does not tell it, `--max-memory` is the only bound.
+By default the analysis takes at most 75% of the installed memory, and `--max-memory` sets another bound, in GB or as a share of the installed memory: see [Threads and memory of the analysis](#threads-and-memory-of-the-analysis). The available memory is read on Linux, macOS and Windows; on a system that does not tell it, only `--max-memory` in GB bounds the analysis.
+
+### Threads and memory of the analysis
+
+By default the analysis leaves room on the machine for other work: it runs on every core but one, and takes at most 75% of the installed memory (12 GB of a 16 GB machine), less when less is available. Every analysis says what it uses:
+
+```text
+[codefixture-audit] Memory: about 4.6 GB expected.
+[codefixture-audit] This machine has 13.0 GB available of 16.0 GB.
+[codefixture-audit] Limit: 12.0 GB (default: 75% of the installed memory).
+[codefixture-audit] Threads: 7 of 8 cores (default: every core but one).
+```
+
+Two options change it, each a count or a share of the machine:
+
+| Option | Effect |
+|---|---|
+| `--cpu 4`, `--cpu 50%` | at most 4 threads, or half the cores (rounded down, at least 1). Fewer threads also run fewer data flow rules at a time, so they take a little less memory. `--cpu 100%` takes every core; a count above the cores is lowered to them. |
+| `--max-memory 8`, `--max-memory 50%` | at most 8 GB (with a dot for decimals: `7.5`), or half the installed memory. Above it, the analysis first runs fewer data flow rules at a time, then stops before reading the files (see [Memory of a large project](#memory-of-a-large-project)). `--max-memory 100%` lifts the default. |
+
+Fewer threads make the analysis longer, never different: the findings are the same. Measured on the `Java` reference project (20,680 files, a machine of 8 cores, 2026-11-24): 101 s with the default 7 threads, 139 s with `--cpu 50%`, 353 s with `--cpu 1`; a peak memory of 4.6, 4.2 and 4.1 GB; the same 14,627 findings.
+
+A value the engine does not understand (`0`, `150%`, `7,5`, `8GB`) stops it at once, with exit code 2 and a message that names the option and the value.
+
+To set the limits once for every analysis on a machine, use the environment variables `CODEFIXTURE_AUDIT_CPU` and `CODEFIXTURE_AUDIT_MAX_MEMORY`, with the same values as the options. An option on the command line wins over its variable, and the console says where each limit comes from (`set with --cpu 2`, `set with the environment variable CODEFIXTURE_AUDIT_CPU=50%`, `default`). The project's `audit.config.json` holds no limit: it belongs to the project, the limits to the machine.
+
+- macOS (zsh, the default shell): `echo 'export CODEFIXTURE_AUDIT_CPU=50%' >> ~/.zshrc`, then open a new terminal.
+- Linux (bash): `echo 'export CODEFIXTURE_AUDIT_CPU=50%' >> ~/.bashrc`, then open a new terminal; `~/.profile` instead sets it for every session, graphical ones included.
+- Windows: `setx CODEFIXTURE_AUDIT_CPU 50%` in PowerShell or the command prompt, then open a new terminal (`setx` stores the variable for your user; the terminal it ran in keeps the old value). The same through Settings, System, About, Advanced system settings, Environment Variables.
+
+The same for `CODEFIXTURE_AUDIT_MAX_MEMORY`. For one analysis only: `CODEFIXTURE_AUDIT_CPU=2 ./target/release/codefixture-audit scan …` on macOS and Linux, `$env:CODEFIXTURE_AUDIT_CPU = "2"` before the command in PowerShell.
 
 ### If the analysis crashes or freezes the machine
 

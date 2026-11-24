@@ -259,14 +259,24 @@ pub const BASE_BYTES: u64 = 200 * 1024 * 1024;
 /// parse trees, 2.6 GB of call graph and prepared functions, 1.1 GB of the
 /// rule's summaries. Raised to 40: the `Java` reference project (81 MB of
 /// Java, 16 MB of JavaScript) peaks at 4.8 GB with 4 rules at a time, 48
-/// times its followed sources, which 32 underestimated (4.1 GB). An
-/// estimate may be above the peak, never below.
-pub const FOLLOWED_FACTOR: u64 = 40;
+/// times its followed sources, which 32 underestimated (4.1 GB). Raised to
+/// 43 with the C# call graph (ticket #284): the Juliet C# suite (173 MB of
+/// `.cs`) now peaks at 7.8 GB with one rule at a time, 43 times its
+/// sources (its prepared functions weigh more per byte of source than
+/// Java's). An estimate may be above the peak, never below.
+pub const FOLLOWED_FACTOR: u64 = 43;
 
 /// What each taint rule running at the same time as the first adds, in
-/// bytes per byte of source: the Juliet Java suite peaks at 10.1 GB with 4
-/// rules at a time against 8.0 GB with one (2026-11-23).
-pub const PER_EXTRA_RULE_FACTOR: u64 = 3;
+/// bytes per byte of source. The Juliet Java suite peaked at 10.1 GB with 4
+/// rules at a time against 8.0 GB with one (2026-11-23, factor 3); since a
+/// rule holds the per-line cache of a file only while its summaries are
+/// computed (ticket #284), it peaks at 9.3 GB with 4 against 8.6 with one,
+/// and the Juliet C# suite at 8.3 GB against 7.8: lowered to 1. Checked
+/// again at the end of ticket #284 (4 rules at a time, estimate against
+/// peak): Juliet C# 8.55 against 8.34 GB, Juliet Java 12.4 against 9.1,
+/// the `Java` project 4.9 against 4.5. A parallel resolution of each
+/// rule's summaries was left out because it went above two of them.
+pub const PER_EXTRA_RULE_FACTOR: u64 = 1;
 
 /// Bytes of memory per byte of source of a language whose data flow is not
 /// followed (no taint rule, or no taint pass: HTML, YAML, Dockerfile): its
@@ -428,18 +438,18 @@ mod tests {
         }
     }
 
-    /// The model against its measures (2026-11-23, `peak memory
-    /// footprint`, 4 rules at a time): above each peak, never below, and
-    /// at most a third above.
+    /// The model against its measures (2026-11-23 after ticket #284,
+    /// `peak memory footprint`, 4 rules at a time): above each peak, never
+    /// below, and at most a third above.
     #[test]
     fn test_estimate_covers_the_measured_peaks() {
         for (name, followed, peak_gib) in [
-            ("juliet_java", vec![sources("java", 253, true)], 10.23),
-            ("juliet_csharp", vec![sources("csharp", 173, true)], 6.41),
+            ("juliet_java", vec![sources("java", 253, true)], 8.66),
+            ("juliet_csharp", vec![sources("csharp", 173, true)], 7.77),
             (
                 "Java",
                 vec![sources("java", 81, true), sources("javascript", 16, true)],
-                4.79,
+                4.21,
             ),
         ] {
             let estimate = estimate_bytes(&followed, 4) as f64 / 1_073_741_824.0;
@@ -450,7 +460,10 @@ mod tests {
         }
         let juliet = [sources("java", 253, true)];
         let one = estimate_bytes(&juliet, 1) as f64 / 1e9;
-        assert!(one >= 8.0, "one rule at a time peaks at 8.0 GB: {one}");
+        assert!(one >= 8.63, "one rule at a time peaks at 8.63 GB: {one}");
+        let juliet_csharp = [sources("csharp", 173, true)];
+        let one = estimate_bytes(&juliet_csharp, 1) as f64 / 1e9;
+        assert!(one >= 7.77, "one rule at a time peaks at 7.77 GB: {one}");
         let without_taint = estimate_bytes(&[sources("java", 253, false)], 4) as f64 / 1e9;
         assert!((1.3..2.0).contains(&without_taint), "{without_taint}");
     }

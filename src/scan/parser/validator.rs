@@ -188,13 +188,33 @@ fn validate_regex_blocks(node: &RuleNode, errors: &mut Vec<DslMessage>) {
     }
 }
 
+/// Checks the `requires` file conditions: their regexes compile, and a
+/// data-flow rule (one with a source or a sink) holds only `has` and
+/// `not_has`, the two conditions its taint pass reads (ticket #262, see
+/// `FileGate` in `orchestrator/taint/mod.rs`). Deviation from
+/// `validator.py`, which accepts the other keys on such a rule and whose
+/// taint executors then ignore them without a word.
 fn validate_file_conditions(node: &RuleNode, errors: &mut Vec<DslMessage>) {
+    let data_flow = !node.sources.is_empty() || !node.sinks.is_empty();
     for fc in &node.file_conditions {
         for p in &fc.has_patterns {
             try_compile(p, "requires has", errors);
         }
         for p in &fc.not_has_patterns {
             try_compile(p, "requires not_has", errors);
+        }
+        if data_flow {
+            let unread = [
+                ("min_lines", fc.min_lines > 0),
+                ("path_contains", !fc.path_contains.is_empty()),
+                ("not_path_contains", !fc.not_path_contains.is_empty()),
+                ("not_path_has_file", !fc.not_path_has_file.is_empty()),
+            ];
+            for (key, _) in unread.iter().filter(|(_, present)| *present) {
+                errors.push(
+                    DslMessage::new(keys::TAINT_FILE_CONDITION_UNSUPPORTED).with("key", *key),
+                );
+            }
         }
     }
 }

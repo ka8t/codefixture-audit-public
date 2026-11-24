@@ -15,11 +15,15 @@
 
 pub mod call_graph;
 pub mod cfg;
+pub mod class_call_graph;
 pub mod const_eval;
+pub mod csharp_call_graph;
 pub mod csharp_cfg;
 pub mod csharp_lowering;
+pub mod csharp_namespaces;
 pub mod csharp_summary;
 pub mod csharp_taint_scan;
+pub mod csharp_visibility;
 pub mod expr_table;
 pub mod ir;
 pub mod java_call_graph;

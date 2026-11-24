@@ -376,6 +376,20 @@ fn simple_type_name(type_node: Node, source: &[u8]) -> String {
         .to_string()
 }
 
+/// The class a `var` declarator is initialized with, when its initializer
+/// is a constructor call: `var repo = new UserRepository()` is typed
+/// `UserRepository` (ticket #284). Any other initializer (`var x = Make()`)
+/// gives `None`, and the variable keeps the type `var`, which names no
+/// class: a missed flow rather than a guessed type.
+fn created_type(declarator: Node, source: &[u8]) -> Option<String> {
+    let mut w = declarator.walk();
+    let creation = declarator
+        .named_children(&mut w)
+        .find(|c| c.kind() == "object_creation_expression")?;
+    let simple = simple_type_name(creation.child_by_field_name("type")?, source);
+    (!simple.is_empty()).then_some(simple)
+}
+
 fn collect_local_var_types(node: Node, source: &[u8], out: &mut BTreeMap<String, String>) {
     if node.kind() == "local_declaration_statement" {
         let mut w = node.walk();
@@ -393,7 +407,12 @@ fn collect_local_var_types(node: Node, source: &[u8], out: &mut BTreeMap<String,
                         continue;
                     }
                     if let Some(name_node) = declarator.child_by_field_name("name") {
-                        out.insert(text(name_node, source), simple.clone());
+                        let declared = if type_node.kind() == "implicit_type" {
+                            created_type(declarator, source).unwrap_or_else(|| simple.clone())
+                        } else {
+                            simple.clone()
+                        };
+                        out.insert(text(name_node, source), declared);
                     }
                 }
             }
@@ -821,6 +840,17 @@ mod tests {
             types.get("scr").map(String::as_str),
             Some("SeparateClassRequest")
         );
+    }
+
+    /// Ticket #284: `var` takes the class of the constructor it is
+    /// initialized with; any other initializer leaves it `var`.
+    #[test]
+    fn test_implicit_local_type_from_constructor() {
+        let src = "class Api { void M() { var repo = new App.Data.Repo<int>(); var x = Make(); } }";
+        let tree = parse(src);
+        let types = collect_csharp_local_types(tree.root_node(), src.as_bytes());
+        assert_eq!(types.get("repo").map(String::as_str), Some("Repo"));
+        assert_eq!(types.get("x").map(String::as_str), Some("var"));
     }
 
     #[test]

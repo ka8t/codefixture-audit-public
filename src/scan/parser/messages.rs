@@ -20,6 +20,8 @@ pub mod keys {
     pub const AST_PATTERN_EXPECTED: &str = "dsl.ast_pattern_expected";
     /// 'arg_index' must be a whole number of 0 or more, or 'all', found: '{value}'
     pub const BAD_ARG_INDEX: &str = "dsl.bad_arg_index";
+    /// 'arg_name' must be a keyword argument name written beside 'arg_index=<n>', found: '{value}'
+    pub const BAD_ARG_NAME: &str = "dsl.bad_arg_name";
     /// Block '{block}' not closed (missing 'end')
     pub const BLOCK_NOT_CLOSED: &str = "dsl.block_not_closed";
     /// Unknown category: '{category}'
@@ -72,6 +74,8 @@ pub mod keys {
     pub const SOURCE_KIND_UNKNOWN: &str = "dsl.source_kind_unknown";
     /// Unclosed string
     pub const STRING_NOT_CLOSED: &str = "dsl.string_not_closed";
+    /// A data-flow rule (source and sink) reads only 'has' and 'not_has' in 'requires': '{key}' is not supported there
+    pub const TAINT_FILE_CONDITION_UNSUPPORTED: &str = "dsl.taint_file_condition_unsupported";
     /// Text block not closed (missing 'end')
     pub const TEXT_BLOCK_NOT_CLOSED: &str = "dsl.text_block_not_closed";
     /// Missing text after the language code '{language}'
@@ -102,6 +106,7 @@ pub mod keys {
         AST_NEEDS_BLOCK,
         AST_PATTERN_EXPECTED,
         BAD_ARG_INDEX,
+        BAD_ARG_NAME,
         BLOCK_NOT_CLOSED,
         CATEGORY_UNKNOWN,
         CONFIDENCE_NOT_INTEGER,
@@ -128,6 +133,7 @@ pub mod keys {
         SEVERITY_UNKNOWN,
         SOURCE_KIND_UNKNOWN,
         STRING_NOT_CLOSED,
+        TAINT_FILE_CONDITION_UNSUPPORTED,
         TEXT_BLOCK_NOT_CLOSED,
         TEXT_MISSING_AFTER_LANGUAGE,
         TIER_UNKNOWN,

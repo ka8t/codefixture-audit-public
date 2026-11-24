@@ -582,8 +582,9 @@ fn format_duration(d: std::time::Duration) -> String {
 /// `scan --log-format json` (ticket #92): every console line becomes one
 /// JSON object instead of `[codefixture-audit] …` text. Process-wide because
 /// the console helpers below are free functions called from everywhere
-/// (and from a plain `fn` callback, `print_phase_progress`); set once at
-/// the start of `run_scan_command`, before the first message.
+/// (and from a plain `fn` callback, `print_phase_progress`); set before
+/// the scan's resource limits are resolved (`dispatch`, ticket #281), and
+/// again at the start of `run_scan_command`, before the first message.
 static JSON_LOGS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Level of a console message, as written in JSON log lines.
@@ -1385,12 +1386,24 @@ enum Command {
         /// freeze).
         #[arg(long)]
         skip_memory_check: bool,
-        /// The most memory, in GB, the analysis may take: it stops before
-        /// reading the files when it is expected to take more (it also
-        /// stops when the machine has less available). Leaves room for
-        /// other programs.
-        #[arg(long, value_name = "GB")]
-        max_memory: Option<f64>,
+        /// The most memory the analysis may take, in GB (`8`, `7.5`) or as
+        /// a share of the installed memory (`50%`): it first runs fewer
+        /// data flow rules at a time, then stops before reading the files
+        /// when it is still expected to take more (it also stops when the
+        /// machine has less available). Default: the environment variable
+        /// CODEFIXTURE_AUDIT_MAX_MEMORY, else 75% of the installed memory;
+        /// `100%` lifts the default.
+        // Ticket #281: a text, parsed by `scan::resources`, so that an
+        // invalid value gets the translated error that names it.
+        #[arg(long, value_name = "GB|N%")]
+        max_memory: Option<String>,
+        // Ticket #281. The `///` text below is the `--help` line.
+        /// The most threads the analysis runs, as a count (`4`) or a share
+        /// of the cores (`50%`); fewer threads also run fewer data flow
+        /// rules at a time. Default: the environment variable
+        /// CODEFIXTURE_AUDIT_CPU, else every core but one.
+        #[arg(long, value_name = "N|N%")]
+        cpu: Option<String>,
         // Ticket #282. The `///` text below is the `--help` line. `=` is
         // required for the file (`--debug-log=scan.log`): with an optional
         // value, `--debug-log <project>` would take the project for the
@@ -1535,37 +1548,141 @@ fn dispatch(command: Command) -> ExitCode {
             custom_rules_dir,
             skip_memory_check,
             max_memory,
+            cpu,
             debug_log,
-        } => run_scan_command(ScanArgs {
-            path,
-            rules,
-            format,
-            lang,
-            no_cache,
-            exclude,
-            quick,
-            only_category,
-            sbom,
-            baseline,
-            custom_rules_dir,
-            skip_memory_check,
-            max_memory,
-            debug_log,
-        }),
+        } => {
+            // Ticket #281: the limits are resolved and the thread pool
+            // sized here, in the binary's entry point, before anything
+            // uses the pool (the debug log header reads its size). The
+            // console format must be known for an error.
+            let resources = match start_scan_resources(cpu.as_deref(), max_memory.as_deref(), &lang)
+            {
+                Ok(resources) => resources,
+                Err(code) => return code,
+            };
+            run_scan_command(ScanArgs {
+                path,
+                rules,
+                format,
+                lang,
+                no_cache,
+                exclude,
+                quick,
+                only_category,
+                sbom,
+                baseline,
+                custom_rules_dir,
+                skip_memory_check,
+                resources,
+                debug_log,
+            })
+        }
         Command::ListRules { lang, rules } => run_list_rules_command(&lang, rules),
     }
 }
 
-/// The console lines about a scan's memory (ticket #281): the estimate and
-/// what bounds it (the machine's available memory, the `--max-memory`
-/// limit), or, for a scan stopped before reading its files, which bound it
-/// passed, what it would have read, and what to do. Sizes in GB with the
-/// console language's decimal separator.
+/// Resolves the threads and memory a scan may take (ticket #281,
+/// `scan::resources`): `--cpu` and `--max-memory`, else the environment
+/// variables `CODEFIXTURE_AUDIT_CPU` and `CODEFIXTURE_AUDIT_MAX_MEMORY`,
+/// else the defaults (every core but one, 75 % of the installed memory),
+/// then sizes rayon's global pool, the one every phase of the scan runs on
+/// (discovery, phases A, B and C; the taint rules run at once are half of
+/// it). A value that cannot be applied stops the command (exit 2) with an
+/// error, in the console language, that names the option or variable and
+/// the value.
+///
+/// Called once per process, before anything uses the pool: rayon sizes its
+/// global pool on first use, and cannot resize it after.
+/// `RAYON_NUM_THREADS`, which rayon reads only for a pool it sizes itself,
+/// no longer has any effect; a warning says so when it is set.
+fn start_scan_resources(
+    cpu: Option<&str>,
+    max_memory: Option<&str>,
+    lang: &str,
+) -> Result<codefixture_audit::scan::resources::ScanResources, ExitCode> {
+    use codefixture_audit::scan::resources::{LimitErrorKind, Setting, resolve};
+    let script_locale = codefixture_audit::i18n::load_script_locale(lang);
+    let say = |key: &str| codefixture_audit::i18n::t(&script_locale, key);
+    let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+    let total = codefixture_audit::scan::memory::system_memory().map(|m| m.total);
+    let resources = match resolve(cpu, max_memory, |name| std::env::var_os(name), cores, total) {
+        Ok(resources) => resources,
+        Err(error) => {
+            let key = match (error.setting, &error.kind) {
+                (_, LimitErrorKind::PercentOfUnknownMemory) => "scan_limit_percent_unknown_memory",
+                (Setting::Cpu, LimitErrorKind::Invalid) => "scan_limit_invalid_cpu",
+                (Setting::MaxMemory, LimitErrorKind::Invalid) => "scan_limit_invalid_max_memory",
+            };
+            emit_error(&format!(
+                "[codefixture-audit] {}",
+                say(key)
+                    .replace("{name}", error.source_name())
+                    .replace("{value}", &error.input.value)
+            ));
+            return Err(ExitCode::from(2));
+        }
+    };
+    if std::env::var_os("RAYON_NUM_THREADS").is_some() {
+        emit_warning(&format!(
+            "[codefixture-audit] {}",
+            say("scan_rayon_variable_ignored")
+        ));
+    }
+    if let Err(error) = rayon::ThreadPoolBuilder::new()
+        .num_threads(resources.threads.threads)
+        .build_global()
+    {
+        emit_error(&format!(
+            "[codefixture-audit] {}",
+            say("scan_threads_pool_error")
+                .replace("{threads}", &resources.threads.threads.to_string())
+                .replace("{error}", &error.to_string())
+        ));
+        return Err(ExitCode::from(4));
+    }
+    Ok(resources)
+}
+
+/// Where a limit comes from, as the console says it: `set with --cpu 4`,
+/// `set with the environment variable CODEFIXTURE_AUDIT_CPU=4`, or the
+/// default and what it is (ticket #281).
+fn limit_origin_text(
+    setting: codefixture_audit::scan::resources::Setting,
+    origin: codefixture_audit::scan::resources::LimitOrigin,
+    input: Option<&codefixture_audit::scan::resources::LimitInput>,
+    percent: Option<u32>,
+    script_locale: &serde_json::Value,
+) -> String {
+    use codefixture_audit::scan::resources::{LimitOrigin, Setting};
+    let say = |key: &str| codefixture_audit::i18n::t(script_locale, key);
+    let given = |key: &str| {
+        let input = input.expect("a limit set by the user has its value");
+        say(key)
+            .replace("{name}", &input.display(setting))
+            .replace("{value}", &input.value)
+    };
+    match (origin, setting) {
+        (LimitOrigin::Option, _) => given("scan_limit_origin_option"),
+        (LimitOrigin::Environment, _) => given("scan_limit_origin_environment"),
+        (LimitOrigin::Default, Setting::Cpu) => say("scan_limit_origin_default_cpu"),
+        (LimitOrigin::Default, Setting::MaxMemory) => say("scan_limit_origin_default_memory")
+            .replace("{percent}", &percent.unwrap_or_default().to_string()),
+    }
+}
+
+/// The console lines about a scan's memory and threads (ticket #281): the
+/// estimate, the threads used and where their limit comes from, and what
+/// bounds the memory (the machine's available memory, the limit and where
+/// it comes from), or, for a scan stopped before reading its files, which
+/// bound it passed, what it would have read, and what to do. Sizes in GB
+/// with the console language's decimal separator.
 fn memory_lines(
     memory: &codefixture_audit::scan::memory::MemoryEstimate,
+    resources: &codefixture_audit::scan::resources::ScanResources,
     stopped: bool,
     script_locale: &serde_json::Value,
 ) -> Vec<String> {
+    use codefixture_audit::scan::resources::Setting;
     let say = |key: &str| codefixture_audit::i18n::t(script_locale, key);
     let separator = say("decimal_separator");
     let decimal = |value: f64, digits: usize| format!("{value:.digits$}").replace('.', &separator);
@@ -1576,9 +1693,48 @@ fn memory_lines(
             .replace("{available}", &gb(system.available))
             .replace("{total}", &gb(system.total))
     });
-    let limit = memory
-        .limit
-        .map(|limit| say("scan_memory_limit").replace("{limit}", &gb(limit)));
+    let memory_origin = limit_origin_text(
+        Setting::MaxMemory,
+        resources.memory.origin,
+        resources.memory.input.as_ref(),
+        resources.memory.percent,
+        script_locale,
+    );
+    let limit = memory.limit.map(|limit| {
+        say("scan_memory_limit")
+            .replace("{limit}", &gb(limit))
+            .replace("{origin}", &memory_origin)
+    });
+    let threads = &resources.threads;
+    let mut threads_lines = vec![
+        say("scan_threads")
+            .replace("{threads}", &threads.threads.to_string())
+            .replace("{cores}", &threads.cores.to_string())
+            .replace(
+                "{origin}",
+                &limit_origin_text(
+                    Setting::Cpu,
+                    threads.origin,
+                    threads.input.as_ref(),
+                    None,
+                    script_locale,
+                ),
+            ),
+    ];
+    if threads.capped_at_cores {
+        threads_lines.push(
+            say("scan_threads_capped")
+                .replace("{cores}", &threads.cores.to_string())
+                .replace(
+                    "{name}",
+                    &threads
+                        .input
+                        .as_ref()
+                        .map(|input| input.display(Setting::Cpu))
+                        .unwrap_or_default(),
+                ),
+        );
+    }
     // The limit stops the scan when it is the smaller bound.
     let by_limit = memory
         .limit
@@ -1589,6 +1745,7 @@ fn memory_lines(
             say("scan_memory_stop_limit")
                 .replace("{estimate}", &estimate)
                 .replace("{limit}", &gb(memory.limit.unwrap_or_default()))
+                .replace("{origin}", &memory_origin)
         } else {
             say("scan_memory_stop").replace("{estimate}", &estimate)
         });
@@ -1609,6 +1766,9 @@ fn memory_lines(
             .collect();
         lines.push(say("scan_memory_sources").replace("{sources}", &sources.join(", ")));
         lines.push(say("scan_memory_stop_hint"));
+        if by_limit {
+            lines.push(say("scan_memory_stop_limit_hint"));
+        }
         return lines;
     }
     lines.push(say("scan_memory_estimate").replace("{estimate}", &estimate));
@@ -1618,6 +1778,8 @@ fn memory_lines(
         None => {}
     }
     lines.extend(limit);
+    // The threads before the rules at a time, which are half of them.
+    lines.extend(threads_lines);
     if memory.rules_at_once < memory.max_rules_at_once {
         lines.push(
             say("scan_memory_fewer_rules")
@@ -1793,12 +1955,14 @@ fn write_sbom(
 }
 
 /// The first lines of a debug log (ticket #282): the build, the command
-/// as typed, the system, its threads and memory, the project and its
+/// as typed, the system, its threads and memory, the thread and memory
+/// limits applied and where each comes from (ticket #281), the project and its
 /// `audit.config.json`, and the settings of the analysis threads. The
 /// scan's own settings follow in `run_scan` (`scan_config` line).
-fn log_scan_header(project: &Path) {
+fn log_scan_header(project: &Path, resources: &codefixture_audit::scan::resources::ScanResources) {
     use codefixture_audit::debug_log;
     use codefixture_audit::scan::debug_log::mebibytes;
+    use codefixture_audit::scan::resources::{CPU_VARIABLE, MAX_MEMORY_VARIABLE};
     debug_log!(
         "header",
         "build version={:?} os={} arch={} family={}",
@@ -1823,6 +1987,26 @@ fn log_scan_header(project: &Path) {
         std::env::var("RAYON_NUM_THREADS").ok(),
         mebibytes(system.map(|s| s.total)),
         mebibytes(system.map(|s| s.available))
+    );
+    // Ticket #281: the limits applied, where each comes from, and both
+    // variables as the process sees them (one may be set and overridden
+    // by its option).
+    debug_log!(
+        "header",
+        "limits threads={} cores={} threads_origin={:?} threads_input={:?} threads_capped_at_cores={} \
+         max_memory={} max_memory_origin={:?} max_memory_input={:?} max_memory_percent={:?} \
+         {CPU_VARIABLE}={:?} {MAX_MEMORY_VARIABLE}={:?}",
+        resources.threads.threads,
+        resources.threads.cores,
+        resources.threads.origin,
+        resources.threads.input.as_ref().map(|i| &i.value),
+        resources.threads.capped_at_cores,
+        mebibytes(resources.memory.bytes),
+        resources.memory.origin,
+        resources.memory.input.as_ref().map(|i| &i.value),
+        resources.memory.percent,
+        std::env::var_os(CPU_VARIABLE),
+        std::env::var_os(MAX_MEMORY_VARIABLE)
     );
     let config_path = project.join("audit.config.json");
     match std::fs::read_to_string(&config_path) {
@@ -1858,7 +2042,10 @@ struct ScanArgs {
     baseline: Option<PathBuf>,
     custom_rules_dir: Option<PathBuf>,
     skip_memory_check: bool,
-    max_memory: Option<f64>,
+    /// The threads and memory the scan may take (`--cpu`, `--max-memory`,
+    /// their environment variables or the defaults), resolved by
+    /// [`start_scan_resources`], which also sized the thread pool.
+    resources: codefixture_audit::scan::resources::ScanResources,
     /// `--debug-log`: `Some("")` for the default file, `None` when off.
     debug_log: Option<String>,
 }
@@ -1877,7 +2064,7 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
         baseline,
         custom_rules_dir,
         skip_memory_check,
-        max_memory,
+        resources,
         debug_log,
     } = args;
     // The shared binary has none of these options: their defaults.
@@ -1987,7 +2174,7 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
             ));
             return ExitCode::from(2);
         }
-        log_scan_header(&path);
+        log_scan_header(&path, &resources);
         emit_result(&format!(
             "[codefixture-audit] {}",
             codefixture_audit::i18n::t(&script_locale, "scan_debug_log")
@@ -2295,9 +2482,7 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
         },
         custom_rules_dir,
         memory_check: !skip_memory_check,
-        memory_limit: max_memory
-            .filter(|gb| *gb > 0.0)
-            .map(|gb| (gb * 1_073_741_824.0) as u64),
+        memory_limit: resources.memory.bytes,
         script_locale: Some(script_locale.clone()),
         brand_prefix: effective_prefix(&brand),
         // Every file is discovered, so undeclared languages are named.
@@ -2372,7 +2557,12 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
     // Ticket #281: the memory the scan was expected to take, on every
     // scan; a scan that did not fit stopped before reading the files.
     if let Some(memory) = &report.memory {
-        let lines = memory_lines(memory, report.stopped_for_memory, &script_locale);
+        let lines = memory_lines(
+            memory,
+            &resources,
+            report.stopped_for_memory,
+            &script_locale,
+        );
         if report.stopped_for_memory {
             for line in &lines {
                 emit_error(line);

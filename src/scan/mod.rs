@@ -11,6 +11,7 @@ pub mod memory;
 pub mod minified;
 pub mod orchestrator;
 pub mod parser;
+pub mod resources;
 pub mod saved_page;
 pub mod scan_cache;
 pub mod unchanged;

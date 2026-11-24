@@ -19,14 +19,14 @@
 //!
 //! **Two calibration pitfalls found while writing the tests below,
 //! specific to PHP, not to this module**:
-//!   - `$_GET['q']` is a `SubscriptRef` (key access) — `eval_rhs`
-//!     (`transfer.rs`) does NOT test `source` patterns against the
-//!     base of a CONSTANT key access (§9.bis): only the hybrid
-//!     raw-line matching (§10bis, `raw_regex`) detects this pattern.
-//!     A real `.sca` rule loaded via `rule_loader::rule_json_to_specs`
-//!     always populates `raw_regex` automatically — only
-//!     `SourceSpec::new()` alone (low-level construction, unit tests)
-//!     does not.
+//!   - `$_GET['q']` is a `SubscriptRef` (key access). Since ticket #271,
+//!     `eval_rhs` (`transfer.rs`) tests the `source` patterns against
+//!     the NAME of the base of a constant key access (`$_GET`), and
+//!     `rule_loader` turns the catalog's `\$_GET\[` into that name
+//!     (`$_GET`, a `$` read as a literal). Before, only the hybrid
+//!     raw-line matching (§10bis, `raw_regex`) detected this pattern,
+//!     and a source on a line of its own (inside a multi-line array)
+//!     was lost.
 //!   - `resolve_spec` (`transfer.rs`) checks `sources` BEFORE
 //!     `sinks`: an IDENTICAL glob pattern used for both (e.g.
 //!     `*.query` for both a source and a sink) ALWAYS resolves the
@@ -179,19 +179,13 @@ mod tests {
             severity: "HIGH".to_string(),
             cwe: Some("CWE-89".to_string()),
             message: "test finding".to_string(),
-            // `$_GET['q']` is a subscript access (SubscriptRef), not
-            // an AttrRef — `eval_rhs` does not test `source` patterns
-            // against the base of a CONSTANT key access (§9.bis, see
-            // module doc): detection therefore goes through the
-            // hybrid raw-line matching (§10bis, `raw_regex`), exactly
-            // like a real `.sca` rule loaded via
-            // `rule_loader::rule_json_to_specs` (which always
-            // populates `raw_regex` from the same pattern) —
-            // `SourceSpec::new` alone does not, hence the explicit
-            // `.with_raw_regex` here to stay faithful to real
-            // behavior.
+            // `$_GET['q']` is a subscript access (SubscriptRef): the
+            // dotted pattern `$_GET` names its base (ticket #271), and the
+            // raw regex is the one a real `.sca` rule loaded via
+            // `rule_loader::rule_json_to_specs` populates from the same
+            // pattern (`SourceSpec::new` alone does not).
             sources: vec![
-                SourceSpec::new("\\$_GET\\[", "http")
+                SourceSpec::new("$_GET", "http")
                     .with_raw_regex(fancy_regex::Regex::new(r"\$_GET\[").unwrap()),
             ],
             // canon_callee canonicalizes EVERY method access into the
@@ -221,6 +215,16 @@ mod tests {
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].rule_id, "taint_sqli_php");
         assert_eq!(findings[0].cwe, Some("CWE-89".to_string()));
+    }
+
+    /// Ticket #271: the data flow alone, without the raw regex of the line
+    /// layer, takes `$_GET['q']` as the source `$_GET`.
+    #[test]
+    fn test_superglobal_read_is_a_source_for_the_data_flow() {
+        let mut specs = sqli_specs();
+        specs.sources = vec![SourceSpec::new("$_GET", "http")];
+        let src = "<?php\nfunction handler($db) { $q = $_GET['q']; $db->query($q); }\n";
+        assert_eq!(run(src, &specs).len(), 1);
     }
 
     #[test]

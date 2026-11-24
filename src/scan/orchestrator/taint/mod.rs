@@ -70,9 +70,8 @@ pub(super) type SeenTaint = HashSet<(String, String, usize, Option<usize>)>;
 /// A value of the type is built once per scan from the language's files
 /// (its call graph, its type tables), then queried by the shared pass for
 /// every taint rule. Each method states what the language does, even when
-/// it does nothing (C# links no files together): no default
-/// implementation, so that what sets a language apart reads in its own
-/// file.
+/// it does nothing: no default implementation, so that what sets a
+/// language apart reads in its own file.
 pub(super) trait TaintLanguage<'a>: Sync + Sized {
     /// Name of the language in the cache file (`taint-<name>.json.gz`)
     /// and in the cache statistics. Changing it discards existing caches.
@@ -472,7 +471,22 @@ fn cached_rule_runs<'a, L: TaintLanguage<'a>>(
                     })
                     .and_then(|prior| prior.findings.get(&pf.rel_path))
             };
-            let analysed = files.iter().filter(|pf| reused(pf).is_none()).count();
+            // The files the rule's `requires has` / `not_has` lines let it
+            // analyse (ticket #262): `None` when the rule has none, so a
+            // rule without them reads no file text here.
+            let gate = FileGate::of(rule_json);
+            let admitted: Option<Vec<bool>> = (!gate.is_empty()).then(|| {
+                files
+                    .par_iter()
+                    .map(|pf| gate.admits(pf.source.text()))
+                    .collect()
+            });
+            let admits = |index: usize| admitted.as_ref().is_none_or(|a| a[index]);
+            let analysed = files
+                .iter()
+                .enumerate()
+                .filter(|(index, pf)| admits(*index) && reused(pf).is_none())
+                .count();
             // The files of the rule are analysed in parallel too (ticket
             // #240): with one rule per thread only, the last rules of the
             // pass ran alone while the other cores waited (4.9 of 8 cores
@@ -483,10 +497,11 @@ fn cached_rule_runs<'a, L: TaintLanguage<'a>>(
             // nor on their order. `collect` keeps the file order.
             let per_file: Vec<TaintFindings> = files
                 .par_iter()
+                .enumerate()
                 .with_min_len(16)
                 .map_init(
                     || base_specs.clone(),
-                    |node_specs, pf| {
+                    |node_specs, (index, pf)| {
                         let step = crate::scan::debug_log::span("phase_c", || {
                             format!(
                                 "file language={} rule={:?} path={:?}",
@@ -495,6 +510,12 @@ fn cached_rule_runs<'a, L: TaintLanguage<'a>>(
                                 pf.rel_path
                             )
                         });
+                        // A file the rule's `requires` lines refuse is named
+                        // in the log as such, not left out of it.
+                        if !admits(index) {
+                            step.end_with(|| "cache=gated findings=0".to_string());
+                            return TaintFindings::new();
+                        }
                         let (findings, cache) = match reused(pf) {
                             Some(findings) => (findings.clone(), "reused"),
                             None => (language.analyse_file(pf, node_specs, &resolved), "analysed"),
@@ -565,6 +586,69 @@ fn cached_rule_runs<'a, L: TaintLanguage<'a>>(
         });
     }
     per_rule
+}
+
+/// The file conditions of a taint rule: its `requires` lines `has` (every
+/// pattern must match the file's text) and `not_has` (none may). A file
+/// they reject is not analysed by the rule, so the rule reports nothing in
+/// it; the file's functions still give their summaries to the files that
+/// call them, which the Audit also computes for every file.
+///
+/// Port of the `file_contains` pre-check of `dataflow_taint.py::
+/// run_taint_rule` (and of its Java and C# twins), which returns before
+/// the analysis of a file that fails it. Before ticket #262 the Rust taint
+/// passes ignored these lines: `llm_output_to_sink` (Python), gated on an
+/// AI client in the file, reported a `requests` response written to a
+/// database as an AI answer. The other file conditions (`min_lines`,
+/// `path_contains`, `not_path_contains`, `not_path_has_file`) are not
+/// read by the Audit's taint executors either; the validator rejects them
+/// on a rule with sources and sinks, rather than letting them be ignored
+/// (`dsl.taint_file_condition_unsupported`).
+struct FileGate {
+    has: Vec<fancy_regex::Regex>,
+    not_has: Vec<fancy_regex::Regex>,
+}
+
+impl FileGate {
+    /// The gate of a compiled rule, from its `file_contains` entry. A
+    /// pattern that does not compile is left out, as the Audit's `except
+    /// re.error: pass` does; the validator already refused such a rule at
+    /// compile time, so a catalog rule never has one.
+    fn of(rule_json: &serde_json::Value) -> Self {
+        let patterns = |key: &str| -> Vec<fancy_regex::Regex> {
+            rule_json
+                .get("file_contains")
+                .and_then(|fc| fc.get(key))
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|p| p.as_str())
+                        .filter_map(|p| fancy_regex::Regex::new(p).ok())
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        Self {
+            has: patterns("has"),
+            not_has: patterns("not_has"),
+        }
+    }
+
+    /// True when the rule has no file condition: every file is analysed.
+    fn is_empty(&self) -> bool {
+        self.has.is_empty() && self.not_has.is_empty()
+    }
+
+    /// Whether the rule analyses a file of text `text`. A regex that
+    /// fails on the text (backtracking limit) counts as not matching, as
+    /// the pattern rules read it (`file_contains::matches`).
+    fn admits(&self, text: &str) -> bool {
+        self.has.iter().all(|re| re.is_match(text).unwrap_or(false))
+            && !self
+                .not_has
+                .iter()
+                .any(|re| re.is_match(text).unwrap_or(false))
+    }
 }
 
 /// Adds the findings of one taint pass to the report, in rule then file
@@ -766,6 +850,44 @@ mod tests {
         let ignored = run_scan(&project(&root, true));
         assert_eq!(counts(&ignored), each(0), "{:?}", ignored.findings);
 
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Ticket #262: a taint rule's `requires has` / `not_has` lines choose
+    /// the files it analyses, as the Audit's taint executors do; the
+    /// same flow is reported only in the file they admit.
+    #[test]
+    fn test_requires_has_and_not_has_gate_the_files_of_a_taint_rule() {
+        let root = std::env::temp_dir().join(format!("taint_gate_{}", std::process::id()));
+        let rules_dir = root.join("rules");
+        std::fs::create_dir_all(&rules_dir).unwrap();
+        std::fs::write(
+            rules_dir.join("gated.sca"),
+            "rule gated\n  language  javascript\n  category  security\n  severity  HIGH\n  source  readInput\\s*\\(  kind=cli\n  sink    db\\.query\\s*\\(\n  requires\n    has  marker_present\n    not_has  marker_refused\n  end\nend\n",
+        )
+        .unwrap();
+        let flow = "function handler() {\n  const cmd = readInput();\n  db.query(cmd);\n}\n";
+        let files = [
+            ("admitted.js", "// marker_present\n", true),
+            ("without_marker.js", "// nothing\n", false),
+            ("refused.js", "// marker_present marker_refused\n", false),
+        ];
+        for (name, header, _) in &files {
+            std::fs::write(root.join(name), format!("{header}{flow}")).unwrap();
+        }
+        let report = run_scan(&ScanConfig {
+            root: root.clone(),
+            rules_path: rules_dir,
+            exclude_patterns: vec!["rules/".to_string()],
+            ..ScanConfig::default()
+        });
+        for (name, _, expected) in &files {
+            let found = report
+                .findings
+                .iter()
+                .any(|f| f.rule_key == "gated" && f.file == *name && f.line == 4);
+            assert_eq!(found, *expected, "{name}: {:?}", report.findings);
+        }
         std::fs::remove_dir_all(&root).ok();
     }
 

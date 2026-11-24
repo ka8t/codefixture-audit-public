@@ -288,6 +288,21 @@ fn sanitizer_compared_to_failure(line: &str, specs: &RuleSpecs, calls: &[usize])
         .any(|&paren| sanitizer_names_call(line, specs, paren))
 }
 
+/// True when an assignment writes a literal holding no data that the line
+/// layer must not mark (ticket #271): an empty associative array (`{}`,
+/// and the reset of a PHP keyed array literal lowered key by key), or a
+/// constant written to one entry (`$f['status'] = 'active'`). A constant
+/// assigned to a whole variable is still marked, as in the Audit: the layer
+/// stands in for what the lowering did not model on that line (a minified
+/// line, an expression lowered to a constant).
+fn holds_no_data(lhs: &Lhs, rhs: &Rhs) -> bool {
+    match rhs {
+        Rhs::DictRef(items) => items.is_empty(),
+        Rhs::Const(_) => matches!(lhs, Lhs::SubscriptLhs { .. }),
+        _ => false,
+    }
+}
+
 /// Auxiliary regex matching against the raw source line (§10bis).
 /// For each sink/sanitizer/source spec carrying a `raw_regex`, tests
 /// against the statement's source line; on a match, triggers the
@@ -438,18 +453,30 @@ fn aux_match_line(
     if let Some(&first_source) = facts.sources.first() {
         let src = &specs.sources[first_source];
         if let Some(key) = &lhs_key {
-            state_put(
-                state,
-                key,
-                Taint::tainted(
-                    [src.kind.clone()],
-                    SourceInfo {
-                        line: lineno,
-                        expr: trimmed(),
-                        kind: src.kind.as_str().into(),
-                    },
-                ),
-            );
+            // A statement that assigns a literal holding no data takes no
+            // source from its line (ticket #271): `$f = array('name' =>
+            // $_GET['name'], 'status' => 'active');` is lowered key by key,
+            // `$f` reset to an empty array and `$f['status']` set to a
+            // constant, and marking them would taint every entry of the
+            // array; the entry that receives the source, `$f['name']`, is
+            // marked by the data flow and by this layer. Deviation from the
+            // Audit, whose layer marks every target of a line holding a
+            // source: an empty array or a constant entry never carries one
+            // (see `holds_no_data`).
+            if !matches!(stmt, IrStmt::Assign { lhs, rhs, .. } if holds_no_data(lhs, rhs)) {
+                state_put(
+                    state,
+                    key,
+                    Taint::tainted(
+                        [src.kind.clone()],
+                        SourceInfo {
+                            line: lineno,
+                            expr: trimmed(),
+                            kind: src.kind.as_str().into(),
+                        },
+                    ),
+                );
+            }
             if !assign_line_has_sink {
                 return;
             }
@@ -486,9 +513,18 @@ fn aux_match_line(
                 .as_ref()
                 .and_then(|rx| call_arguments(&scan.span, rx))
                 .map(|arguments| {
+                    // The numbered arguments, and the keyword argument
+                    // `arg_name=` names wherever it is written (ticket
+                    // #261): `Response(body, headers=h)`.
+                    let keyword = sink.arg_name.as_deref().and_then(|name| {
+                        arguments
+                            .iter()
+                            .find(|argument| is_keyword_argument(argument, name))
+                    });
                     sink.line_args
                         .iter()
                         .filter_map(|index| arguments.get(*index))
+                        .chain(keyword)
                         .cloned()
                         .collect::<Vec<_>>()
                         .join("\n")
@@ -749,6 +785,17 @@ pub struct SourceSpec {
     /// as this source only when `raw_regex` also matches the line (see
     /// [`Site::confirms`]). Ticket #270.
     pub confirm_on_line: bool,
+    /// The rule's regex ends with the `[` of an index (`Request\[`,
+    /// `\$_GET\[`, `sys\.argv\[`): the source is that collection, read
+    /// whole (`print_r($_GET)`, `subprocess.run(sys.argv)`) or into
+    /// (`Request["id"]`), never the receiver of one of its members: with
+    /// `Request\[`, `Request.HttpContext.User.Identity.Name` is not request
+    /// data. Ticket #268, deliberate deviation from the Audit, whose dotted
+    /// pattern drops the bracket and makes every `Request.*` read a source,
+    /// the signed-in user's name included (eShopOnWeb logged it). A rule
+    /// that also means the members writes them as their own source
+    /// (`req\.body`, `request\.cookies\.get`).
+    pub subscript_only: bool,
     compiled: GlobPattern,
 }
 
@@ -761,6 +808,7 @@ impl SourceSpec {
             kind: kind.into(),
             raw_regex: None,
             confirm_on_line: false,
+            subscript_only: false,
             compiled,
         }
     }
@@ -782,6 +830,11 @@ pub struct SinkSpec {
     /// default argument 0 for the dataflow path only, and the line layer
     /// searches the whole call, as the Python §10bis layer does.
     pub line_args: Vec<usize>,
+    /// The keyword form of the argument `args` names (`arg_name=` in the
+    /// `.sca` file, ticket #261): `Response(body, headers=h)` passes the
+    /// headers by keyword, `make_response(body, 200, h)` by position. Both
+    /// the dataflow path (`check_sink`) and the line layer check it.
+    pub arg_name: Option<String>,
     /// Empty = all kinds.
     pub kinds: Vec<String>,
     pub raw_regex: Option<Regex>,
@@ -796,6 +849,7 @@ impl SinkSpec {
             pattern,
             args: Vec::new(),
             line_args: Vec::new(),
+            arg_name: None,
             kinds: Vec::new(),
             raw_regex: None,
             compiled,
@@ -1069,10 +1123,30 @@ pub fn resolve_spec<'a>(
     ResolvedSpec::Unknown
 }
 
-fn check_source_match(name: &str, specs: &RuleSpecs, site: Site<'_>) -> Option<Taint> {
+/// How a name is read where a source may match it (ticket #268).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SourceRead {
+    /// The value itself: `print_r($_GET)`, `cookies = req.Cookies`, or the
+    /// base of a subscript read, `Request["id"]`.
+    Whole,
+    /// The receiver of a member: `Request` in `Request.HttpContext`. An
+    /// indexed source (`SourceSpec::subscript_only`) is not one there.
+    Receiver,
+}
+
+/// The source of the rule `name` is, read as `read`. A source written
+/// with an index (`SourceSpec::subscript_only`) is not taken for the
+/// receiver of a member.
+fn check_source_match(
+    name: &str,
+    read: SourceRead,
+    specs: &RuleSpecs,
+    site: Site<'_>,
+) -> Option<Taint> {
     let lineno = site.line;
     for s in &specs.sources {
-        if match_pattern(name, &s.compiled)
+        if !(s.subscript_only && read == SourceRead::Receiver)
+            && match_pattern(name, &s.compiled)
             && site.confirms(s.confirm_on_line, s.raw_regex.as_ref())
         {
             return Some(Taint::tainted(
@@ -1086,6 +1160,22 @@ fn check_source_match(name: &str, specs: &RuleSpecs, site: Site<'_>) -> Option<T
         }
     }
     None
+}
+
+/// The source a constant-key read takes from its base, when one of the
+/// rule's sources names that base: a variable (`$_GET` in `$_GET['id']`)
+/// or an attribute (`request.GET` in `request.GET['q']`). Any other base
+/// (a call, a nested subscript) gives `None`: evaluating it would join
+/// the taint of its entries, which a constant key must not do (§9.bis).
+/// Ticket #271.
+fn subscript_base_source(base: &Rhs, specs: &RuleSpecs, site: Site<'_>) -> Option<Taint> {
+    match base {
+        Rhs::VarRef(name) => check_source_match(name, SourceRead::Whole, specs, site),
+        Rhs::AttrRef { .. } => {
+            check_source_match(&canon_callee(base), SourceRead::Whole, specs, site)
+        }
+        _ => None,
+    }
 }
 
 fn kinds_compatible(t: &Taint, sink_kinds: &[String]) -> bool {
@@ -1166,10 +1256,25 @@ pub fn eval_rhs(
     findings: &mut Vec<Finding>,
     site: Site<'_>,
 ) -> Taint {
+    eval_read(rhs, SourceRead::Whole, state, specs, findings, site)
+}
+
+/// [`eval_rhs`] for an expression read as `read`: the base of an attribute
+/// is read as its receiver, so that an indexed source (`Request\[`) taints
+/// `Request["id"]` and not `Request.HttpContext.User.Identity.Name`
+/// (ticket #268). Every other sub-expression is read whole.
+fn eval_read(
+    rhs: &Rhs,
+    read: SourceRead,
+    state: &State,
+    specs: &RuleSpecs,
+    findings: &mut Vec<Finding>,
+    site: Site<'_>,
+) -> Taint {
     match rhs {
         Rhs::Const(_) => Taint::Clean,
         Rhs::VarRef(name) => {
-            if let Some(t) = check_source_match(name, specs, site) {
+            if let Some(t) = check_source_match(name, read, specs, site) {
                 return t;
             }
             // §9.bis — aggregates indexed sub-entries: if `obj['k']`
@@ -1196,13 +1301,13 @@ pub fn eval_rhs(
         }
         Rhs::AttrRef { base, .. } => {
             let attr_name = canon_callee(rhs);
-            if let Some(t) = check_source_match(&attr_name, specs, site) {
+            if let Some(t) = check_source_match(&attr_name, read, specs, site) {
                 return t;
             }
             let attr_key = canon_rhs(rhs);
             join(
                 &state_get(state, &attr_key),
-                &eval_rhs(base, state, specs, findings, site),
+                &eval_read(base, SourceRead::Receiver, state, specs, findings, site),
             )
         }
         Rhs::SubscriptRef { base, key } => {
@@ -1212,6 +1317,17 @@ pub fn eval_rhs(
             if matches!(key.as_ref(), Rhs::Const(_)) {
                 if state.contains_key(&*sub_key) {
                     return sub_taint;
+                }
+                // A constant key read on a source (`$_GET['id']`,
+                // `request.GET['q']`) is that source. Deliberate deviation
+                // from the Audit (`transfer.py`), which does not evaluate the
+                // base of a constant key, so as not to join the taint of its
+                // other entries (§9.bis), and so leaves such a read to the
+                // line layer alone (ticket #271). Only the NAME of the base is
+                // matched here, never the state of its entries: the precision
+                // of §9.bis is kept.
+                if let Some(t) = subscript_base_source(base, specs, site) {
+                    return t;
                 }
                 let wildcard_taint = state_get(state, &format!("{base_key}[*]"));
                 let base_direct = state_get(state, &base_key);
@@ -1438,8 +1554,16 @@ pub fn eval_call(
                     result = join(&result, t);
                 }
             }
-            for t in kw_taints.values() {
-                result = join(&result, t);
+            // The environment handed to a child process (`env=` of
+            // `subprocess.check_output(cmd, env=dict(os.environ))`) is not
+            // data of its output. Ticket #268, deviation from the Audit,
+            // which joins every keyword: semgrep's `git_check_output`, which
+            // passes a copy of `os.environ`, made the output of every git
+            // command an environment source once the kind crossed returns.
+            for (name, t) in &kw_taints {
+                if name != "env" {
+                    result = join(&result, t);
+                }
             }
             // Part 2 — unconditional internal source: the return is
             // tainted even with no tainted argument.
@@ -1548,11 +1672,21 @@ fn apply_summary_at_call(
     out
 }
 
+/// Whether the text of one call argument passes `name` by keyword:
+/// `headers=h`, `headers = h`, but not a comparison `headers == h`.
+fn is_keyword_argument(argument: &str, name: &str) -> bool {
+    argument
+        .trim_start()
+        .strip_prefix(name)
+        .map(str::trim_start)
+        .is_some_and(|rest| rest.starts_with('=') && !rest.starts_with("=="))
+}
+
 fn check_sink(
     spec: &SinkSpec,
     callee_name: &str,
     arg_taints: &[Taint],
-    _kw_taints: &BTreeMap<String, Taint>,
+    kw_taints: &BTreeMap<String, Taint>,
     rule_specs: &RuleSpecs,
     findings: &mut Vec<Finding>,
     lineno: usize,
@@ -1562,10 +1696,18 @@ fn check_sink(
     } else {
         spec.args.clone()
     };
-    for idx in indices {
-        let Some(t) = arg_taints.get(idx) else {
-            continue;
-        };
+    // The checked arguments: the positional ones, then the keyword the
+    // rule names with `arg_name=` (ticket #261). Deliberate deviation from
+    // the Audit, whose `_check_sink` never reads the keyword arguments:
+    // `Response(body, headers={"X": value})` passed a tainted header
+    // unseen. Only the named keyword is read: `Response(body, status=s)`
+    // stays clean for a rule about headers.
+    let keyword = spec.arg_name.as_ref().and_then(|name| kw_taints.get(name));
+    let checked = indices
+        .iter()
+        .filter_map(|idx| arg_taints.get(*idx))
+        .chain(keyword);
+    for t in checked {
         if t.is_clean() {
             continue;
         }
@@ -2469,6 +2611,35 @@ mod tests {
         assert!(state_get(&new_state, "lst[*]").is_tainted());
     }
 
+    /// Ticket #271: a constant key read on a variable or an attribute that
+    /// a source names is that source (`$_GET['id']`, `request.GET['q']`);
+    /// a constant key read on any other variable keeps reading its own
+    /// entry only (§9.bis).
+    #[test]
+    fn test_const_key_read_on_a_source_is_that_source() {
+        let specs = specs_with(
+            vec![
+                SourceSpec::new("$_GET", "http"),
+                SourceSpec::new("request.GET", "http"),
+            ],
+            vec![],
+        );
+        let key = || Box::new(Rhs::Const(ConstValue::Str("id".to_string())));
+        let read = |base: Rhs| Rhs::SubscriptRef {
+            base: Box::new(base),
+            key: key(),
+        };
+        let eval =
+            |rhs: &Rhs, state: &State| eval_rhs(rhs, state, &specs, &mut vec![], Site::bare(1));
+        let state = empty_state();
+        assert!(eval(&read(varref("$_GET")), &state).is_tainted());
+        assert!(eval(&read(attr(varref("request"), "GET")), &state).is_tainted());
+        assert!(eval(&read(varref("$params")), &state).is_clean());
+        // An entry written on the state is read as written.
+        let state = state_set(&state, "$params['other']", tainted("http", 1));
+        assert!(eval(&read(varref("$params")), &state).is_clean());
+    }
+
     #[test]
     fn test_indexed_write_const_key() {
         let specs = specs_with(vec![SourceSpec::new("input", "cli")], vec![]);
@@ -2960,6 +3131,44 @@ mod tests {
         assert!(state_get(&new_state, "x").is_tainted());
     }
 
+    /// Ticket #271: the line layer does not mark the target of a literal
+    /// holding no data, even on a line holding a source.
+    #[test]
+    fn test_aux_match_line_source_skips_literal_without_data() {
+        let mut specs = specs_with(vec![], vec![]);
+        specs.sources.push(
+            SourceSpec::new("$_GET", "http").with_raw_regex(Regex::new(r"\$_GET\[").unwrap()),
+        );
+        let source_lines: SourceLines =
+            ["$f = array('name' => $_GET['name'], 'status' => 'active');".to_string()]
+                .into_iter()
+                .collect();
+        let rule_lines = RuleLines::new(&source_lines, &specs);
+        let mut state = empty_state();
+        let assign = |lhs: Lhs, rhs: Rhs| IrStmt::Assign {
+            lhs,
+            rhs,
+            lineno: 1,
+        };
+        let entry = |key: &str| Lhs::SubscriptLhs {
+            base: Box::new(varref("$f")),
+            key: Box::new(Rhs::Const(ConstValue::Str(key.to_string()))),
+        };
+        for stmt in [
+            assign(Lhs::VarLhs("$f".to_string()), Rhs::DictRef(Vec::new())),
+            assign(entry("name"), Rhs::Opaque),
+            assign(
+                entry("status"),
+                Rhs::Const(ConstValue::Str("active".to_string())),
+            ),
+        ] {
+            aux_match_line(&stmt, &mut state, &specs, &mut Vec::new(), &rule_lines);
+        }
+        assert!(state_get(&state, "$f").is_clean());
+        assert!(state_get(&state, "$f['status']").is_clean());
+        assert!(state_get(&state, "$f['name']").is_tainted());
+    }
+
     #[test]
     fn test_aux_match_line_sink_emits_finding_from_state() {
         let mut specs = specs_with(vec![], vec![]);
@@ -3088,6 +3297,65 @@ mod tests {
 
     /// Runs the line layer on a single `os.system(...)` call line with
     /// `var` tainted, and returns the findings (ticket #225).
+    #[test]
+    fn test_indexed_source_is_a_subscript_read_only() {
+        // Ticket #268: `Request\[` makes `Request["id"]`, `Request[name]`
+        // and a whole read of `Request` sources, not the receiver of a
+        // member, `Request.HttpContext.User...`.
+        let mut source = SourceSpec::new("Request", "http");
+        source.subscript_only = true;
+        let specs = specs_with(vec![source], vec![]);
+        let state = State::default();
+        let eval = |rhs: &Rhs| eval_rhs(rhs, &state, &specs, &mut Vec::new(), Site::bare(1));
+        let request = || Rhs::VarRef("Request".to_string());
+        let constant_key = Rhs::SubscriptRef {
+            base: Box::new(request()),
+            key: Box::new(Rhs::Const(ConstValue::Str("id".to_string()))),
+        };
+        let dynamic_key = Rhs::SubscriptRef {
+            base: Box::new(request()),
+            key: Box::new(Rhs::VarRef("name".to_string())),
+        };
+        let member = attr(attr(attr(request(), "HttpContext"), "User"), "Name");
+        assert!(eval(&constant_key).is_tainted());
+        assert!(eval(&dynamic_key).is_tainted());
+        assert!(eval(&member).is_clean());
+        assert!(eval(&request()).is_tainted());
+    }
+
+    #[test]
+    fn test_check_sink_reads_the_keyword_the_rule_names() {
+        // Ticket #261: `Response(body, headers=h)` with `arg_index=2
+        // arg_name=headers`. A tainted body or another keyword is not the
+        // header value.
+        let specs = specs_with(vec![], vec![]);
+        let mut spec = SinkSpec::new("Response").with_args(vec![2]);
+        spec.arg_name = Some("headers".to_string());
+        let run = |args: &[Taint], keyword: &str| {
+            let mut kw = BTreeMap::new();
+            kw.insert(keyword.to_string(), tainted("http", 1));
+            let mut findings = Vec::new();
+            check_sink(&spec, "Response", args, &kw, &specs, &mut findings, 3);
+            findings.len()
+        };
+        assert_eq!(run(&[Taint::Clean], "headers"), 1);
+        assert_eq!(run(&[Taint::Clean], "status"), 0);
+        assert_eq!(run(&[tainted("http", 1)], "status"), 0);
+        assert_eq!(
+            run(&[Taint::Clean, Taint::Clean, tainted("http", 1)], "status"),
+            1
+        );
+    }
+
+    #[test]
+    fn test_keyword_argument_text() {
+        assert!(is_keyword_argument("headers={'X': v}", "headers"));
+        assert!(is_keyword_argument(" headers = h", "headers"));
+        assert!(!is_keyword_argument("headers == h", "headers"));
+        assert!(!is_keyword_argument("headers_extra=h", "headers"));
+        assert!(!is_keyword_argument("h", "headers"));
+    }
+
     fn sink_findings_with_tainted(line: &str, var: &str) -> Vec<Finding> {
         let mut specs = specs_with(vec![], vec![]);
         specs

@@ -90,6 +90,7 @@ Depuis le dossier `codefixture-audit-public` (sous Windows, `.\target\release\co
 | Un rapport en français, espagnol ou allemand | `--lang fr`, `--lang es` ou `--lang de` |
 | Lister les règles | `./target/release/codefixture-audit list-rules` |
 | Un SBOM CycloneDX de vos dépendances | ajoutez `--sbom` (voir [Export SBOM](INSTALLATION.fr.md#export-sbom)) |
+| Laisser de la place sur la machine (par défaut : tous les cœurs sauf un, 75 % de la mémoire) | `--cpu 50%`, `--max-memory 8` (voir [Fils d'exécution et mémoire](INSTALLATION.fr.md#fils-dexécution-et-mémoire-de-lanalyse)) |
 | Ajouter vos propres règles | des fichiers `.sca` dans `~/.codefixture-audit/custom-rules/` (voir [Vos propres règles](INSTALLATION.fr.md#vos-propres-règles)) |
 | Mettre à jour le moteur | `git pull`, puis `cargo build --release` |
 

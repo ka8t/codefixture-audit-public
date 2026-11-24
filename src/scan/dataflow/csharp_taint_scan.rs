@@ -7,8 +7,7 @@
 //! **Scope of this component**: single file only, `specs.summaries`/
 //! `specs.type_map` supplied by the caller — same split as
 //! `java_taint_scan.rs`: this module does NOT build the summaries
-//! itself (wiring left to a future `csharp_call_graph.rs`,
-//! explicitly out of scope for ticket #79/spec #77).
+//! itself; `csharp_call_graph.rs` does, across files (ticket #284).
 //!
 //! **Difference from `java_taint_scan.rs`**: no seeding of
 //! ASP.NET Core route parameters (the Java/Spring equivalent of

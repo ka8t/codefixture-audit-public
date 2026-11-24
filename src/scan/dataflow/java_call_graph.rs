@@ -23,15 +23,24 @@
 //! last, with the summaries of the cycle's not-yet-resolved links
 //! (better to miss a flow than invent a false one, the same
 //! philosophy as `call_graph.rs`).
+//!
+//! Since ticket #284 that order and the summary resolution live in
+//! `class_call_graph.rs`, shared with the C# graph (`csharp_call_graph.rs`),
+//! moved there unchanged; this file keeps what is Java: the edges and the
+//! visibility (packages, imports).
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use rayon::prelude::*;
 
 use tree_sitter::Node;
 
 pub use super::call_graph::{FileInput, NodeKey, SummariesByFile};
+use super::class_call_graph::{
+    ClassGraphView, ClassLanguageHooks, GraphCaches, resolve_in_topological_order,
+    topological_order,
+};
 use super::java_module_registry::{
     JavaImportInfo, build_fqcn_index, collect_java_class_names, collect_java_imports,
     collect_java_superclass, collect_package,
@@ -41,9 +50,9 @@ use super::java_summary::{
     compute_java_summary_with, prepare_java_file,
 };
 use super::java_visibility::JavaVisibility;
-use super::line_facts::{LinesByFile, rule_lines_by_file};
-use super::prepared::{PreparedFile, PreparedFiles};
-use super::transfer::{FunctionSummary, RuleSpecs};
+use super::line_facts::{LinesByFile, RuleLines};
+use super::prepared::{PreparedCfg, PreparedFile, PreparedFiles};
+use super::transfer::RuleSpecs;
 use super::visibility::{Visibility, graph_fingerprint};
 
 fn text(node: Node, source: &[u8]) -> String {
@@ -108,23 +117,9 @@ pub struct JavaCallGraph<'tree> {
     /// scan (ticket #192): read for the summaries and handed to the
     /// taint analysis of each file ([`Self::prepared_file`]).
     prepared: PreparedFiles<'tree, JavaFunctionInfo<'tree>>,
-    /// Lazy caches, independent of `base_specs` — derived
-    /// solely from the graph's structure (`nodes`/`edges`), so
-    /// identical for every rule. `resolve_summaries` is
-    /// now called once PER RULE in parallel
-    /// (orchestrator.rs, ~20 Java taint rules): without this cache,
-    /// `topological_order()` (full post-order DFS) and
-    /// `per_file_key_targets` (full `edges` traversal) were
-    /// recomputed entirely on EVERY call — pure waste
-    /// (20 identical recomputations) that, at the scale of a large corpus
-    /// (2000+ files, e.g. OWASP BenchmarkJava), amplified
-    /// allocator contention across threads to the point of dominating
-    /// wall-clock time (profiled via `sample`: `__psynch_cvwait` at the
-    /// top, flagged by the maintainer on 2026-08-26 while comparing against the
-    /// Python analyzer). `OnceLock`: thread-safe lazy computation, only one
-    /// winner in case of a race between `rayon` threads.
-    topo_order_cache: OnceLock<Vec<NodeKey>>,
-    per_file_key_targets_cache: OnceLock<BTreeMap<String, BTreeMap<String, BTreeSet<NodeKey>>>>,
+    /// Lazy caches derived from the graph structure only, identical for
+    /// every rule (see `class_call_graph::GraphCaches`).
+    caches: GraphCaches,
 }
 
 impl<'tree> JavaCallGraph<'tree> {
@@ -243,71 +238,12 @@ impl<'tree> JavaCallGraph<'tree> {
         graph
     }
 
-    /// Memoized `topological_order()` — see the `topo_order_cache`
-    /// field doc. Computed at most once per instance,
-    /// regardless of the number of rules/calls to `resolve_summaries`.
-    fn topo_order_cached(&self) -> &Vec<NodeKey> {
-        self.topo_order_cache
-            .get_or_init(|| self.topological_order())
-    }
-
-    /// Memoized `{caller file: {local key: {targets}}}` — see the doc
-    /// of the `per_file_key_targets_cache` field. Derived solely from
-    /// `self.edges` (graph structure, independent of the rule).
-    fn per_file_key_targets_cached(
-        &self,
-    ) -> &BTreeMap<String, BTreeMap<String, BTreeSet<NodeKey>>> {
-        self.per_file_key_targets_cache.get_or_init(|| {
-            let mut per_file_key_targets: BTreeMap<String, BTreeMap<String, BTreeSet<NodeKey>>> =
-                BTreeMap::new();
-            for ((caller_file, _caller_name), edges) in &self.edges {
-                for (local_key, target) in edges {
-                    per_file_key_targets
-                        .entry(caller_file.clone())
-                        .or_default()
-                        .entry(local_key.clone())
-                        .or_default()
-                        .insert(target.clone());
-                }
-            }
-            per_file_key_targets
-        })
-    }
-
     /// Returns a callees-before-callers order (post-order DFS). A
     /// cycle leaves the revisited link unreordered: it will be computed
     /// without that particular callee being resolved yet (no
-    /// invented flow).
+    /// invented flow). Shared with C# (`class_call_graph::topological_order`).
     pub fn topological_order(&self) -> Vec<NodeKey> {
-        let mut order = Vec::new();
-        let mut visited: BTreeSet<NodeKey> = BTreeSet::new();
-        let mut in_progress: BTreeSet<NodeKey> = BTreeSet::new();
-        let node_keys: Vec<NodeKey> = self.nodes.keys().cloned().collect();
-        for node in &node_keys {
-            self.visit_topo(node, &mut visited, &mut in_progress, &mut order);
-        }
-        order
-    }
-
-    fn visit_topo(
-        &self,
-        node: &NodeKey,
-        visited: &mut BTreeSet<NodeKey>,
-        in_progress: &mut BTreeSet<NodeKey>,
-        order: &mut Vec<NodeKey>,
-    ) {
-        if visited.contains(node) || !self.nodes.contains_key(node) || in_progress.contains(node) {
-            return;
-        }
-        in_progress.insert(node.clone());
-        if let Some(edges) = self.edges.get(node) {
-            for target in edges.values().cloned().collect::<Vec<_>>() {
-                self.visit_topo(&target, visited, in_progress, order);
-            }
-        }
-        in_progress.remove(node);
-        visited.insert(node.clone());
-        order.push(node.clone());
+        topological_order(&self.nodes, &self.edges)
     }
 
     /// Computes summaries for all methods in the graph, in topological
@@ -325,171 +261,38 @@ impl<'tree> JavaCallGraph<'tree> {
     }
 
     /// `resolve_summaries`, reusing the summaries of a previous scan where
-    /// they cannot have changed (scan cache, issue #183). Java resolves in
-    /// a plain topological order, a method seeing only the callees already
-    /// resolved before it; a method keeps its previous summary when its
-    /// file is clean and none of those callees changed in this scan, which
-    /// gives exactly the seed a full scan would give it.
+    /// they cannot have changed (scan cache, issue #183). The algorithm
+    /// (plain topological order, bare-name and call-site aliases) lives in
+    /// `class_call_graph::resolve_in_topological_order`, shared with C#
+    /// since ticket #284; it was written here first and moved unchanged.
     pub fn resolve_summaries_incremental(
         &self,
         base_specs: &RuleSpecs,
         source_lines_by_file: Option<&LinesByFile>,
         reuse: Option<&super::call_graph::SummaryReuse>,
     ) -> super::call_graph::ResolvedSummaries {
-        let mut changed: std::collections::BTreeSet<NodeKey> = std::collections::BTreeSet::new();
-        let mut recomputed = 0usize;
-        let empty_lines = BTreeMap::new();
-        let source_lines_by_file = source_lines_by_file.unwrap_or(&empty_lines);
-        // One per-line cache of the hybrid layer per file, shared by every
-        // summary of this rule (ticket #190).
-        let lines_for_rule = rule_lines_by_file(source_lines_by_file, base_specs);
-
-        let mut resolved: BTreeMap<NodeKey, Arc<FunctionSummary>> = BTreeMap::new();
-        let mut own: SummariesByFile = BTreeMap::new();
-
-        // Cloned ONCE before the loop (`sources`/`sinks`/
-        // `sanitizers`/`passthroughs`, each with their compiled
-        // `Regex`) rather than per node — only `.summaries` varies
-        // per node. `base_specs.summaries` is always empty on entry
-        // here (built by `rule_json_to_specs`, never pre-seeded):
-        // replacing `.summaries` with `seed` on every iteration, even
-        // when `seed` is empty, gives exactly the same
-        // result as the old `if seed.is_empty() {
-        // base_specs.clone() } else { ... }` branch.
-        let mut node_specs = base_specs.clone();
-        for node in self.topo_order_cached() {
-            let node = node.clone();
-            let (filepath, name) = node.clone();
-            let Some(function) = self.prepared.function(&node) else {
-                continue;
-            };
-            let Some(body) = function.body.as_ref() else {
-                continue;
-            };
-            if let Some(reuse) = reuse
-                && !reuse.dirty_files.contains(&filepath)
-                && self
-                    .edges
-                    .get(&node)
-                    .is_none_or(|e| e.values().all(|t| !changed.contains(t)))
-                && let Some(previous) = reuse.previous.get(&node)
-            {
-                resolved.insert(node, previous.clone());
-                own.entry(filepath)
-                    .or_default()
-                    .insert(name, previous.clone());
-                continue;
-            }
-            let mut seed: BTreeMap<String, Arc<FunctionSummary>> = BTreeMap::new();
-            if let Some(edges) = self.edges.get(&node) {
-                for (local_name, target) in edges {
-                    if let Some(s) = resolved.get(target) {
-                        seed.insert(local_name.clone(), s.clone());
-                    }
-                }
-            }
-            node_specs.summaries = seed;
-            let lines = lines_for_rule.get(filepath.as_str());
-            // `Arc::new` once per node — every subsequent `.clone()`
-            // (below, and in callers' seeds) is then just a
-            // reference-count bump, not a deep copy of `FunctionSummary`
-            // (whose `sink_param_findings` can contain `Finding`
-            // values that are expensive to clone). This is what dominated
-            // the actual cost on a large corpus (high fan-in "hub"
-            // nodes, e.g. OWASP BenchmarkJava) — see the `SummariesByFile` doc.
-            let summary = Arc::new(compute_java_summary_with(
-                &function.info,
-                body,
-                &node_specs,
-                lines,
-            ));
-            recomputed += 1;
-            if reuse.is_none_or(|r| r.previous.get(&node) != Some(&summary)) {
-                changed.insert(node.clone());
-            }
-            resolved.insert(node, summary.clone());
-            own.entry(filepath).or_default().insert(name, summary);
-        }
-
-        // `own[filepath]` must expose the same bare aliases as
-        // `compute_java_file_summaries` (Java specificity: a call
-        // `runQuery(x)` targets the SAME class without qualification) — without
-        // this post-processing, a bare call site resolved as an edge
-        // (used to seed the CALLER's summary during the
-        // topological loop) stays invisible to the final `analyze()`
-        // pass on the caller itself, which looks up `specs.summaries` with the
-        // literal bare key produced by `canon_callee`. Bug found through
-        // calibration on the Python side (F1 regression 99.9%→88.8% on OWASP
-        // BenchmarkJava before this fix — see Audit/docs/ROADMAP.md § v2.0.0).
-        for summaries in own.values_mut() {
-            add_bare_name_aliases(summaries);
-        }
-
-        // What a file sees through its package and its imports is not
-        // copied into `extra` (ticket #239): its taint analysis looks it up
-        // on demand (`JavaFileSummaries`, after `own` and `extra`).
-        // `extra` holds only the call-site aliases below.
-        let mut extra: SummariesByFile = BTreeMap::new();
-
-        // Call-site aliases (`this.foo`, `super.foo`, `Class.method`,
-        // `recv.method` via type_map): the same need as the bare aliases
-        // above, generalized to ALL key forms produced by
-        // `outgoing_edges` — without this, a call `super.execute(...)`
-        // correctly resolved as an EDGE (used to seed the
-        // CALLER's summary during the topological loop) stays invisible to
-        // the final `analyze()` pass on that same caller, which looks up
-        // `specs.summaries["super.execute"]` literally — a key
-        // absent from `own`/`extra` as long as it is built ONLY
-        // from visible classes (`Class.method`, never
-        // `super.method`, `this.method`, or `recv.method`). Bug found
-        // on a real WebGoat case (`ProfileUpload.uploadFileHandler` →
-        // `super.execute(...)`, cross-file) — see Audit/docs/ROADMAP.md § v2.0.0.
-        //
-        // Anti-ambiguity (same discipline as `add_bare_name_aliases`):
-        // if two callers in the same file use the same local key
-        // to target DIFFERENT destinations, seed nothing for
-        // that key — a missed flow is better than an invented one.
-        let per_file_key_targets = self.per_file_key_targets_cached();
-        for (caller_file, key_targets) in per_file_key_targets {
-            for (local_key, targets) in key_targets {
-                if targets.len() != 1 {
-                    continue;
-                }
-                let target = targets.iter().next().unwrap();
-                let Some(s) = resolved.get(target) else {
-                    continue;
-                };
-                let bucket = if &target.0 == caller_file {
-                    &mut own
-                } else {
-                    // A key that the file's package or imports already
-                    // resolve to a summary keeps that one: the former
-                    // `extra` held those first and these aliases did not
-                    // replace them (`or_insert_with`).
-                    if self
-                        .visibility
-                        .binding(caller_file, local_key)
-                        .is_some_and(|bound| resolved.contains_key(&bound))
-                    {
-                        continue;
-                    }
-                    &mut extra
-                };
-                bucket
-                    .entry(caller_file.clone())
-                    .or_default()
-                    .entry(local_key.clone())
-                    .or_insert_with(|| s.clone());
-            }
-        }
-
-        super::call_graph::ResolvedSummaries {
-            own,
-            extra,
-            all: Arc::new(resolved),
-            changed,
-            recomputed,
-        }
+        resolve_in_topological_order(
+            ClassGraphView {
+                order: self.caches.topo_order(&self.nodes, &self.edges),
+                edges: &self.edges,
+                key_targets: self.caches.key_targets(&self.edges),
+                prepared: &self.prepared,
+                visibility: self.visibility.as_ref(),
+                last_positions: self.caches.last_positions(&self.nodes, &self.edges),
+            },
+            ClassLanguageHooks {
+                compute: |info: &JavaFunctionInfo<'tree>,
+                          body: &PreparedCfg<'tree>,
+                          specs: &RuleSpecs,
+                          lines: Option<&RuleLines>| {
+                    compute_java_summary_with(info, body, specs, lines)
+                },
+                add_bare_name_aliases,
+            },
+            base_specs,
+            source_lines_by_file,
+            reuse,
+        )
     }
 
     /// The files whose cached findings no longer hold because they read a

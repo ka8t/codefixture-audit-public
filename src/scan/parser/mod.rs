@@ -447,8 +447,9 @@ impl<'a> DslParser<'a> {
         }
     }
 
-    /// Parses a `sink` line: the regular expression, then its only option,
-    /// `arg_index=<n>` or `arg_index=all` (ticket #258). An unknown option
+    /// Parses a `sink` line: the regular expression, then its options,
+    /// `arg_index=<n>` or `arg_index=all` (ticket #258), and `arg_name=<name>`
+    /// beside a numbered `arg_index` (ticket #261). An unknown option
     /// or a value that is neither a non-negative integer nor `all` is an
     /// error naming the line: before ticket #221 both were dropped
     /// silently, an index read as 0, which made a typo in the option
@@ -457,10 +458,15 @@ impl<'a> DslParser<'a> {
         let ln = self.line().number;
         let (text, kvs) = self.parse_raw_with_kvs();
         let mut arg_index = None;
+        let mut arg_name = None;
         let mut keys: Vec<&String> = kvs.keys().collect();
         keys.sort();
         for key in keys {
             let value = &kvs[key];
+            if key == "arg_name" {
+                arg_name = Some(value.clone());
+                continue;
+            }
             if key != "arg_index" {
                 return Err(DslSyntaxError::new(
                     DslMessage::new(keys::UNKNOWN_SINK_OPTION)
@@ -481,9 +487,28 @@ impl<'a> DslParser<'a> {
                 })?)
             });
         }
+        // `arg_name=<name>` names the keyword form of the argument
+        // `arg_index=<n>` names: an identifier, and only beside a numbered
+        // argument (with `all` or no index, every keyword or none would be
+        // meant, which the option cannot say).
+        if let Some(name) = &arg_name {
+            let identifier = name
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+            if !identifier || !matches!(arg_index, Some(SinkArguments::Index(_))) {
+                return Err(DslSyntaxError::new(
+                    DslMessage::new(keys::BAD_ARG_NAME).with("value", name.clone()),
+                    ln,
+                    self.filename,
+                ));
+            }
+        }
         Ok(SinkSpec {
             pattern: text,
             arg_index,
+            arg_name,
             line_number: ln,
         })
     }
@@ -1001,6 +1026,20 @@ mod tests {
         assert_eq!(rules[0]["sinks"][0]["arg_explicit"], true);
     }
 
+    /// `arg_name=<name>` beside `arg_index=<n>` is carried in the compiled
+    /// sink (ticket #261).
+    #[test]
+    fn test_sink_arg_name_is_carried_beside_its_index() {
+        let rule = TAINT_RULE.replace(
+            "SINK_LINE",
+            "sink    Response\\s*\\(  arg_index=2  arg_name=headers",
+        );
+        let rules = compile_sca_to_json(&rule, "javascript/security/t.sca").unwrap();
+        assert_eq!(rules[0]["sinks"][0]["arg_index"], 2);
+        assert_eq!(rules[0]["sinks"][0]["arg_name"], "headers");
+        assert_eq!(rules[0]["sinks"][0]["arg_explicit"], true);
+    }
+
     /// An index that is not a non-negative integer, or an unknown option,
     /// is an error naming the line instead of a silent argument 0.
     #[test]
@@ -1018,11 +1057,65 @@ mod tests {
                 "sink    \\.query\\s*\\(  arg=0",
                 "Unknown option on a sink: 'arg=0'",
             ),
+            // `arg_name` needs a numbered `arg_index` and an identifier
+            // (ticket #261).
+            (
+                "sink    \\.query\\s*\\(  arg_name=headers",
+                "'arg_name' must be a keyword argument name",
+            ),
+            (
+                "sink    \\.query\\s*\\(  arg_index=all  arg_name=headers",
+                "'arg_name' must be a keyword argument name",
+            ),
+            (
+                "sink    \\.query\\s*\\(  arg_index=2  arg_name=2headers",
+                "'arg_name' must be a keyword argument name",
+            ),
         ] {
             let rule = TAINT_RULE.replace("SINK_LINE", line);
             let error = compile_sca_to_json(&rule, "javascript/security/t.sca").unwrap_err();
             assert!(error.to_string().contains(expected), "{line}: {error}");
             assert_eq!(error.line, 6, "{line}");
+        }
+    }
+
+    /// A data-flow rule keeps `requires has` / `not_has` in its compiled
+    /// `file_contains`, read by its taint pass; the file conditions that
+    /// pass does not read are an error, not a silent no-op (ticket #262).
+    #[test]
+    fn test_taint_rule_accepts_only_has_and_not_has_file_conditions() {
+        let gated = TAINT_RULE.replace(
+            "SINK_LINE",
+            "sink    \\.query\\s*\\(\n  requires\n    has  graphql\n    not_has  pg\n  end",
+        );
+        let rules = compile_sca_to_json(&gated, "javascript/security/t.sca").unwrap();
+        assert_eq!(
+            rules[0]["file_contains"]["has"],
+            serde_json::json!(["graphql"])
+        );
+        assert_eq!(
+            rules[0]["file_contains"]["not_has"],
+            serde_json::json!(["pg"])
+        );
+
+        for condition in [
+            "min_lines  10",
+            "path_contains  src/",
+            "not_path_contains  test/",
+            "not_path_has_file  SECURITY.md",
+        ] {
+            let key = condition.split_whitespace().next().unwrap();
+            let rule = TAINT_RULE.replace(
+                "SINK_LINE",
+                &format!("sink    \\.query\\s*\\(\n  requires\n    {condition}\n  end"),
+            );
+            let error = compile_sca_to_json(&rule, "javascript/security/t.sca").unwrap_err();
+            assert!(
+                error.to_string().contains(&format!(
+                    "reads only 'has' and 'not_has' in 'requires': '{key}'"
+                )),
+                "{condition}: {error}"
+            );
         }
     }
 

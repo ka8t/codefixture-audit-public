@@ -319,6 +319,155 @@ pub(crate) fn strip_plain_string_literals(text: &str) -> String {
     out
 }
 
+/// A cast to a number or a boolean that ends `text`: `(int)`, `(float)`,
+/// `( bool )`, in any case, followed by blanks only. PHP spells them
+/// `int`/`integer`, `float`/`double`/`real` and `bool`/`boolean`; Java
+/// writes the same `(int)`, `(double)`, `(boolean)`.
+static SCALAR_CAST_BEFORE_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r"(?i)\(\s*(?:int|integer|float|double|real|bool|boolean)\s*\)\s*$")
+        .expect("regex statique valide")
+});
+
+/// Start of the name a source match at byte `at` belongs to: a source
+/// regex may start inside it (`\.query\.` in `req.query.id`), and the cast
+/// is written before the whole name (`(int) req.query.id`). Walks back
+/// over the bytes of a name and its member accesses (`.`, `->`, `::`,
+/// `$`, `\`). A `.` followed by `$` is the PHP concatenation of a variable,
+/// not a member access: `(int)$a.$_GET['b']` casts `$a` only, and the walk
+/// stops there.
+fn expression_start(bytes: &[u8], at: usize) -> usize {
+    let mut start = at;
+    loop {
+        match bytes[..start] {
+            [.., b'-', b'>'] | [.., b':', b':'] => start -= 2,
+            [.., b'.'] if bytes.get(start) == Some(&b'$') => return start,
+            [.., b] if b.is_ascii_alphanumeric() || matches!(b, b'_' | b'$' | b'.' | b'\\') => {
+                start -= 1
+            }
+            _ => return start,
+        }
+    }
+}
+
+/// Bytes before a source match in which [`every_match_cast_to_scalar`]
+/// looks for the cast: `(boolean)` and generous blanks around it.
+const CAST_LOOKBEHIND_BYTES: usize = 64;
+
+/// True when every match of a source's `regex` on `text` sits right after
+/// a cast to a number or a boolean (`$id = (int) $_GET['id'];`, ticket
+/// #257). Such a value is a number or `true`/`false`: it carries no text
+/// of the visitor, and the data flow already reads it so (the PHP lowering
+/// turns the cast into an opaque value, ticket #255). Without this test,
+/// the line layer took the source written on the line and marked the
+/// assigned variable, whatever the cast. One match without a cast keeps
+/// the source: `(int) $_GET['a'] . $_GET['b']` still carries `b`.
+///
+/// No equivalent in the Audit, whose lexical engine marks the variable
+/// whenever the line holds a source; deliberate deviation, applied to
+/// every language since a scalar cast drops the text in all of them.
+fn every_match_cast_to_scalar(regex: &Regex, text: &str) -> bool {
+    let mut any = false;
+    for found in regex.find_iter(text) {
+        let Ok(found) = found else { return false };
+        // The cast is read in the few bytes before the match, so that a
+        // minified line holding many sources is not searched again from
+        // its start for each of them.
+        let before = &text[..expression_start(text.as_bytes(), found.start())];
+        let mut from = before.len().saturating_sub(CAST_LOOKBEHIND_BYTES);
+        while !before.is_char_boundary(from) {
+            from -= 1;
+        }
+        if !SCALAR_CAST_BEFORE_RE.is_match(&before[from..]) {
+            return false;
+        }
+        any = true;
+    }
+    any
+}
+
+/// True when every match of a sink's `regex` on `text` starts inside a
+/// string literal: `f"harness did not compile (did upstream rename"` is a
+/// message, not a call of `compile(`. The literals are read from the start
+/// of the line (`'`, `"`, `` ` ``, a backslash escaping the next
+/// character); a line that starts inside a literal opened above is read
+/// as code. Ticket #268, deviation from the Audit, whose lexical layer
+/// takes a sink anywhere on the line: semgrep's own test scanner logged
+/// such a message after a compiler chosen by `$CC`.
+fn every_match_inside_string_literal(regex: &Regex, text: &str) -> bool {
+    let mut any = false;
+    for found in regex.find_iter(text) {
+        let Ok(found) = found else { return false };
+        if !inside_string_literal(&text[..found.start()]) {
+            return false;
+        }
+        any = true;
+    }
+    any
+}
+
+/// Whether the end of `before` (the text of a line up to a position) lies
+/// inside a string literal opened on that line. The interpolations of a
+/// JavaScript template (`` `${eval(x)}` ``) and of a Python f-string
+/// (`f"{eval(x)}"`) are code, not literal text.
+fn inside_string_literal(before: &str) -> bool {
+    /// One open literal: its quote, whether `{…}` (f-string) or `${…}`
+    /// (template) interpolates code in it, and the depth of the braces of
+    /// an interpolation being read (0: in the literal text).
+    struct Open {
+        quote: char,
+        interpolates: bool,
+        depth: usize,
+    }
+    let chars: Vec<char> = before.chars().collect();
+    let mut open: Option<Open> = None;
+    let mut escaped = false;
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        match &mut open {
+            Some(lit) if lit.depth > 0 => match c {
+                '{' => lit.depth += 1,
+                '}' => lit.depth -= 1,
+                _ => {}
+            },
+            Some(lit) => {
+                if escaped {
+                    escaped = false;
+                } else if c == '\\' {
+                    escaped = true;
+                } else if c == lit.quote {
+                    open = None;
+                } else if lit.interpolates && c == '{' {
+                    let template = lit.quote == '`';
+                    let after_dollar = i > 0 && chars[i - 1] == '$';
+                    let doubled = !template && chars.get(i + 1) == Some(&'{');
+                    if doubled {
+                        i += 1; // `{{` is a literal brace in an f-string
+                    } else if !template || after_dollar {
+                        lit.depth = 1;
+                    }
+                }
+            }
+            None => {
+                if matches!(c, '"' | '\'' | '`') {
+                    let prefix_f = chars[..i]
+                        .iter()
+                        .rev()
+                        .take_while(|p| p.is_ascii_alphabetic())
+                        .any(|p| matches!(p, 'f' | 'F'));
+                    open = Some(Open {
+                        quote: c,
+                        interpolates: c == '`' || prefix_f,
+                        depth: 0,
+                    });
+                }
+            }
+        }
+        i += 1;
+    }
+    open.is_some_and(|lit| lit.depth == 0)
+}
+
 /// True when `regex` matches `text`; a regex that fails at run time
 /// (backtracking limit of `fancy_regex`) counts as no match, as
 /// everywhere else in the hybrid layer.
@@ -736,6 +885,11 @@ impl LineFacts {
             .iter()
             .enumerate()
             .filter(|(i, s)| hit(s.raw_regex.as_ref(), |e| &e.sources, *i))
+            .filter(|(_, s)| {
+                !s.raw_regex
+                    .as_ref()
+                    .is_some_and(|regex| every_match_cast_to_scalar(regex, text))
+            })
             .map(|(i, _)| i)
             .collect();
         let sinks = specs
@@ -743,6 +897,11 @@ impl LineFacts {
             .iter()
             .enumerate()
             .filter(|(i, s)| hit(s.raw_regex.as_ref(), |e| &e.sinks, *i))
+            .filter(|(_, s)| {
+                !s.raw_regex
+                    .as_ref()
+                    .is_some_and(|regex| every_match_inside_string_literal(regex, text))
+            })
             .map(|(i, _)| i)
             .collect();
         Self {
@@ -988,6 +1147,46 @@ pub fn rule_lines_by_file<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Ticket #268: a sink written inside a string literal is text, an
+    /// interpolation is code.
+    #[test]
+    fn test_sink_inside_a_string_literal() {
+        let compile = Regex::new(r"\bcompile\s*\(").unwrap();
+        assert!(every_match_inside_string_literal(
+            &compile,
+            r#"        f"harness for {scanner} did not compile (did upstream rename scanner ""#
+        ));
+        assert!(!every_match_inside_string_literal(
+            &compile,
+            "code = compile(src, 'f', 'exec')"
+        ));
+        assert!(!every_match_inside_string_literal(
+            &compile,
+            r#"x = f"{compile(src)}""#
+        ));
+        assert!(every_match_inside_string_literal(
+            &compile,
+            r#"x = f"{{compile(src)}}""#
+        ));
+        let eval = Regex::new(r"\beval\s*\(").unwrap();
+        assert!(!every_match_inside_string_literal(
+            &eval,
+            "s = `${eval(x)}`;"
+        ));
+        assert!(every_match_inside_string_literal(
+            &eval,
+            "s = `do not eval(x)`;"
+        ));
+        assert!(every_match_inside_string_literal(
+            &eval,
+            r#"s = "it's eval(x)";"#
+        ));
+        assert!(!every_match_inside_string_literal(
+            &eval,
+            r#"s = "a" + eval(x);"#
+        ));
+    }
     use crate::scan::dataflow::js_taint_scan::run_taint_rule_js;
     use crate::scan::dataflow::transfer::{SanitizerSpec, SinkSpec, SourceSpec};
     use std::collections::BTreeMap;
@@ -1152,6 +1351,39 @@ mod tests {
         assert!(last.sources.is_empty() && last.sinks.is_empty());
         assert!(rule_lines.facts(0, &specs).is_none());
         assert!(rule_lines.facts(4, &specs).is_none());
+    }
+
+    /// Ticket #257: a source cast to a number or a boolean is no source of
+    /// the line; one occurrence without a cast keeps it.
+    #[test]
+    fn test_source_cast_to_scalar_is_no_source_of_the_line() {
+        let specs = hybrid_specs();
+        let text = lines(
+            "id = (int) req.query.id\n\
+             id = ( Float )req.query.id\n\
+             id = (int) req.query.id + req.query.name\n\
+             id = (string) req.query.id\n\
+             id = intval(req.query.id)",
+        );
+        let rule_lines = RuleLines::new(&text, &specs);
+        assert!(rule_lines.facts(1, &specs).unwrap().sources.is_empty());
+        assert!(rule_lines.facts(2, &specs).unwrap().sources.is_empty());
+        assert_eq!(rule_lines.facts(3, &specs).unwrap().sources, vec![0]);
+        assert_eq!(rule_lines.facts(4, &specs).unwrap().sources, vec![0]);
+        assert_eq!(rule_lines.facts(5, &specs).unwrap().sources, vec![0]);
+    }
+
+    /// Ticket #257: the cast is looked for before the whole name the
+    /// source match belongs to, and a PHP concatenation `.$` ends that name.
+    #[test]
+    fn test_expression_start_of_a_source_match() {
+        fn start<'a>(text: &'a str, needle: &str) -> &'a str {
+            let at = text.find(needle).unwrap();
+            &text[..expression_start(text.as_bytes(), at)]
+        }
+        assert_eq!(start("x = (int) req.query.id", ".query."), "x = (int) ");
+        assert_eq!(start("$x = (int)$a->b::$c", "$c"), "$x = (int)");
+        assert_eq!(start("$x = (int)$a.$_GET['b']", "$_GET"), "$x = (int)$a.");
     }
 
     #[test]
