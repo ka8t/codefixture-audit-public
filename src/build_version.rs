@@ -1,6 +1,6 @@
 //! Build version (ticket #149): the `Cargo.toml` version followed by the
 //! commit count and short hash of the tree the binary was built from, e.g.
-//! `0.1.0+415.588dc34`, plus `-dirty` when it held uncommitted changes.
+//! `3.0.0+415.588dc34`, plus `-dirty` when it held uncommitted changes.
 //!
 //! A tester could not tell whether his binary included the latest fixes:
 //! `--version` always printed `0.1.0`, which is never bumped between
@@ -37,16 +37,16 @@ mod tests {
     #[test]
     fn test_format_build_version_cases() {
         assert_eq!(
-            format_build_version("0.1.0", Some("415\n"), Some("588dc34\n"), false),
-            "0.1.0+415.588dc34"
+            format_build_version("3.0.0", Some("415\n"), Some("588dc34\n"), false),
+            "3.0.0+415.588dc34"
         );
         assert_eq!(
-            format_build_version("0.1.0", Some("415"), Some("588dc34"), true),
-            "0.1.0+415.588dc34-dirty"
+            format_build_version("3.0.0", Some("415"), Some("588dc34"), true),
+            "3.0.0+415.588dc34-dirty"
         );
         assert_eq!(
-            format_build_version("0.1.0", None, Some("588dc34"), true),
-            "0.1.0+unknown"
+            format_build_version("3.0.0", None, Some("588dc34"), true),
+            "3.0.0+unknown"
         );
         assert_eq!(
             format_build_version("0.2.0", Some(""), None, false),

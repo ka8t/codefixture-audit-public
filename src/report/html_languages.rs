@@ -464,7 +464,7 @@ mod tests {
             project_description: String::new(),
             project_path: "/home/user/shop".to_string(),
             tool_name: "codefixture-audit".to_string(),
-            tool_version: "0.1.0".to_string(),
+            tool_version: "3.0.0".to_string(),
             company_name: "CodeFixture".to_string(),
             report_lang: lang.to_string(),
             generated_at: parse_scan_timestamp("2026-11-24-09-47").expect("valid timestamp"),

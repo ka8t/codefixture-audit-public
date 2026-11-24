@@ -148,7 +148,7 @@ Windows:
 .\target\release\codefixture-audit.exe list-rules | Select-Object -First 1
 ```
 
-`--version` prints the build, for example `codefixture-audit 0.1.0+42.c5be809`: the commit count and short commit hash say exactly which code you built. Every analysis prints it on its first line too. `list-rules` prints the number of rules on its first line: 38 for the demonstration rules this repository ships.
+`--version` prints the build, for example `codefixture-audit 3.0.0+42.c5be809`: the commit count and short commit hash say exactly which code you built. Every analysis prints it on its first line too. `list-rules` prints the number of rules on its first line: 38 for the demonstration rules this repository ships.
 
 Every command below is run from the `codefixture-audit-public` folder, with the engine's full path.
 
@@ -236,7 +236,7 @@ For a report in French, Spanish or German, replace `--lang en` with `--lang fr`,
 The terminal shows the progress, what was loaded and a summary. Here, the analysis of OWASP Juice Shop with this repository's demonstration rules:
 
 ```text
-[codefixture-audit] codefixture-audit 0.1.0
+[codefixture-audit] codefixture-audit 3.0.0
 [codefixture-audit] Scope (audit.config.json): include the whole project; exclude 7 default patterns
 [codefixture-audit] Analysis in progress...
 …

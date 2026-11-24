@@ -1,6 +1,9 @@
 [package]
 name = "codefixture-audit"
-version = "0.1.0"
+# 3.0.0 continues the numbering of the Python engine Audit (1.0.0 to 2.0.0),
+# which this crate succeeds (ADR-0065). `codefixture-audit-advisories` keeps
+# its own version: it is a separate program, never delivered.
+version = "3.0.0"
 edition = "2024"
 # Oldest Rust that builds this crate: edition 2024 needs 1.85, and the
 # dependencies need up to 1.89 (`rusqlite`). Older Cargo, such as the 1.75 of

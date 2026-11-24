@@ -231,7 +231,7 @@ mod tests {
             ),
             dep_line("express", Some("4.18.2"), "npm", "\"express\": \"4.18.2\""),
         ];
-        let sbom = build_dependency_sbom(&deps, "p", "", "codefixture-audit", "0.1.0", "t");
+        let sbom = build_dependency_sbom(&deps, "p", "", "codefixture-audit", "3.0.0", "t");
         let json = sbom.to_json_string().unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         let components = parsed["components"].as_array().unwrap();
@@ -251,7 +251,7 @@ mod tests {
             dep("monolog/monolog", None, "Packagist"),
             dep("weird", Some("1"), "Cargo"),
         ];
-        let sbom = build_dependency_sbom(&deps, "p", "", "codefixture-audit", "0.1.0", "t");
+        let sbom = build_dependency_sbom(&deps, "p", "", "codefixture-audit", "3.0.0", "t");
         let purls: Vec<&str> = sbom.components.iter().map(|c| c.purl.as_str()).collect();
         assert_eq!(
             purls,
@@ -274,7 +274,7 @@ mod tests {
             "mon-projet",
             "1.0",
             "codefixture-audit",
-            "0.1.0",
+            "3.0.0",
             "2026-08-24T12:00:00Z",
         );
         report.push_component(Component {
@@ -302,7 +302,7 @@ mod tests {
             "p",
             "1.0",
             "codefixture-audit",
-            "0.1.0",
+            "3.0.0",
             "2026-08-24T12:00:00Z",
         );
         assert!(report.components.is_empty());

@@ -120,7 +120,7 @@ impl CacheContext {
 
 impl CacheKey {
     /// The cache folder of this engine build in `base`: its version and a
-    /// short hash of its build stamp (`0.1.0+327.46ee715-3fa2c1d8`). Each
+    /// short hash of its build stamp (`3.0.0+327.46ee715-3fa2c1d8`). Each
     /// binary has its own folder (the maintainer, 2026-11-14), so that two binaries
     /// used in turn on the same project (the private and the shared one,
     /// two versions) never overwrite each other's cache.

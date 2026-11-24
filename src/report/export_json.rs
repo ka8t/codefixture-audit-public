@@ -30,7 +30,7 @@ pub struct ExportData {
     /// Format of this file (`1.0`), not the engine version.
     pub version: String,
     /// Release version of the engine that wrote it
-    /// ([`crate::RELEASE_VERSION`], `0.1.0`); the build identifier until
+    /// ([`crate::RELEASE_VERSION`], `3.0.0`); the build identifier until
     /// 2026-11-24 (ticket #149). Empty when reading a baseline written
     /// before that field existed. Nothing reads it back.
     #[serde(default)]
