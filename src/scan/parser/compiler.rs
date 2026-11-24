@@ -5,7 +5,7 @@
 //! identical to the format produced by the existing `.json` files in
 //! `sca/rules/builtin/`.
 
-use super::model::{MatchBlock, RuleNode, SinkArguments};
+use super::model::{MatchBlock, PassthroughArguments, RuleNode, SinkArguments};
 use serde_json::{Map, Value, json};
 
 pub fn compile_to_json(node: &RuleNode) -> Value {
@@ -169,7 +169,18 @@ pub fn compile_to_json(node: &RuleNode) -> Value {
             let passthroughs: Vec<Value> = node
                 .passthroughs
                 .iter()
-                .map(|p| json!({"pattern": p.pattern}))
+                // `arg_index=` (ticket #256): the one argument the result
+                // carries, `args: [n]`, or none of them, `args: []` with
+                // `receiver_only`; without it, every argument, as before.
+                .map(|p| match p.arg_index {
+                    Some(PassthroughArguments::Index(index)) => {
+                        json!({"pattern": p.pattern, "args": [index]})
+                    }
+                    Some(PassthroughArguments::None) => {
+                        json!({"pattern": p.pattern, "args": [], "receiver_only": true})
+                    }
+                    None => json!({"pattern": p.pattern}),
+                })
                 .collect();
             result.insert("passthroughs".to_string(), json!(passthroughs));
         }

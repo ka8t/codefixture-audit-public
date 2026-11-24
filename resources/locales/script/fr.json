@@ -443,7 +443,9 @@
     "unknown_requires_file_key": "Clé inconnue dans un bloc 'requires' de fichier : '{key}'",
     "unknown_requires_key": "Clé 'requires' inconnue : '{key}'",
     "unknown_rule_keyword": "Mot-clé inconnu dans une règle : '{keyword}'",
-    "unknown_sink_option": "Option inconnue sur un sink : '{option}' (seule 'arg_index' existe)",
+    "unknown_sink_option": "Option inconnue sur un sink : '{option}' (seules 'arg_index' et 'arg_name' existent)",
+    "unknown_passthrough_option": "Option inconnue sur un passthrough : '{option}' (seule 'arg_index' existe)",
+    "bad_passthrough_arg_index": "'arg_index' d'un passthrough doit être un entier positif ou nul ou 'none', trouvé : '{value}'",
     "value_missing": "Valeur manquante après '{keyword}'"
   },
   "scan_memory_estimate": "Mémoire : environ {estimate} Go prévus.",

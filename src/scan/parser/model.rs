@@ -107,7 +107,23 @@ pub struct SanitizerSpec {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PassthroughSpec {
     pub pattern: String,
+    /// The arguments whose data the result of the call carries, written
+    /// `arg_index=` (ticket #256); `None`: every argument, as before.
+    pub arg_index: Option<PassthroughArguments>,
     pub line_number: usize,
+}
+
+/// The arguments of a passthrough the rule names with `arg_index=`: the
+/// data its result carries besides the receiver's (ticket #256).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PassthroughArguments {
+    /// `arg_index=<n>`: that argument only (0-based), as the document of
+    /// `elementpath.select(root, query)`, not its query.
+    Index(usize),
+    /// `arg_index=none`: no argument, the receiver only, as the document
+    /// of `root.xpath(query)` (the query selects a node, it is not in the
+    /// result).
+    None,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]

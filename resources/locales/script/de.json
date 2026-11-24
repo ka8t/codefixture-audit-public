@@ -443,7 +443,9 @@
     "unknown_requires_file_key": "Unbekannter Schlüssel in einem Datei-Block 'requires': '{key}'",
     "unknown_requires_key": "Unbekannter 'requires'-Schlüssel: '{key}'",
     "unknown_rule_keyword": "Unbekanntes Schlüsselwort in einer Regel: '{keyword}'",
-    "unknown_sink_option": "Unbekannte Option an einem Sink: '{option}' (nur 'arg_index' existiert)",
+    "unknown_sink_option": "Unbekannte Option an einem Sink: '{option}' (nur 'arg_index' und 'arg_name' gibt es)",
+    "unknown_passthrough_option": "Unbekannte Option an einem Passthrough: '{option}' (nur 'arg_index' gibt es)",
+    "bad_passthrough_arg_index": "'arg_index' eines Passthrough muss eine ganze Zahl ab 0 oder 'none' sein, gefunden: '{value}'",
     "value_missing": "Fehlender Wert nach '{keyword}'"
   },
   "scan_memory_estimate": "Speicher: etwa {estimate} GB erwartet.",

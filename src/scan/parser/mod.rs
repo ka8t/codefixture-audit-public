@@ -522,11 +522,45 @@ impl<'a> DslParser<'a> {
         })
     }
 
+    /// Parses a `passthrough` line: the regular expression, then its only
+    /// option, `arg_index=<n>` or `arg_index=none`, the argument whose data
+    /// the result of the call carries besides the receiver's, or none of
+    /// them (ticket #256: the nodes `root.xpath(query)` returns are data of
+    /// the document `root`, never of the query). Without it, every argument
+    /// passes through, as before. Any other option, or another value, is an
+    /// error naming the line.
     fn parse_passthrough(&mut self) -> PResult<PassthroughSpec> {
         let ln = self.line().number;
-        let text = self.parse_raw_after_keyword()?;
+        let (text, kvs) = self.parse_raw_with_kvs();
+        let mut arg_index = None;
+        let mut keys: Vec<&String> = kvs.keys().collect();
+        keys.sort();
+        for key in keys {
+            let value = &kvs[key];
+            if key != "arg_index" {
+                return Err(DslSyntaxError::new(
+                    DslMessage::new(keys::UNKNOWN_PASSTHROUGH_OPTION)
+                        .with("option", format!("{key}={value}")),
+                    ln,
+                    self.filename,
+                ));
+            }
+            arg_index = Some(if value == "none" {
+                PassthroughArguments::None
+            } else {
+                PassthroughArguments::Index(value.parse::<usize>().map_err(|_| {
+                    DslSyntaxError::new(
+                        DslMessage::new(keys::BAD_PASSTHROUGH_ARG_INDEX)
+                            .with("value", value.to_string()),
+                        ln,
+                        self.filename,
+                    )
+                })?)
+            });
+        }
         Ok(PassthroughSpec {
             pattern: text,
+            arg_index,
             line_number: ln,
         })
     }
@@ -1038,6 +1072,53 @@ mod tests {
         assert_eq!(rules[0]["sinks"][0]["arg_index"], 2);
         assert_eq!(rules[0]["sinks"][0]["arg_name"], "headers");
         assert_eq!(rules[0]["sinks"][0]["arg_explicit"], true);
+    }
+
+    /// `arg_index=<n>` on a passthrough gives `args: [n]`, `arg_index=none`
+    /// an empty list with `receiver_only`; without it, nothing is written,
+    /// every argument passes (ticket #256). Any other option or value is an
+    /// error naming the line.
+    #[test]
+    fn test_passthrough_arg_index() {
+        let with = |line: &str| {
+            TAINT_RULE.replace("SINK_LINE", &format!("sink    \\.query\\s*\\(\n  {line}"))
+        };
+        let rules = compile_sca_to_json(
+            &with("passthrough  elementpath\\.select\\s*\\(  arg_index=0"),
+            "javascript/security/t.sca",
+        )
+        .unwrap();
+        assert_eq!(rules[0]["passthroughs"][0]["args"], serde_json::json!([0]));
+        assert!(rules[0]["passthroughs"][0].get("receiver_only").is_none());
+        let rules = compile_sca_to_json(
+            &with("passthrough  \\.xpath\\s*\\(  arg_index=none"),
+            "javascript/security/t.sca",
+        )
+        .unwrap();
+        assert_eq!(rules[0]["passthroughs"][0]["args"], serde_json::json!([]));
+        assert_eq!(rules[0]["passthroughs"][0]["receiver_only"], true);
+        let rules = compile_sca_to_json(
+            &with("passthrough  \\.trim\\s*\\("),
+            "javascript/security/t.sca",
+        )
+        .unwrap();
+        assert_eq!(
+            rules[0]["passthroughs"][0],
+            serde_json::json!({"pattern": "\\.trim\\s*\\("})
+        );
+        for (line, expected) in [
+            (
+                "passthrough  \\.xpath\\s*\\(  arg_index=all",
+                "'arg_index' of a passthrough must be a whole number",
+            ),
+            (
+                "passthrough  \\.xpath\\s*\\(  args=0",
+                "Unknown option on a passthrough: 'args=0'",
+            ),
+        ] {
+            let error = compile_sca_to_json(&with(line), "javascript/security/t.sca").unwrap_err();
+            assert!(error.to_string().contains(expected), "{line}: {error}");
+        }
     }
 
     /// An index that is not a non-negative integer, or an unknown option,

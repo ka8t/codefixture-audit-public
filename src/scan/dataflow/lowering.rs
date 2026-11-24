@@ -451,10 +451,7 @@ impl<'src> Lowerer<'src> {
     }
 
     fn lower_call_expr(&mut self, node: Node<'src>) -> Rhs {
-        let callee = node
-            .child_by_field_name("function")
-            .map(|n| self.lower_expr(n))
-            .unwrap_or(Rhs::Const(ConstValue::None));
+        let callee = self.lower_callee(node);
         let (args, kwargs) = self.lower_call_arguments(node);
         let tmp = self.fresh_temp();
         self.emit(IrStmt::Assign {
@@ -467,6 +464,44 @@ impl<'src> Lowerer<'src> {
             lineno: self.line(node),
         });
         Rhs::VarRef(tmp)
+    }
+
+    /// The callee of the call `call_node`. A method of the result of
+    /// another call, `httpx.AsyncClient().get` or `Repo().find`, keeps
+    /// that call as the base of its attribute instead of a temporary, as
+    /// the Java and C# lowerings keep `new C(...).m` (ticket #284): the
+    /// data flow then names the call after the callee it is made on,
+    /// `httpx.AsyncClient.get` for the sinks of the rules and `Repo.find`
+    /// for the summary of the method (`transfer.rs::eval_call`). Ticket
+    /// #260, deliberate deviation from the Audit (`python_to_ir.py`), whose
+    /// temporary named the call `__t0.get`, which no sink and no summary
+    /// matched. The inner call is still evaluated, through the nested
+    /// `CallRef`, at the line of the statement, which is also its own: both
+    /// calls start at the same node.
+    fn lower_callee(&mut self, call_node: Node<'src>) -> Rhs {
+        let Some(function) = call_node.child_by_field_name("function") else {
+            return Rhs::Const(ConstValue::None);
+        };
+        if function.kind() == "attribute"
+            && let Some(object) = function.child_by_field_name("object")
+            && object.kind() == "call"
+        {
+            let inner_callee = self.lower_callee(object);
+            let (args, kwargs) = self.lower_call_arguments(object);
+            let attr = function
+                .child_by_field_name("attribute")
+                .map(|n| self.text(n))
+                .unwrap_or_default();
+            return Rhs::AttrRef {
+                base: Box::new(Rhs::CallRef {
+                    callee: Box::new(inner_callee),
+                    args,
+                    kwargs,
+                }),
+                attr,
+            };
+        }
+        self.lower_expr(function)
     }
 
     fn lower_call_arguments(&mut self, call_node: Node<'src>) -> (Vec<Rhs>, Vec<(String, Rhs)>) {
@@ -618,10 +653,7 @@ impl<'src> Lowerer<'src> {
             "assignment" => self.lower_assignment(inner),
             "augmented_assignment" => self.lower_aug_assignment(inner),
             "call" => {
-                let callee = inner
-                    .child_by_field_name("function")
-                    .map(|n| self.lower_expr(n))
-                    .unwrap_or(Rhs::Const(ConstValue::None));
+                let callee = self.lower_callee(inner);
                 let (args, kwargs) = self.lower_call_arguments(inner);
                 self.emit(IrStmt::Call {
                     callee,
@@ -1037,6 +1069,59 @@ mod tests {
         let ir = lower_module("f(x)\n");
         assert_eq!(ir.len(), 1);
         assert!(matches!(&ir[0], IrStmt::Call { .. }));
+    }
+
+    /// Ticket #260: a method of the result of another call keeps that call
+    /// as the base of its callee, as a statement and as a value, so that
+    /// the data flow names it `httpx.AsyncClient.get`; the arguments of
+    /// the inner call are kept.
+    #[test]
+    fn test_method_of_a_call_keeps_the_call() {
+        let named = |stmt: &IrStmt| -> Option<String> {
+            let callee = match stmt {
+                IrStmt::Call { callee, .. } => callee,
+                IrStmt::Assign {
+                    rhs: Rhs::CallRef { callee, .. },
+                    ..
+                } => callee,
+                _ => return None,
+            };
+            crate::scan::dataflow::ir::chained_callee_name(callee)
+        };
+        let ir = lower_module("httpx.AsyncClient().get(url)\n");
+        assert_eq!(ir.len(), 1);
+        assert_eq!(named(&ir[0]).as_deref(), Some("httpx.AsyncClient.get"));
+        let ir = lower_module("r = Repo(db).find(name).first()\n");
+        assert_eq!(ir.len(), 2);
+        assert_eq!(named(&ir[0]).as_deref(), Some("Repo.find.first"));
+        let IrStmt::Assign {
+            rhs: Rhs::CallRef { callee, .. },
+            ..
+        } = &ir[0]
+        else {
+            panic!("{ir:?}");
+        };
+        let Rhs::AttrRef { base, .. } = callee.as_ref() else {
+            panic!("{callee:?}");
+        };
+        let Rhs::AttrRef { base: inner, .. } = base_callee(base) else {
+            panic!("{base:?}");
+        };
+        assert!(matches!(base_args(inner), [Rhs::VarRef(db)] if db == "db"));
+    }
+
+    fn base_callee(rhs: &Rhs) -> &Rhs {
+        match rhs {
+            Rhs::CallRef { callee, .. } => callee,
+            other => other,
+        }
+    }
+
+    fn base_args(rhs: &Rhs) -> &[Rhs] {
+        match rhs {
+            Rhs::CallRef { args, .. } => args,
+            _ => &[],
+        }
     }
 
     #[test]

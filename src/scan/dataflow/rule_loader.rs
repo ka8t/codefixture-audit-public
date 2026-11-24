@@ -382,6 +382,29 @@ pub struct ConfirmedPatterns {
     /// then takes a name matching them only when the regex matches the
     /// line ([`SourceSpec::confirm_on_line`]).
     pub confirm_on_line: bool,
+    /// The regex names no call: it describes a line (see
+    /// [`describes_a_line`]).
+    pub line_only: bool,
+}
+
+/// Whether a spec's regex describes a line rather than something the data
+/// flow names (a call, a member, an assignment target), given the dotted
+/// patterns its conversion gave: a statement (`^\s*return\s+f["']`), a
+/// literal text (`php://input`), an annotation (`@QueryParam\s*\(`), or
+/// text written around a call (`replace.*\\r`, `ScriptEngine.*eval\s*\(`)
+/// gives none. Such a source, sink or sanitizer is kept with no dotted
+/// pattern ([`crate::scan::dataflow::transfer::GlobPattern::Nothing`]), for
+/// the line layer, which tests its regex on the line of every statement,
+/// and for the parameter annotations of Java, matched against the sources'
+/// regexes (`java_summary::annotated_params`). Ticket #272, deliberate
+/// deviation from the Audit (`dataflow_taint.py`): before, the conversion
+/// kept a dotted pattern that named nothing (`returnf["']`,
+/// `ScriptEngine*eval`), or dropped the spec when nothing was left
+/// (`=\s*Path\s*\(`), which the line layer then never read. A passthrough
+/// is read by the data flow only: one that names nothing has no effect,
+/// and `rules check` reports it (`passthrough.no_name`).
+pub fn describes_a_line(regex_str: &str, patterns: &[String]) -> bool {
+    !regex_str.trim().is_empty() && patterns.is_empty()
 }
 
 /// [`regex_to_dotted_patterns`] for a source or a sanitizer: the pattern
@@ -394,6 +417,7 @@ pub struct ConfirmedPatterns {
 pub fn confirmed_regex_to_dotted_patterns(regex_str: &str) -> ConfirmedPatterns {
     let conversion = to_dotted_patterns(regex_str, ArgumentText::CutAtCall);
     ConfirmedPatterns {
+        line_only: describes_a_line(regex_str, &conversion.patterns),
         patterns: conversion.patterns,
         confirm_on_line: conversion.dropped_constraint,
     }
@@ -480,7 +504,21 @@ fn to_dotted_patterns(regex_str: &str, arguments: ArgumentText) -> Conversion {
     let clean = clean.replace(r"\->", &dot).replace("->", &dot);
     let clean = clean.replace(r"\::", &dot).replace("::", &dot);
     let clean = clean.trim_start_matches('^').trim_end_matches('$');
-    let clean = clean.split('=').next().unwrap_or("").trim().to_string();
+    let (clean, assignment) = match clean.split_once('=') {
+        Some((target, _)) => (target.trim(), true),
+        None => (clean.trim(), false),
+    };
+    // An assignment written with its operator, `\.CommandText\s*\+?=`,
+    // names its target: the operator of a compound assignment (`+=`) before
+    // the `=` is not part of the name (ticket #272, deviation from the
+    // Audit, which cuts at the `=` only; before, `\+` stayed and
+    // `**.CommandText\+` named nothing, so the data flow never saw the
+    // write of a SQL text into `cmd.CommandText`).
+    let clean = if assignment {
+        COMPOUND_ASSIGNMENT_RE.replace(clean, "").trim().to_string()
+    } else {
+        clean.to_string()
+    };
     let alternatives = expand_alternations(&clean);
     dropped_constraint |= alternatives.iter().any(|alternative| {
         alternative
@@ -489,17 +527,93 @@ fn to_dotted_patterns(regex_str: &str, arguments: ArgumentText) -> Conversion {
     });
     let patterns = alternatives
         .into_iter()
+        .filter(|p| !joins_text_around(p))
         .filter_map(|p| {
-            let f = finalize_dotted(&p)
-                .replace(LITERAL_BACKSLASH, "\\")
-                .replace(LITERAL_DOLLAR, "$");
-            if f.is_empty() { None } else { Some(f) }
+            let f = finalize_dotted(&p);
+            if f.is_empty() || !names_a_member(&f) {
+                return None;
+            }
+            Some(
+                f.replace(LITERAL_BACKSLASH, "\\")
+                    .replace(LITERAL_DOLLAR, "$"),
+            )
         })
         .collect();
     Conversion {
         patterns,
         dropped_constraint,
     }
+}
+
+/// The operator of a compound assignment left before its `=` once the
+/// regex is cut there: `\+?`, `\+`, `+`, `-`, `\|`... (see
+/// [`to_dotted_patterns`]).
+static COMPOUND_ASSIGNMENT_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\\?[-+*/%|&^]\??$").expect("regex statique valide"));
+
+/// The keywords that start a statement, never a call: a regex whose name
+/// starts with one describes a line (`^\s*return\s+f["']`,
+/// `\bif\s*\(.*\bstrpos\s*\(`), not something the data flow can name.
+const STATEMENT_KEYWORDS: &[&str] = &[
+    "if", "elif", "else", "while", "for", "foreach", "return", "switch", "case", "catch", "try",
+    "with", "yield", "throw", "raise",
+];
+
+/// Whether `alternative`, up to the `(` of its call or the `[` of its
+/// subscript, holds a run of any text (`.*`, `.+`) between two parts:
+/// `ScriptEngine.*eval\s*\(`, `replace.*\\r`, `configparser.*\.get`. Such a
+/// regex describes a line (a receiver's class or an argument written
+/// somewhere on it), not the name of a call: its dotted form,
+/// `ScriptEngine*eval`, named nothing (ticket #272). The type argument of a
+/// generic name, `Builders<.*>.Filter.Eq`, is a part of the name.
+fn joins_text_around(alternative: &str) -> bool {
+    let name = alternative.split(CALL_PAREN).next().unwrap_or("");
+    let chars: Vec<char> = name.trim().chars().collect();
+    let mut i = 0usize;
+    while i < chars.len() {
+        if chars[i] == '\\' {
+            i += 2;
+            continue;
+        }
+        if chars[i] == '.' && matches!(chars.get(i + 1), Some('*') | Some('+')) {
+            let before = &chars[..i];
+            let after: &[char] = chars.get(i + 2..).unwrap_or(&[]);
+            let after = match after.first() {
+                Some('?') => &after[1..],
+                _ => after,
+            };
+            let type_argument = before.last() == Some(&'<') && after.first() == Some(&'>');
+            if !before.is_empty() && !after.is_empty() && !type_argument {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+/// Whether a dotted pattern, before its stand-ins are written back, can be
+/// the name the data flow gives a call, a member or an assignment target:
+/// letters, digits, `_`, the literal dot, backslash and dollar stand-ins,
+/// the wildcards `*`, the `<` `>` of a generic name, and a first segment
+/// that is not a statement keyword. Anything else is regex text that the
+/// conversion could not read as a name: an escape (`\d`, `\/`, `\r`), a
+/// quote, a bracket, a colon, a space, a hyphen (`php://input`,
+/// `@QueryParam`, `node-serialize`, `returnf["']`, the slice `\d+:-\d*`).
+/// Before ticket #272 such a text was kept as a pattern that matched no
+/// name, and the regex was read by the line layer alone without saying
+/// so.
+fn names_a_member(pattern: &str) -> bool {
+    let name_char = |c: char| {
+        c.is_alphanumeric()
+            || matches!(c, '_' | '.' | '*' | '<' | '>')
+            || [LITERAL_BACKSLASH, LITERAL_DOLLAR].contains(&c)
+    };
+    if !pattern.chars().all(name_char) {
+        return false;
+    }
+    let first_segment = pattern.split('.').next().unwrap_or("");
+    !STATEMENT_KEYWORDS.contains(&first_segment)
 }
 
 // ============================================================================
@@ -558,29 +672,26 @@ pub(crate) fn extract_cwe(rule_json: &Value) -> Option<String> {
 }
 
 /// Whether [`rule_json_to_specs`] gives specs for this rule: at least
-/// one source and one sink convert to a dotted pattern. Answers without
-/// compiling the rule's regexes, so that the scan can tell, before
-/// reading the files, which languages have a taint rule and keep the
-/// parse trees of those only (ticket #241). `rule_json_to_specs` asks
-/// it first, so the two always agree.
+/// one source and one sink, each converting to a dotted pattern or
+/// describing a line ([`describes_a_line`], read by the line layer).
+/// Answers without compiling the rule's regexes, so that the scan can
+/// tell, before reading the files, which languages have a taint rule and
+/// keep the parse trees of those only (ticket #241). `rule_json_to_specs`
+/// asks it first, so the two always agree. Before ticket #272 a rule whose
+/// sinks all described a line was not run at all, the line layer
+/// included; no catalog rule was one.
 pub fn has_taint_specs(rule_json: &Value) -> bool {
-    let converts = |key: &str| {
+    let has_spec = |key: &str| {
         rule_json
             .get(key)
             .and_then(|v| v.as_array())
             .is_some_and(|specs| {
-                specs.iter().any(|s| {
-                    let pattern = json_str(s, "pattern");
-                    let dotted = if key == "sinks" {
-                        sink_regex_to_dotted_patterns(pattern)
-                    } else {
-                        confirmed_regex_to_dotted_patterns(pattern).patterns
-                    };
-                    !dotted.is_empty()
-                })
+                specs
+                    .iter()
+                    .any(|s| !json_str(s, "pattern").trim().is_empty())
             })
     };
-    converts("sources") && converts("sinks")
+    has_spec("sources") && has_spec("sinks")
 }
 
 /// Whether a source's regex ends with the escaped `[` of an index
@@ -625,6 +736,15 @@ pub fn rule_json_to_specs(rule_json: &Value, lang: &str) -> Option<RuleSpecs> {
         let subscript_only = ends_with_index(regex);
         // The regex ends with a literal dot: "a member of" (see below).
         let member_of = regex.trim_end().ends_with("\\.") && !regex.trim_end().ends_with("\\\\.");
+        if conversion.line_only {
+            // A source that describes a line (ticket #272): kept for the
+            // line layer and the Java parameter annotations, named by no
+            // dotted pattern (see `describes_a_line`).
+            let mut spec = SourceSpec::new("", kind).describing_a_line();
+            spec.raw_regex = compiled.clone();
+            spec.subscript_only = subscript_only;
+            sources.push(spec);
+        }
         for dotted in conversion.patterns {
             // A source written as "a member of" (`req\.(query|body)\.`,
             // dotted `req.query.*`) also names the object read whole, as an
@@ -688,8 +808,20 @@ pub fn rule_json_to_specs(rule_json: &Value, lang: &str) -> Option<RuleSpecs> {
             .and_then(|v| v.as_str())
             .map(str::to_string);
         let compiled = safe_compile_regex(regex);
-        for dotted in sink_regex_to_dotted_patterns(regex) {
-            let mut spec = SinkSpec::new(dotted)
+        let dotted = sink_regex_to_dotted_patterns(regex);
+        // A sink that describes a line (ticket #272, `describes_a_line`):
+        // one spec without a dotted pattern, which the line layer reads.
+        let names: Vec<Option<String>> = if describes_a_line(regex, &dotted) {
+            vec![None]
+        } else {
+            dotted.into_iter().map(Some).collect()
+        };
+        for name in names {
+            let spec = match name {
+                Some(dotted) => SinkSpec::new(dotted),
+                None => SinkSpec::new("").describing_a_line(),
+            };
+            let mut spec = spec
                 .with_args(args.clone())
                 .with_line_args(line_args.clone())
                 .with_kinds(kinds.clone());
@@ -708,6 +840,13 @@ pub fn rule_json_to_specs(rule_json: &Value, lang: &str) -> Option<RuleSpecs> {
         let regex = json_str(s, "pattern");
         let compiled = safe_compile_regex(regex);
         let conversion = confirmed_regex_to_dotted_patterns(regex);
+        if conversion.line_only {
+            // Read by the line layer and the checks it guards (ticket #272,
+            // `describes_a_line`).
+            let mut spec = SanitizerSpec::new("").describing_a_line();
+            spec.raw_regex = compiled.clone();
+            sanitizers.push(spec);
+        }
         for dotted in conversion.patterns {
             let mut spec = SanitizerSpec::new(dotted);
             spec.raw_regex = compiled.clone();
@@ -724,8 +863,21 @@ pub fn rule_json_to_specs(rule_json: &Value, lang: &str) -> Option<RuleSpecs> {
     {
         let regex = json_str(s, "pattern");
         let compiled = safe_compile_regex(regex);
+        // `arg_index=` (ticket #256): the argument the result carries,
+        // `args: [n]`, or none of them, `receiver_only`.
+        let args_in: Vec<usize> = s
+            .get("args")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_u64().map(|n| n as usize))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let receiver_only = s.get("receiver_only").and_then(|v| v.as_bool()) == Some(true);
         for dotted in regex_to_dotted_patterns(regex) {
-            let mut spec = PassthroughSpec::new(dotted);
+            let mut spec = PassthroughSpec::new(dotted).with_args_in(args_in.clone());
+            spec.receiver_only = receiver_only;
             spec.raw_regex = compiled.clone();
             passthroughs.push(spec);
         }
@@ -969,14 +1121,16 @@ mod tests {
         assert!(rule_json_to_specs(&rule, "en").is_none());
     }
 
-    /// Ticket #241: a rule whose only sink converts to no dotted pattern
-    /// has no taint specs, and `has_taint_specs` says so without
-    /// compiling anything; one convertible sink is enough.
+    /// Ticket #241: a rule without a sink has no taint specs, and
+    /// `has_taint_specs` says so without compiling anything; one sink is
+    /// enough. Since ticket #272 a sink that converts to no dotted pattern
+    /// (`\.`, a literal dot) describes a line and is read by the line
+    /// layer: the rule has taint specs.
     #[test]
     fn test_has_taint_specs_agrees_with_the_conversion() {
         for (sinks, converts) in [
             (json!([{"pattern": ""}]), false),
-            (json!([{"pattern": r"\."}]), false),
+            (json!([{"pattern": r"\."}]), true),
             (json!([{"pattern": ""}, {"pattern": "eval"}]), true),
             (json!([]), false),
             (json!("eval"), false),
@@ -1095,7 +1249,10 @@ mod tests {
     fn test_unescaped_dot_keeps_its_former_reading() {
         // A regex wildcard `.*` is still `*`, and a bare unescaped dot
         // stays a dot (the catalog writes it for a literal dot).
-        assert_eq!(regex_to_dotted_patterns(r"foo.*bar"), vec!["foo*bar"]);
+        // Between two names, any text is not a name: the regex describes a
+        // line (ticket #272); at the end of the name, it is a wildcard.
+        assert!(regex_to_dotted_patterns(r"foo.*bar").is_empty());
+        assert_eq!(regex_to_dotted_patterns(r"foo\..*"), vec!["foo.*"]);
         assert_eq!(
             regex_to_dotted_patterns(r"Builders<.*>.Filter.Eq"),
             vec!["Builders<*>.Filter.Eq"]
@@ -1118,8 +1275,8 @@ mod tests {
             vec!["FileStream", "StreamReader"]
         );
         assert_eq!(
-            regex_to_dotted_patterns(r"new\s+ModelAndView\s*\(.*redirect"),
-            vec!["ModelAndView*redirect"]
+            sink_regex_to_dotted_patterns(r"new\s+ModelAndView\s*\(.*redirect"),
+            vec!["ModelAndView"]
         );
     }
 
@@ -1218,7 +1375,8 @@ mod tests {
             regex_to_dotted_patterns(r"(a|(b|c))\.run"),
             vec!["a.run", "b.run", "c.run"]
         );
-        assert_eq!(regex_to_dotted_patterns(r"run[|]x"), vec!["run[|]x"]);
+        // A character class is not a name (ticket #272).
+        assert!(regex_to_dotted_patterns(r"run[|]x").is_empty());
     }
 
     #[test]
@@ -1245,11 +1403,9 @@ mod tests {
             sink_regex_to_dotted_patterns(r"Anthropic\(\s*\)\.messages\.create\s*\("),
             vec!["Anthropic.messages.create"]
         );
-        // A source keeps it: cut, it would name every call.
-        assert_eq!(
-            regex_to_dotted_patterns(r#"file_get_contents\s*\(\s*['"]php://input"#),
-            vec![r#"file_get_contents['"]php://input"#]
-        );
+        // A passthrough keeps it: cut, it would name every call; the text
+        // left is not a name, so the regex names no call (ticket #272).
+        assert!(regex_to_dotted_patterns(r#"file_get_contents\s*\(\s*['"]php://input"#).is_empty());
     }
 
     #[test]
@@ -1395,5 +1551,129 @@ mod tests {
 
     fn compile_glob(pattern: &str) -> super::super::transfer::GlobPattern {
         super::super::transfer::compile_glob_pattern(pattern)
+    }
+
+    /// Ticket #272: an assignment written with its operator names its
+    /// target, the operator of a compound assignment left out.
+    #[test]
+    fn test_assignment_sink_names_its_target() {
+        assert_eq!(
+            sink_regex_to_dotted_patterns(r"\.CommandText\s*\+?="),
+            vec!["**.CommandText".to_string()]
+        );
+        assert_eq!(
+            sink_regex_to_dotted_patterns(r"\.CommandText\s*\+="),
+            vec!["**.CommandText".to_string()]
+        );
+        assert_eq!(
+            sink_regex_to_dotted_patterns(r"\.innerHTML\s*="),
+            vec!["**.innerHTML".to_string()]
+        );
+        // Without an `=`, a trailing quantifier stays a wildcard.
+        assert_eq!(
+            regex_to_dotted_patterns(r"encodeFor\w+"),
+            vec!["encodeFor*".to_string()]
+        );
+    }
+
+    /// Ticket #272: a regex that describes a line (a statement, a literal
+    /// text, an annotation, text written around a call) gives no dotted
+    /// pattern, instead of a text that named nothing.
+    #[test]
+    fn test_regex_describing_a_line_names_nothing() {
+        for regex in [
+            r#"^\s*return\s+f["']"#,
+            r"^\s*return\s+[A-Z][A-Z0-9_]*\s*$",
+            r#"^\s*[A-Z][A-Z0-9_]*\s*\+?=\s*f["']"#,
+            r"php://input",
+            r"@QueryParam\s*\(",
+            r"@RequestBody",
+            r"node-serialize",
+            r"gql\s*`",
+            r"=\s*Path\s*\(",
+            r"\bif\s*\(.*\bstrpos\s*\(",
+            r"replace.*\\r",
+            r"ScriptEngine.*eval\s*\(",
+            r"BinaryFormatter.*\.Deserialize\s*\(",
+            r"ProcessBuilder.*\.command",
+            r"configparser.*\.get\s*\(",
+        ] {
+            let confirmed = confirmed_regex_to_dotted_patterns(regex);
+            assert!(
+                confirmed.patterns.is_empty(),
+                "{regex}: {:?}",
+                confirmed.patterns
+            );
+            assert!(confirmed.line_only, "{regex}");
+            assert!(sink_regex_to_dotted_patterns(regex).is_empty(), "{regex}");
+        }
+        // A passthrough keeps the text after a call: a slice or text around
+        // a call names nothing there either.
+        for regex in [
+            r"\[\d+:-?\d*\]",
+            r"\.encode\s*\(.*utf",
+            r"configparser.*\.get\s*\(",
+        ] {
+            assert!(regex_to_dotted_patterns(regex).is_empty(), "{regex}");
+        }
+        // Text after the call or the subscript where the name ends, and the
+        // type argument of a generic name, are not text around a call.
+        assert_eq!(
+            sink_regex_to_dotted_patterns(r"Query\s*\(.*where"),
+            vec!["Query".to_string()]
+        );
+        assert_eq!(
+            sink_regex_to_dotted_patterns(r"response\.headers\[.*[Cc]ookie"),
+            vec!["response.headers".to_string()]
+        );
+        assert_eq!(
+            confirmed_regex_to_dotted_patterns(r"Builders<.*>.Filter.Eq").patterns,
+            vec!["Builders<*>.Filter.Eq".to_string()]
+        );
+        assert_eq!(
+            confirmed_regex_to_dotted_patterns(r"filter_var\s*\(.*FILTER_VALIDATE_URL").patterns,
+            vec!["filter_var".to_string()]
+        );
+        assert!(!confirmed_regex_to_dotted_patterns(r"filter_var\s*\(").line_only);
+    }
+
+    /// Ticket #272: a source, a sink or a sanitizer that describes a line
+    /// is kept for the line layer, with its regex and no name; a passthrough
+    /// that names nothing is not kept, nothing would read it.
+    #[test]
+    fn test_spec_describing_a_line_is_kept_for_the_line_layer() {
+        let rule = serde_json::json!({
+            "id": "t",
+            "sources": [
+                {"pattern": r"php://input", "kind": "http"},
+                {"pattern": r"request\.args", "kind": "http"},
+            ],
+            "sinks": [{"pattern": r#"^\s*return\s+f["']"#}],
+            "sanitizers": [{"pattern": r"replace.*\\r"}],
+            "passthroughs": [{"pattern": r"\[\d+:-?\d*\]"}],
+        });
+        let specs = rule_json_to_specs(&rule, "python").expect("taint specs");
+        assert_eq!(specs.sources.len(), 2);
+        assert_eq!(specs.sinks.len(), 1);
+        assert_eq!(specs.sanitizers.len(), 1);
+        assert!(specs.passthroughs.is_empty());
+        let site = super::super::transfer::Site::bare(1);
+        for name in ["", "php://input", "returnf[\"']", "request"] {
+            assert!(
+                !matches!(
+                    super::super::transfer::resolve_spec(name, &specs, site),
+                    super::super::transfer::ResolvedSpec::Sink(_)
+                        | super::super::transfer::ResolvedSpec::Sanitizer(_)
+                ),
+                "{name}"
+            );
+        }
+        assert!(specs.sources[0].raw_regex.is_some());
+        assert!(specs.sinks[0].raw_regex.is_some());
+        assert!(specs.sanitizers[0].raw_regex.is_some());
+        assert!(matches!(
+            super::super::transfer::resolve_spec("request.args", &specs, site),
+            super::super::transfer::ResolvedSpec::Source(_)
+        ));
     }
 }

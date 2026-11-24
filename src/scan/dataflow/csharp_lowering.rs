@@ -197,10 +197,7 @@ impl<'src> CSharpLowerer<'src> {
 
         if t == "member_access_expression" {
             let base = self.lower_expr(expr.child_by_field_name("expression"));
-            let attr = expr
-                .child_by_field_name("name")
-                .map(|f| self.text(f))
-                .unwrap_or_else(|| "?".to_string());
+            let attr = self.member_name(expr.child_by_field_name("name"));
             return Rhs::AttrRef {
                 base: Box::new(base),
                 attr,
@@ -214,10 +211,7 @@ impl<'src> CSharpLowerer<'src> {
                 .children(&mut w)
                 .find(|c| c.kind() == "member_binding_expression");
             if let Some(binding) = binding {
-                let attr = binding
-                    .child_by_field_name("name")
-                    .map(|f| self.text(f))
-                    .unwrap_or_else(|| "?".to_string());
+                let attr = self.member_name(binding.child_by_field_name("name"));
                 return Rhs::AttrRef {
                     base: Box::new(base),
                     attr,
@@ -512,6 +506,24 @@ impl<'src> CSharpLowerer<'src> {
 
     /// Whether `function`, the callee of an invocation, is `new C(...).M`:
     /// a member of an object created on the spot.
+    /// The name of a member as the data flow names it: `DeserializeObject`
+    /// for `JsonConvert.DeserializeObject<Order>(...)`, without the type
+    /// arguments of a generic method, as a generic type used as a receiver
+    /// is named (`generic_name` in `lower_expr`). Ticket #272: the call was
+    /// named `JsonConvert.DeserializeObject<Order>`, which neither the
+    /// sinks of the rules (`JsonConvert\.DeserializeObject\b`) nor the
+    /// summary of a generic method of the project matched.
+    fn member_name(&self, name: Option<Node<'src>>) -> String {
+        match name {
+            Some(n) if n.kind() == "generic_name" => named_children(n)
+                .find(|c| c.kind() == "identifier")
+                .map(|c| self.text(c))
+                .unwrap_or_else(|| self.text(n)),
+            Some(n) => self.text(n),
+            None => "?".to_string(),
+        }
+    }
+
     fn is_constructor_chain(function: Node) -> bool {
         function.kind() == "member_access_expression"
             && function
@@ -532,10 +544,7 @@ impl<'src> CSharpLowerer<'src> {
             .expect("checked by is_constructor_chain");
         let ctor_args = self.lower_arg_list(creation.child_by_field_name("arguments"));
         let ctor_callee = self.type_to_rhs(creation.child_by_field_name("type"));
-        let attr = function
-            .child_by_field_name("name")
-            .map(|f| self.text(f))
-            .unwrap_or_else(|| "?".to_string());
+        let attr = self.member_name(function.child_by_field_name("name"));
         Rhs::AttrRef {
             base: Box::new(Rhs::CallRef {
                 callee: Box::new(ctor_callee),

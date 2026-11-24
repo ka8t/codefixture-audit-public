@@ -273,6 +273,43 @@ fn write_canon_callee(rhs: &Rhs, out: &mut String) {
     }
 }
 
+/// The dotted name of a callee made on the result of another call, read
+/// through that call: `httpx.AsyncClient().get` gives
+/// `httpx.AsyncClient.get`, `new Repo(db).find` (Java, C#) `Repo.find`,
+/// `Anthropic().messages.create` `Anthropic.messages.create`. The name of a
+/// call is the name of its callee, its arguments left out, as the rule
+/// patterns write such a chain (`httpx\.AsyncClient\(\)\.\w+\s*\(`, dotted
+/// `httpx.AsyncClient.*`). `None` when the callee holds no call
+/// ([`canon_callee`] already names it) or a part that is not a name (a
+/// subscript, an expression). Ticket #260: [`canon_callee`] writes such a
+/// call `<call>.get`, which no sink matched.
+pub fn chained_callee_name(rhs: &Rhs) -> Option<String> {
+    fn write(rhs: &Rhs, out: &mut String, calls: &mut usize) -> bool {
+        match rhs {
+            Rhs::VarRef(name) => {
+                out.push_str(name);
+                true
+            }
+            Rhs::AttrRef { base, attr } => {
+                if !write(base, out, calls) {
+                    return false;
+                }
+                out.push('.');
+                out.push_str(attr);
+                true
+            }
+            Rhs::CallRef { callee, .. } => {
+                *calls += 1;
+                write(callee, out, calls)
+            }
+            _ => false,
+        }
+    }
+    let mut out = String::new();
+    let mut calls = 0usize;
+    (write(rhs, &mut out, &mut calls) && calls > 0).then_some(out)
+}
+
 /// Equivalent of Python's `repr(value)` for a constant — used
 /// as a canonical key (e.g. `repr(0)` = `"0"`, `repr("a")` = `"'a'"`).
 fn repr_const(v: &ConstValue) -> String {
@@ -747,6 +784,43 @@ mod tests {
             kwargs: vec![],
         };
         assert_eq!(canon_callee(&rhs), "<call>");
+    }
+
+    /// Ticket #260: a callee made on the result of another call is named
+    /// through that call; a callee without a call, or with a part that is
+    /// not a name, has no chained name.
+    #[test]
+    fn test_chained_callee_name() {
+        let attr = |b: Rhs, a: &str| Rhs::AttrRef {
+            base: Box::new(b),
+            attr: a.to_string(),
+        };
+        let call = |c: Rhs| Rhs::CallRef {
+            callee: Box::new(c),
+            args: vec![var("x")],
+            kwargs: vec![],
+        };
+        let client = call(attr(var("httpx"), "AsyncClient"));
+        assert_eq!(
+            chained_callee_name(&attr(client.clone(), "get")).as_deref(),
+            Some("httpx.AsyncClient.get")
+        );
+        assert_eq!(canon_callee(&attr(client, "get")), "<call>.get");
+        assert_eq!(
+            chained_callee_name(&attr(attr(call(var("Anthropic")), "messages"), "create"))
+                .as_deref(),
+            Some("Anthropic.messages.create")
+        );
+        assert_eq!(
+            chained_callee_name(&attr(call(attr(call(var("a")), "b")), "c")).as_deref(),
+            Some("a.b.c")
+        );
+        assert_eq!(chained_callee_name(&attr(var("requests"), "get")), None);
+        let subscript = Rhs::SubscriptRef {
+            base: Box::new(var("handlers")),
+            key: Box::new(Rhs::Const(ConstValue::Int(0))),
+        };
+        assert_eq!(chained_callee_name(&attr(call(subscript), "run")), None);
     }
 
     #[test]

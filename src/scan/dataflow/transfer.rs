@@ -26,7 +26,8 @@ use std::sync::{Arc, LazyLock};
 use fancy_regex::Regex;
 
 use super::ir::{
-    IrStmt, Lhs, Rhs, canon_callee, canon_lhs, canon_rhs, canon_subscript_key, pretty_rhs,
+    IrStmt, Lhs, Rhs, canon_callee, canon_lhs, canon_rhs, canon_subscript_key, chained_callee_name,
+    pretty_rhs,
 };
 use super::lattice::{SharedText, SourceInfo, State, Taint, join, state_get, state_put};
 use super::line_facts::{RuleLines, SourceLines, call_arguments, strip_plain_string_literals};
@@ -709,6 +710,10 @@ pub enum GlobPattern {
     Exact(String),
     /// A pattern with `*` or `**`, as its pieces in order.
     Wildcard(Vec<GlobToken>),
+    /// No name at all: the spec's regex describes a line, not a call
+    /// (`rule_loader::describes_a_line`, ticket #272). Only the line layer
+    /// reads such a spec, through its raw regex.
+    Nothing,
 }
 
 impl GlobPattern {
@@ -717,6 +722,7 @@ impl GlobPattern {
         match self {
             GlobPattern::Exact(exact) => name == exact,
             GlobPattern::Wildcard(tokens) => glob_match(tokens, name),
+            GlobPattern::Nothing => false,
         }
     }
 }
@@ -817,6 +823,13 @@ impl SourceSpec {
         self.raw_regex = Some(re);
         self
     }
+
+    /// The same spec, named by no dotted pattern: its regex describes a
+    /// line ([`GlobPattern::Nothing`], ticket #272).
+    pub fn describing_a_line(mut self) -> Self {
+        self.compiled = GlobPattern::Nothing;
+        self
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -876,6 +889,13 @@ impl SinkSpec {
         self.raw_regex = Some(re);
         self
     }
+
+    /// The same spec, named by no dotted pattern: its regex describes a
+    /// line ([`GlobPattern::Nothing`], ticket #272).
+    pub fn describing_a_line(mut self) -> Self {
+        self.compiled = GlobPattern::Nothing;
+        self
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -907,6 +927,13 @@ impl SanitizerSpec {
         self.raw_regex = Some(re);
         self
     }
+
+    /// The same spec, named by no dotted pattern: its regex describes a
+    /// line ([`GlobPattern::Nothing`], ticket #272).
+    pub fn describing_a_line(mut self) -> Self {
+        self.compiled = GlobPattern::Nothing;
+        self
+    }
 }
 
 /// Target of a passthrough's propagation: the return value, or a
@@ -920,8 +947,13 @@ pub enum ArgOut {
 #[derive(Debug, Clone)]
 pub struct PassthroughSpec {
     pub pattern: String,
-    /// Empty = all arguments.
+    /// Empty = all arguments, unless `receiver_only`.
     pub args_in: Vec<usize>,
+    /// No argument passes: the result carries the data of the receiver
+    /// only (`arg_index=none` in the `.sca` file, ticket #256): the nodes
+    /// `root.xpath(query)` returns are text of the document `root`, never of
+    /// the query that selects them.
+    pub receiver_only: bool,
     pub arg_out: ArgOut,
     pub raw_regex: Option<Regex>,
     compiled: GlobPattern,
@@ -934,6 +966,7 @@ impl PassthroughSpec {
         PassthroughSpec {
             pattern,
             args_in: Vec::new(),
+            receiver_only: false,
             arg_out: ArgOut::Return,
             raw_regex: None,
             compiled,
@@ -1164,16 +1197,24 @@ fn check_source_match(
 
 /// The source a constant-key read takes from its base, when one of the
 /// rule's sources names that base: a variable (`$_GET` in `$_GET['id']`)
-/// or an attribute (`request.GET` in `request.GET['q']`). Any other base
-/// (a call, a nested subscript) gives `None`: evaluating it would join
-/// the taint of its entries, which a constant key must not do (§9.bis).
-/// Ticket #271.
+/// or an attribute (`request.GET` in `request.GET['q']`). Ticket #271.
+///
+/// A nested read goes down to the base of its subscripts:
+/// `request.json["user"]["name"]` and `$_POST['user']['name']` take the
+/// source of `request.json` and `$_POST` (ticket #259; before, a nested
+/// subscript gave `None`, and the read was a source for the line layer
+/// alone, on the line that shows it). Only the NAME of that base is
+/// matched, never the state of the entries: `data["user"]["role"]` stays
+/// clean when only `data["user"]["name"]` holds request data. Any other
+/// base (a call, a temporary) gives `None`: evaluating it would join the
+/// taint of its entries, which a constant key must not do (§9.bis).
 fn subscript_base_source(base: &Rhs, specs: &RuleSpecs, site: Site<'_>) -> Option<Taint> {
     match base {
         Rhs::VarRef(name) => check_source_match(name, SourceRead::Whole, specs, site),
         Rhs::AttrRef { .. } => {
             check_source_match(&canon_callee(base), SourceRead::Whole, specs, site)
         }
+        Rhs::SubscriptRef { base: inner, .. } => subscript_base_source(inner, specs, site),
         _ => None,
     }
 }
@@ -1449,13 +1490,31 @@ pub fn eval_call(
         })
         .collect();
 
-    let callee_name = canon_callee(callee);
+    let mut callee_name = canon_callee(callee);
     // The receiver is also evaluated for its effects AND its taint
     // (e.g. `request.args` in `request.args.get(...)`) — propagates
     // to the result.
     let callee_taint = eval_rhs(callee, state, specs, findings, site);
 
-    match resolve_spec(&callee_name, specs, site) {
+    // A method of the result of another call, `<call>.get` for
+    // `httpx.AsyncClient().get(url)`, is also looked up by the name of the
+    // chain, `httpx.AsyncClient.get` (`ir::chained_callee_name`), which the
+    // rules write for such a call (`httpx\.AsyncClient\(\)\.\w+\s*\(`).
+    // Ticket #260, deviation from the Audit, which only knows `<call>.get`:
+    // the name `<call>.…` is tried first, so that the patterns it met
+    // (`**.get`) keep meeting it; the chain only names what it did not.
+    let mut resolved = resolve_spec(&callee_name, specs, site);
+    if matches!(resolved, ResolvedSpec::Unknown)
+        && let Some(chain) = chained_callee_name(callee)
+    {
+        let by_chain = resolve_spec(&chain, specs, site);
+        if !matches!(by_chain, ResolvedSpec::Unknown) {
+            resolved = by_chain;
+            callee_name = chain.into();
+        }
+    }
+
+    match resolved {
         ResolvedSpec::Source(spec) => Taint::tainted(
             [spec.kind.clone()],
             SourceInfo {
@@ -1504,12 +1563,14 @@ pub fn eval_call(
                 callee_name = format!("{declared_type}.{attr}").into();
                 summary = specs.summary(&callee_name);
             }
-            // Round 6 (Java) — chained call `new ClassName(...).method(...)`:
+            // Round 6 — chained call `new ClassName(...).method(...)`:
             // `java_lowering.rs::lower_method_invocation` inlines the
             // constructor's `CallRef` as the base of the `AttrRef`
-            // precisely to enable this resolution. No language guard
-            // needed: this form is only produced by Java lowering,
-            // with no effect on Python (never built by `lowering.rs`).
+            // precisely to enable this resolution, as the C# lowering does
+            // (ticket #284) and the Python one for `ClassName().method()`
+            // (`lowering.rs::lower_callee`, ticket #260: a Python class is
+            // called like a function, and its methods are summarized as
+            // `ClassName.method`). No language guard needed.
             if summary.is_none()
                 && let Rhs::AttrRef { base, attr } = callee
                 && let Rhs::CallRef {
@@ -1762,6 +1823,11 @@ fn eval_passthrough(
     kw_taints: &BTreeMap<String, Taint>,
 ) -> Taint {
     let _ = kw_taints; // signature aligned with Python, kwargs not consulted here (§7.2)
+    // Ticket #256: the result carries the receiver's data only, which
+    // `eval_call` joins to this result.
+    if spec.receiver_only {
+        return Taint::Clean;
+    }
     let indices: Vec<usize> = if spec.args_in.is_empty() {
         (0..arg_taints.len()).collect()
     } else {
@@ -2638,6 +2704,72 @@ mod tests {
         // An entry written on the state is read as written.
         let state = state_set(&state, "$params['other']", tainted("http", 1));
         assert!(eval(&read(varref("$params")), &state).is_clean());
+    }
+
+    /// Ticket #256: a passthrough that names its argument carries that
+    /// argument and the receiver only; one written `arg_index=none`, the
+    /// receiver only. The query of `elementpath.select(root, query)` and of
+    /// `root.xpath(query)` is not in their result, the document is.
+    #[test]
+    fn test_passthrough_carries_the_arguments_it_names() {
+        let select = PassthroughSpec::new("elementpath.select").with_args_in(vec![0]);
+        let mut xpath = PassthroughSpec::new("**.xpath");
+        xpath.receiver_only = true;
+        let mut specs = specs_with(vec![], vec![]);
+        specs.passthroughs = vec![select, xpath];
+        let eval =
+            |rhs: &Rhs, state: &State| eval_rhs(rhs, state, &specs, &mut vec![], Site::bare(1));
+        let state = state_set(&empty_state(), "query", tainted("http", 1));
+        let select_call = |root: &str| {
+            call(
+                attr(varref("elementpath"), "select"),
+                vec![varref(root), varref("query")],
+            )
+        };
+        let xpath_call = |root: &str| call(attr(varref(root), "xpath"), vec![varref("query")]);
+        assert!(eval(&select_call("root"), &state).is_clean());
+        assert!(eval(&xpath_call("root"), &state).is_clean());
+        let state = state_set(&state, "posted", tainted("http", 2));
+        assert!(eval(&select_call("posted"), &state).is_tainted());
+        assert!(eval(&xpath_call("posted"), &state).is_tainted());
+    }
+
+    /// Ticket #259: a read by several constant keys takes the source of
+    /// the base of its subscripts (`request.json["user"]["name"]`,
+    /// `$_POST['user']['name']`), by name only: the other entries of a
+    /// local are not joined.
+    #[test]
+    fn test_nested_const_key_read_on_a_source_is_that_source() {
+        let specs = specs_with(
+            vec![
+                SourceSpec::new("$_POST", "http"),
+                SourceSpec::new("request.json", "http"),
+            ],
+            vec![],
+        );
+        let read = |base: Rhs, key: &str| Rhs::SubscriptRef {
+            base: Box::new(base),
+            key: Box::new(Rhs::Const(ConstValue::Str(key.to_string()))),
+        };
+        let eval =
+            |rhs: &Rhs, state: &State| eval_rhs(rhs, state, &specs, &mut vec![], Site::bare(1));
+        let state = empty_state();
+        let nested = |base: Rhs| read(read(base, "user"), "name");
+        assert!(eval(&nested(varref("$_POST")), &state).is_tainted());
+        assert!(eval(&nested(attr(varref("request"), "json")), &state).is_tainted());
+        // A dynamic key inside goes down to the same base.
+        let dynamic = Rhs::SubscriptRef {
+            base: Box::new(Rhs::SubscriptRef {
+                base: Box::new(varref("$_POST")),
+                key: Box::new(varref("$i")),
+            }),
+            key: Box::new(Rhs::Const(ConstValue::Str("name".to_string()))),
+        };
+        assert!(eval(&dynamic, &state).is_tainted());
+        // A local keeps reading its own entries.
+        let state = state_set(&state, "data['user']['name']", tainted("http", 1));
+        assert!(eval(&read(read(varref("data"), "user"), "role"), &state).is_clean());
+        assert!(eval(&nested(varref("data")), &state).is_tainted());
     }
 
     #[test]

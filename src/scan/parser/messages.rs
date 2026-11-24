@@ -96,8 +96,15 @@ pub mod keys {
     pub const UNKNOWN_REQUIRES_KEY: &str = "dsl.unknown_requires_key";
     /// Unknown keyword in a rule: '{keyword}'
     pub const UNKNOWN_RULE_KEYWORD: &str = "dsl.unknown_rule_keyword";
-    /// Unknown option on a sink: '{option}' (only 'arg_index' exists)
+    /// Unknown option on a sink: '{option}' (only 'arg_index' and
+    /// 'arg_name' exist)
     pub const UNKNOWN_SINK_OPTION: &str = "dsl.unknown_sink_option";
+    /// Unknown option on a passthrough: '{option}' (only 'arg_index'
+    /// exists, ticket #256)
+    pub const UNKNOWN_PASSTHROUGH_OPTION: &str = "dsl.unknown_passthrough_option";
+    /// 'arg_index' of a passthrough must be a whole number or 'none':
+    /// '{value}' (ticket #256)
+    pub const BAD_PASSTHROUGH_ARG_INDEX: &str = "dsl.bad_passthrough_arg_index";
     /// Missing value after '{keyword}'
     pub const VALUE_MISSING: &str = "dsl.value_missing";
 
@@ -145,6 +152,8 @@ pub mod keys {
         UNKNOWN_REQUIRES_KEY,
         UNKNOWN_RULE_KEYWORD,
         UNKNOWN_SINK_OPTION,
+        UNKNOWN_PASSTHROUGH_OPTION,
+        BAD_PASSTHROUGH_ARG_INDEX,
         VALUE_MISSING,
     ];
 }
