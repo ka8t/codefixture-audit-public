@@ -29,9 +29,10 @@ use crate::report::exports::sarif::ReportFinding;
 pub struct ExportData {
     /// Format of this file (`1.0`), not the engine version.
     pub version: String,
-    /// Build of the engine that wrote it (ticket #149,
-    /// [`crate::BUILD_VERSION`]). Empty when reading a baseline written
-    /// before that field existed.
+    /// Release version of the engine that wrote it
+    /// ([`crate::RELEASE_VERSION`], `0.1.0`); the build identifier until
+    /// 2026-11-24 (ticket #149). Empty when reading a baseline written
+    /// before that field existed. Nothing reads it back.
     #[serde(default)]
     pub tool_version: String,
     pub timestamp: String,
@@ -67,7 +68,7 @@ pub fn build_export_data(
 ) -> ExportData {
     ExportData {
         version: "1.0".to_string(),
-        tool_version: crate::BUILD_VERSION.to_string(),
+        tool_version: crate::RELEASE_VERSION.to_string(),
         timestamp: timestamp.to_string(),
         date: date.to_string(),
         totals: compute_totals(findings),

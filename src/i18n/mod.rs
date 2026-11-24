@@ -211,6 +211,55 @@ mod tests {
         assert!(left.is_empty(), "{left:#?}");
     }
 
+    /// Colons follow each language's typography in every console and
+    /// report text (2026-11-24): no space before `:` in English, Spanish
+    /// and German ("Report generated : …" was written in English), a space
+    /// before it in French prose. Code is left out: quoted text (`…`,
+    /// '…', "…", «…»), a JSON key (`"paths":`), a URL, a placeholder or a
+    /// number before the colon (`{path}:{line}`, `12:30`). The separator
+    /// the code writes between a label and its value is the locale's
+    /// `label_colon`, checked here too.
+    #[test]
+    fn test_colons_follow_each_language_typography() {
+        let code = regex::Regex::new(r#""[^"]*"\s*:|`[^`]*`|'[^']*'|"[^"]*"|«[^»]*»|https?://\S+"#)
+            .unwrap();
+        let space_before = regex::Regex::new(r"[ \u{a0}\u{202f}]:(\s|$)").unwrap();
+        let glued = regex::Regex::new(r"[^\s\u{a0}\u{202f}{}\d:/\\]:(\s|$)").unwrap();
+        fn texts(prefix: &str, value: &Value, out: &mut Vec<(String, String)>) {
+            match value {
+                Value::String(s) => out.push((prefix.to_string(), s.clone())),
+                Value::Object(map) => map
+                    .iter()
+                    .for_each(|(k, v)| texts(&format!("{prefix}.{k}"), v, out)),
+                _ => {}
+            }
+        }
+        let mut wrong = Vec::new();
+        for lang in ["en", "fr", "es", "de"] {
+            let mut all = Vec::new();
+            texts("script", &load_script_locale(lang), &mut all);
+            texts("report", &load_report_locale(lang), &mut all);
+            for (key, text) in all {
+                if key.ends_with(".label_colon") {
+                    continue;
+                }
+                let prose = code.replace_all(&text, "Q");
+                let bad = if lang == "fr" {
+                    glued.is_match(&prose)
+                } else {
+                    space_before.is_match(&prose)
+                };
+                if bad {
+                    wrong.push(format!("{lang} {key}: {text}"));
+                }
+            }
+            let colon = t(&load_script_locale(lang), "label_colon");
+            let expected = if lang == "fr" { " : " } else { ": " };
+            assert_eq!(colon, expected, "{lang}: script label_colon");
+        }
+        assert!(wrong.is_empty(), "{wrong:#?}");
+    }
+
     /// Completeness test (ticket #48): the keys added to translate the
     /// remaining progress of the `scan` path ("Analyzing...", final
     /// summary, phase labels) must exist, non-empty, in

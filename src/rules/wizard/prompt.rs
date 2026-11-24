@@ -21,15 +21,19 @@ pub fn read_line<R: BufRead>(reader: &mut R) -> io::Result<String> {
     Ok(line.trim_end_matches(['\n', '\r']).to_string())
 }
 
-/// A free answer; an empty answer gives `default`.
+/// A free answer; an empty answer gives `default`. `colon` ends the
+/// question the console language's way (`label_colon` of the console
+/// locale: `": "`, French `" : "`); every question was written the French
+/// way before 2026-11-24.
 pub fn prompt<R: BufRead, W: Write>(
     reader: &mut R,
     writer: &mut W,
+    colon: &str,
     question: &str,
     default: &str,
 ) -> io::Result<String> {
     if !default.is_empty() {
-        write!(writer, "  {question} [{default}] : ")?;
+        write!(writer, "  {question} [{default}]{colon}")?;
         writer.flush()?;
         let answer = read_line(reader)?;
         let answer = answer.trim();
@@ -39,7 +43,7 @@ pub fn prompt<R: BufRead, W: Write>(
             answer.to_string()
         })
     } else {
-        write!(writer, "  {question} : ")?;
+        write!(writer, "  {question}{colon}")?;
         writer.flush()?;
         Ok(read_line(reader)?.trim().to_string())
     }
@@ -63,11 +67,12 @@ pub fn prompt_choice<R: BufRead, W: Write>(
     loop {
         write!(
             writer,
-            "  {} [1-{}, {} {}] : ",
+            "  {} [1-{}, {} {}]{}",
             t(script_locale, "wiz_choice"),
             choices.len(),
             t(script_locale, "wizard_old_default"),
-            default_idx + 1
+            default_idx + 1,
+            t(script_locale, "label_colon")
         )?;
         writer.flush()?;
         let answer = read_line(reader)?;
@@ -111,7 +116,8 @@ pub fn prompt_yes_no<R: BufRead, W: Write>(
             "wizard_yes_no_default_no"
         },
     );
-    write!(writer, "  {question} {suffix} : ")?;
+    let colon = t(script_locale, "label_colon");
+    write!(writer, "  {question} {suffix}{colon}")?;
     writer.flush()?;
     let answer = read_line(reader)?.trim().to_lowercase();
     if answer.is_empty() {

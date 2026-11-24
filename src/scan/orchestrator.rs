@@ -950,7 +950,9 @@ fn vulnerable_dependency_findings(
                 // advisory itself; the remaining doubt is whether the
                 // vulnerable code path is used.
                 confidence: 90,
-                benefit: String::new(),
+                // In the report's language: an empty benefit let the
+                // report show the playbook's English copy (2026-11-24).
+                benefit: texts.get("vulnerable_benefit"),
                 committer: None,
                 rule_source: "advisory_db".to_string(),
                 file_scope: None,
@@ -1933,7 +1935,14 @@ fn file_kind(pf: &ParsedFile) -> String {
 /// `html: 351 (html 317, jsp 34)`. A single-kind group keeps the plain
 /// `java: 3460` form. Languages stay in alphabetical order, as in
 /// [`files_per_language`].
-fn phase_a_language_summary(files: impl IntoIterator<Item = (&'static str, String)>) -> String {
+///
+/// `colon` separates a language from its count the console language's
+/// way (`label_colon` of the console locale: `": "`, French `" : "`);
+/// every language wrote `php: 169` before 2026-11-24.
+fn phase_a_language_summary(
+    files: impl IntoIterator<Item = (&'static str, String)>,
+    colon: &str,
+) -> String {
     let mut groups: BTreeMap<&'static str, BTreeMap<String, usize>> = BTreeMap::new();
     for (lang, kind) in files {
         *groups.entry(lang).or_default().entry(kind).or_insert(0) += 1;
@@ -1943,7 +1952,7 @@ fn phase_a_language_summary(files: impl IntoIterator<Item = (&'static str, Strin
         .map(|(lang, kinds)| {
             let total: usize = kinds.values().sum();
             if kinds.len() < 2 {
-                return format!("{lang}: {total}");
+                return format!("{lang}{colon}{total}");
             }
             let mut split: Vec<(String, usize)> = kinds.into_iter().collect();
             // Stable sort on a BTreeMap's alphabetical order: ties stay alphabetical.
@@ -1953,7 +1962,7 @@ fn phase_a_language_summary(files: impl IntoIterator<Item = (&'static str, Strin
                 .map(|(kind, n)| format!("{kind} {n}"))
                 .collect::<Vec<_>>()
                 .join(", ");
-            format!("{lang}: {total} ({detail})")
+            format!("{lang}{colon}{total} ({detail})")
         })
         .collect::<Vec<_>>()
         .join(", ")
@@ -2504,6 +2513,7 @@ pub fn run_scan(config: &ScanConfig) -> ScanReport {
         parsed_files
             .iter()
             .map(|pf| (pf.language.rule_tag(), file_kind(pf))),
+        &phase_label(config, "label_colon", " : "),
     );
     record_phase(
         &format!(
@@ -2634,7 +2644,10 @@ pub fn run_scan(config: &ScanConfig) -> ScanReport {
                     context_before: String::new(),
                     context_after: String::new(),
                     confidence: 90,
-                    benefit: String::new(),
+                    // In the report's language: an empty benefit let the
+                    // French, Spanish and German reports show the
+                    // playbook's English copy (2026-11-24).
+                    benefit: texts.get("unpinned_benefit"),
                     committer: None,
                     rule_source: "json_builtin".to_string(),
                     file_scope: None,
@@ -4030,25 +4043,35 @@ mod tests {
         );
 
         // Every language has its own texts, none left as a locale key.
+        // The benefit too (2026-11-24): left empty, it let the report show
+        // the playbook's English copy in every language.
         let mut names = std::collections::BTreeSet::new();
+        let mut benefits = std::collections::BTreeSet::new();
         for lang in ["en", "fr", "es", "de"] {
             let (vulnerable, unpinned) = scan(lang);
             for text in [
                 &vulnerable.rule_name,
                 &vulnerable.risk,
                 vulnerable.solution.as_ref().unwrap(),
+                &vulnerable.benefit,
                 &unpinned.rule_name,
                 &unpinned.risk,
                 unpinned.solution.as_ref().unwrap(),
+                &unpinned.benefit,
             ] {
                 assert!(
-                    !text.contains("dependency_findings.") && !text.contains('{'),
-                    "{lang}: {text}"
+                    !text.is_empty()
+                        && !text.contains("dependency_findings.")
+                        && !text.contains('{'),
+                    "{lang}: {text:?}"
                 );
             }
             names.insert(vulnerable.rule_name);
+            benefits.insert(vulnerable.benefit);
+            benefits.insert(unpinned.benefit);
         }
         assert_eq!(names.len(), 4, "one name per language: {names:?}");
+        assert_eq!(benefits.len(), 8, "one benefit per language: {benefits:?}");
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -4741,13 +4764,19 @@ mod tests {
             ("html", "vue".to_string()),
             ("javascript", "ts".to_string()),
         ];
-        let summary = phase_a_language_summary(files);
+        let summary = phase_a_language_summary(files.clone(), ": ");
         assert_eq!(
             summary,
             "html: 4 (html 2, jsp 1, vue 1), java: 2, javascript: 1"
         );
+        // French puts a space before the colon (2026-11-24).
+        let summary = phase_a_language_summary(files, " : ");
+        assert_eq!(
+            summary,
+            "html : 4 (html 2, jsp 1, vue 1), java : 2, javascript : 1"
+        );
 
-        let empty = phase_a_language_summary(Vec::new());
+        let empty = phase_a_language_summary(Vec::new(), ": ");
         assert_eq!(empty, "");
     }
 
@@ -4788,14 +4817,17 @@ mod tests {
             .unwrap_or_else(|| panic!("no phase A label among {labels:?}"))
             .clone();
 
-        let html_split = phase_a_label.contains("html: 3 (html 2, jsp 1)");
+        // No console locale: the label is the French fallback, with the
+        // French colon (2026-11-24).
+        let html_split = phase_a_label.contains("html : 3 (html 2, jsp 1)");
         assert!(html_split, "html split expected: {phase_a_label:?}");
-        let docker_split = phase_a_label.contains("dockerfile: 2 (Dockerfile 1, Dockerfile.dev 1)");
+        let docker_split =
+            phase_a_label.contains("dockerfile : 2 (Dockerfile 1, Dockerfile.dev 1)");
         assert!(
             docker_split,
             "Dockerfile kinds by name expected: {phase_a_label:?}"
         );
-        let java_plain = phase_a_label.contains("java: 1,") || phase_a_label.ends_with("java: 1");
+        let java_plain = phase_a_label.contains("java : 1,") || phase_a_label.ends_with("java : 1");
         assert!(
             java_plain,
             "single-kind group keeps the plain form: {phase_a_label:?}"
@@ -4885,7 +4917,8 @@ mod tests {
         assert!(
             labels
                 .iter()
-                .any(|l| l.contains("java: 2 (java 1, pom.xml 1)")),
+                // The French fallback label, French colon (2026-11-24).
+                .any(|l| l.contains("java : 2 (java 1, pom.xml 1)")),
             "pom.xml counted under java by its name: {labels:?}"
         );
         std::fs::remove_dir_all(&root).ok();
@@ -4930,11 +4963,11 @@ mod tests {
             "le préfixe [n/N] et le libellé existant doivent rester intacts : {phase_a_label:?}"
         );
         assert!(
-            phase_a_label.contains("python: 2"),
+            phase_a_label.contains("python : 2"),
             "décompte python attendu : {phase_a_label:?}"
         );
         assert!(
-            phase_a_label.contains("java: 1"),
+            phase_a_label.contains("java : 1"),
             "décompte java attendu : {phase_a_label:?}"
         );
 

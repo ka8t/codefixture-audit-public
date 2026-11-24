@@ -144,21 +144,27 @@ pub fn run_wizard<R: BufRead, W: Write>(
     }
 
     let name = loop {
-        let candidate = prompt(reader, writer, &say("wizard_name"), "")?;
+        let candidate = prompt(reader, writer, &say("label_colon"), &say("wizard_name"), "")?;
         if candidate.is_empty() {
             writeln!(writer, "    {}", say("wizard_field_required"))?;
             continue;
         }
         if !valid_rule_name(&candidate) {
-            writeln!(writer, "    {} : '{candidate}'", say("wizard_invalid_id"))?;
+            writeln!(
+                writer,
+                "    {}{}'{candidate}'",
+                say("wizard_invalid_id"),
+                say("label_colon")
+            )?;
             writeln!(writer, "    {}", say("wizard_id_format"))?;
             continue;
         }
         if let Some(existing) = find_existing_rule(target.rules_dir, &language, &candidate) {
             writeln!(
                 writer,
-                "\n    {} : {}",
+                "\n    {}{}{}",
                 say(target.exists_key),
+                say("label_colon"),
                 existing.display()
             )?;
             if !prompt_yes_no(
@@ -306,6 +312,7 @@ pub fn run_wizard<R: BufRead, W: Write>(
                 let candidate = prompt(
                     reader,
                     writer,
+                    &say("label_colon"),
                     &say("wizard_pattern_prompt"),
                     &defaults.pattern,
                 )?;
@@ -352,6 +359,7 @@ pub fn run_wizard<R: BufRead, W: Write>(
             form.neutralizer = prompt(
                 reader,
                 writer,
+                &say("label_colon"),
                 &say("wizard_neutralizer_prompt"),
                 &defaults.neutralizer,
             )?;
@@ -396,6 +404,7 @@ pub fn run_wizard<R: BufRead, W: Write>(
     form.fix_before = prompt(
         reader,
         writer,
+        &say("label_colon"),
         &say("wizard_fix_before_prompt"),
         &defaults.fix_before,
     )?;
@@ -403,6 +412,7 @@ pub fn run_wizard<R: BufRead, W: Write>(
         form.fix_after = prompt(
             reader,
             writer,
+            &say("label_colon"),
             &say("wizard_fix_after_prompt"),
             &defaults.fix_after,
         )?;
@@ -528,7 +538,13 @@ fn ask_texts<R: BufRead, W: Write>(
     section(writer, title)?;
     let mut texts: [String; 4] = Default::default();
     loop {
-        texts[0] = prompt(reader, writer, &say(&format!("{prefix}_en")), &defaults[0])?;
+        texts[0] = prompt(
+            reader,
+            writer,
+            &say("label_colon"),
+            &say(&format!("{prefix}_en")),
+            &defaults[0],
+        )?;
         if texts[0].is_empty() && required {
             writeln!(writer, "    {}", say("wizard_field_required"))?;
             continue;
@@ -542,6 +558,7 @@ fn ask_texts<R: BufRead, W: Write>(
         texts[i + 1] = prompt(
             reader,
             writer,
+            &say("label_colon"),
             &say(&format!("{prefix}_{code}")),
             &defaults[i + 1],
         )?;
@@ -587,6 +604,7 @@ fn ask_taint<R: BufRead, W: Write>(
         let Some(pattern) = list_item(
             reader,
             writer,
+            &say("label_colon"),
             &question,
             default.map(|s| s.pattern.as_str()),
         )?
@@ -623,6 +641,7 @@ fn ask_taint<R: BufRead, W: Write>(
         let Some(pattern) = list_item(
             reader,
             writer,
+            &say("label_colon"),
             &question,
             default.map(|s| s.pattern.as_str()),
         )?
@@ -640,6 +659,7 @@ fn ask_taint<R: BufRead, W: Write>(
             let answer = prompt(
                 reader,
                 writer,
+                &say("label_colon"),
                 &say("wizard_sink_argument"),
                 default.map_or("", |s| s.argument.as_str()),
             )?;
@@ -671,7 +691,8 @@ fn ask_taint<R: BufRead, W: Write>(
             let default = defaults.get(offered).map(String::as_str);
             offered += 1;
             let text = say(question).replace("{n}", &(list.len() + 1).to_string());
-            let Some(answer) = list_item(reader, writer, &text, default)? else {
+            let Some(answer) = list_item(reader, writer, &say("label_colon"), &text, default)?
+            else {
                 continue;
             };
             if answer.is_empty() {
@@ -688,10 +709,11 @@ fn ask_taint<R: BufRead, W: Write>(
 fn list_item<R: BufRead, W: Write>(
     reader: &mut R,
     writer: &mut W,
+    colon: &str,
     question: &str,
     offered: Option<&str>,
 ) -> io::Result<Option<String>> {
-    let answer = prompt(reader, writer, question, offered.unwrap_or(""))?;
+    let answer = prompt(reader, writer, colon, question, offered.unwrap_or(""))?;
     Ok(if offered.is_some() && answer == "-" {
         None
     } else {

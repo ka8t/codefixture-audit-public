@@ -1,4 +1,5 @@
 {
+  "label_colon": ": ",
   "scan_security": "Security Scan",
   "scan_architecture": "Architecture Scan",
   "scan_ui": "Interface Scan",

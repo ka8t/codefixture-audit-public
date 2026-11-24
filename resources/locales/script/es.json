@@ -1,4 +1,5 @@
 {
+  "label_colon": ": ",
   "scan_security": "Escaneo de Seguridad",
   "scan_architecture": "Escaneo de Arquitectura",
   "scan_ui": "Escaneo de Interfaz",
@@ -315,7 +316,7 @@
   "cli_demo_mode": "MODO DEMOSTRACIÓN",
   "demo_mode_license_required": "Licencia requerida para uso completo.",
   "cli_demo_max_files": "Max archivos: {count}",
-  "cli_demo_categories": "Categorías  : {list}",
+  "cli_demo_categories": "Categorías: {list}",
   "config_brand_prefix_invalid": "brand.prefix inválido: \"{prefix}\" — debe tener 1-10 caracteres alfanuméricos",
   "config_brand_color_invalid": "brand.{key} inválido: \"{value}\" — debe ser formato hexadecimal #rrggbb",
   "config_brand_logo_not_found": "brand.logo no encontrado: {path}",

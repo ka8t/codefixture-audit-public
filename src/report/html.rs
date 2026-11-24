@@ -1092,6 +1092,7 @@ pub fn generate_html(
             data.total_high,
             data.total_medium,
             data.health_score,
+            comparison,
             &report_locale,
         ),
     );

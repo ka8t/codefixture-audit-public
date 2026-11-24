@@ -427,7 +427,7 @@ mod tests {
         assert_eq!(result, Some(written), "{out}");
         assert!(!replaced, "{out}");
         assert_eq!(
-            out.matches("Rule name (snake_case) :").count(),
+            out.matches("Rule name (snake_case): ").count(),
             2,
             "the name is asked again: {out}"
         );

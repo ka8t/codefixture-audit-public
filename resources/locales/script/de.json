@@ -1,4 +1,5 @@
 {
+  "label_colon": ": ",
   "scan_security": "Sicherheitsscan",
   "scan_architecture": "Architekturscan",
   "scan_ui": "Oberflächenscan",
@@ -315,7 +316,7 @@
   "cli_demo_mode": "DEMONSTRATIONSMODUS",
   "demo_mode_license_required": "Lizenz für vollständige Nutzung erforderlich.",
   "cli_demo_max_files": "Max Dateien: {count}",
-  "cli_demo_categories": "Kategorien : {list}",
+  "cli_demo_categories": "Kategorien: {list}",
   "config_brand_prefix_invalid": "brand.prefix ungültig: \"{prefix}\" — muss 1-10 alphanumerische Zeichen haben",
   "config_brand_color_invalid": "brand.{key} ungültig: \"{value}\" — muss im Hexadezimalformat #rrggbb sein",
   "config_brand_logo_not_found": "brand.logo nicht gefunden: {path}",

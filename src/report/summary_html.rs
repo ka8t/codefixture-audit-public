@@ -128,6 +128,37 @@ fn format_priority_rule_list(ranked: &[RankedRule], report_locale: &Value) -> St
         .join(", ")
 }
 
+/// Direction of the project since its baseline, as the Trend block of the
+/// executive summary counts it ([`build_exec_trend`]): the issues resolved
+/// against the new ones.
+#[derive(Debug, PartialEq)]
+enum HealthTrend {
+    /// No baseline: a first analysis has no trend.
+    FirstAnalysis,
+    /// More issues resolved than new.
+    Improving,
+    /// More new issues than resolved.
+    Regressing,
+    /// As many resolved as new, none of either included.
+    Stable,
+}
+
+impl HealthTrend {
+    /// The trend of `comparison`, `None` on a first analysis.
+    fn of(comparison: Option<&crate::report::comparison::ComparisonResult>) -> Self {
+        let Some(comparison) = comparison else {
+            return Self::FirstAnalysis;
+        };
+        let resolved = comparison.resolved_findings.len();
+        let new = comparison.new_findings.len();
+        match resolved.cmp(&new) {
+            std::cmp::Ordering::Greater => Self::Improving,
+            std::cmp::Ordering::Less => Self::Regressing,
+            std::cmp::Ordering::Equal => Self::Stable,
+        }
+    }
+}
+
 /// One line of the prioritized recommendations.
 struct Recommendation {
     /// `Some("p0")`…`Some("p3")` for an action, `None` for the health
@@ -162,12 +193,20 @@ struct Recommendation {
 ///   it opens: the tester read "17 critical findings" in the summary and
 ///   could not find them below, the critical section being the only one
 ///   left folded.
+/// - the health note between 50 and 80 states no trend it cannot see.
+///   Python wrote "Health score improving" whatever the history, and the
+///   first analysis of a project said it improving next to the Trend
+///   block's "First audit — baseline created" (JeecgBoot, 2026-11-24).
+///   Without `comparison` the note only asks for the fixes; with one it
+///   states what the Trend block counts: more issues resolved than new,
+///   more new than resolved, or as many of each ([`HealthTrend`]).
 pub fn build_exec_recommendations(
     findings: &[ReportFinding],
     total_critical: usize,
     total_high: usize,
     total_medium: usize,
     health_score: i64,
+    comparison: Option<&crate::report::comparison::ComparisonResult>,
     report_locale: &Value,
 ) -> String {
     let mut recs: Vec<Recommendation> = Vec::new();
@@ -232,7 +271,12 @@ pub fn build_exec_recommendations(
     let health_key = if health_score < 50 {
         Some("exec_rec_health_critical")
     } else if health_score < 80 {
-        Some("exec_rec_health_warning")
+        Some(match HealthTrend::of(comparison) {
+            HealthTrend::FirstAnalysis => "exec_rec_health_warning",
+            HealthTrend::Improving => "exec_rec_health_warning_improving",
+            HealthTrend::Regressing => "exec_rec_health_warning_regressing",
+            HealthTrend::Stable => "exec_rec_health_warning_stable",
+        })
     } else {
         None
     };
@@ -550,7 +594,7 @@ mod tests {
     fn test_build_exec_recommendations_high_findings_produces_p1() {
         let en = load_report_locale("en");
         let findings = vec![finding("r1", "SQL Injection", "HIGH", 90)];
-        let html = build_exec_recommendations(&findings, 0, 1, 0, 100, &en);
+        let html = build_exec_recommendations(&findings, 0, 1, 0, 100, None, &en);
         assert!(html.contains("exec-rec-priority p1"));
         assert!(html.contains("SQL Injection"));
     }
@@ -564,7 +608,7 @@ mod tests {
             finding("r1", "SQL Injection", "HIGH", 90),
             finding("r2", "Secret in CI", "CRITICAL", 90),
         ];
-        let html = build_exec_recommendations(&findings, 1, 1, 0, 100, &en);
+        let html = build_exec_recommendations(&findings, 1, 1, 0, 100, None, &en);
         let critical = html
             .find("Fix the 1 critical findings first, starting with: Secret in CI")
             .expect("critical line");
@@ -607,7 +651,7 @@ mod tests {
             finding("r1", "SQL Injection", "HIGH", 90),
             finding("r2", "Secret in CI", "CRITICAL", 90),
         ];
-        let html = build_exec_recommendations(&findings, 1, 1, 25, 100, &en);
+        let html = build_exec_recommendations(&findings, 1, 1, 25, 100, None, &en);
         let badges: Vec<&str> = html
             .match_indices("exec-rec-priority ")
             .map(|(i, _)| &html[i + 18..i + 20])
@@ -629,7 +673,7 @@ mod tests {
             }))
             .expect("taint flow"),
         );
-        let html = build_exec_recommendations(&[medium], 0, 0, 1, 100, &en);
+        let html = build_exec_recommendations(&[medium], 0, 0, 1, 100, None, &en);
         assert!(!html.contains("absolute priority"), "{html}");
         assert_eq!(html.matches("exec-rec-item").count(), 1, "{html}");
     }
@@ -643,7 +687,7 @@ mod tests {
             finding("r1", "SQL Injection", "HIGH", 90),
             finding("r2", "Secret in CI", "CRITICAL", 90),
         ];
-        let html = build_exec_recommendations(&findings, 1, 1, 0, 100, &en);
+        let html = build_exec_recommendations(&findings, 1, 1, 0, 100, None, &en);
         for id in ["section-CRITICAL", "section-HIGH"] {
             assert!(
                 html.contains(&format!(
@@ -660,7 +704,7 @@ mod tests {
     fn test_build_exec_recommendations_health_note_has_no_badge() {
         let en = load_report_locale("en");
         let findings = vec![finding("r1", "SQL Injection", "HIGH", 90)];
-        let html = build_exec_recommendations(&findings, 0, 1, 0, 30, &en);
+        let html = build_exec_recommendations(&findings, 0, 1, 0, 30, None, &en);
         let note = html.find("exec-rec-note").expect("health note");
         assert!(html.find("exec-rec-priority p1").unwrap() < note, "{html}");
         assert_eq!(html.matches("exec-rec-priority").count(), 1, "{html}");
@@ -705,15 +749,79 @@ mod tests {
     #[test]
     fn test_build_exec_recommendations_no_issues_gives_good_message() {
         let en = load_report_locale("en");
-        let html = build_exec_recommendations(&[], 0, 0, 0, 100, &en);
+        let html = build_exec_recommendations(&[], 0, 0, 0, 100, None, &en);
         assert!(html.contains(&t(&en, "exec_rec_good")));
     }
 
     #[test]
     fn test_build_exec_recommendations_critical_health_score() {
         let en = load_report_locale("en");
-        let html = build_exec_recommendations(&[], 0, 0, 0, 30, &en);
+        let html = build_exec_recommendations(&[], 0, 0, 0, 30, None, &en);
         assert!(html.contains(&t(&en, "exec_rec_health_critical")));
+    }
+
+    /// The health note of a score between 50 and 80 follows the Trend
+    /// block (2026-11-24): a first analysis of JeecgBoot said "Health score
+    /// improving" next to "First audit — baseline created". In the four
+    /// languages: no trend without a baseline, then improving, regressing
+    /// and stable histories, each with its own text.
+    #[test]
+    fn test_health_note_states_only_the_trend_it_sees() {
+        let comparison =
+            |resolved: usize, new: usize| crate::report::comparison::ComparisonResult {
+                new_findings: (0..new).map(|_| finding("r1", "R", "HIGH", 90)).collect(),
+                resolved_findings: (0..resolved)
+                    .map(|_| finding("r2", "S", "HIGH", 90))
+                    .collect(),
+                unchanged_findings: vec![],
+                baseline_date: "2026-11-23-15-47".to_string(),
+                baseline_totals: std::collections::BTreeMap::new(),
+            };
+        let improving = comparison(3, 1);
+        let regressing = comparison(1, 3);
+        let stable = comparison(2, 2);
+        let nothing = comparison(0, 0);
+        let cases = [
+            (None, "exec_rec_health_warning"),
+            (Some(&improving), "exec_rec_health_warning_improving"),
+            (Some(&regressing), "exec_rec_health_warning_regressing"),
+            (Some(&stable), "exec_rec_health_warning_stable"),
+            (Some(&nothing), "exec_rec_health_warning_stable"),
+        ];
+        for lang in ["en", "fr", "es", "de"] {
+            let locale = load_report_locale(lang);
+            let mut notes = std::collections::BTreeSet::new();
+            for (history, key) in cases {
+                let html = build_exec_recommendations(&[], 0, 0, 0, 65, history, &locale);
+                let note = t(&locale, key);
+                assert!(
+                    !note.is_empty() && note != key && html.contains(&note),
+                    "{lang} {key}: {html}"
+                );
+                notes.insert(note);
+            }
+            assert_eq!(notes.len(), 4, "{lang}: one note per trend: {notes:?}");
+            // A first analysis compares with nothing: its note names no
+            // baseline, which the three other notes all name.
+            let baseline_word = match lang {
+                "en" => "baseline",
+                "fr" => "référence",
+                "es" => "referencia",
+                _ => "Referenz",
+            };
+            let first = t(&locale, "exec_rec_health_warning");
+            assert!(!first.contains(baseline_word), "{lang}: {first}");
+            for key in [
+                "exec_rec_health_warning_improving",
+                "exec_rec_health_warning_regressing",
+                "exec_rec_health_warning_stable",
+            ] {
+                assert!(t(&locale, key).contains(baseline_word), "{lang} {key}");
+            }
+        }
+        let en = load_report_locale("en");
+        let first = t(&en, "exec_rec_health_warning");
+        assert!(!first.contains("improving"), "{first}");
     }
 
     #[test]

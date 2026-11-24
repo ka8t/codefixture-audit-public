@@ -236,7 +236,7 @@ For a report in French, Spanish or German, replace `--lang en` with `--lang fr`,
 The terminal shows the progress, what was loaded and a summary. Here, the analysis of OWASP Juice Shop with this repository's demonstration rules:
 
 ```text
-[codefixture-audit] codefixture-audit 0.1.0+54.171ec77
+[codefixture-audit] codefixture-audit 0.1.0
 [codefixture-audit] Scope (audit.config.json): include the whole project; exclude 7 default patterns
 [codefixture-audit] Analysis in progress...
 …
@@ -244,7 +244,7 @@ The terminal shows the progress, what was loaded and a summary. Here, the analys
 [codefixture-audit] 23 rule(s) loaded for languages: dockerfile, html, javascript, python, yaml
 …
 [codefixture-audit] Version rules: 26 advisory records for 21 published vulnerabilities (21 with a CVE), from the rule pack /…/target/release/rules.cfpack, OSV data up to 2026-11-18T12:11:06.983073747Z: Maven 5, NuGet 3, Packagist 3, PyPI 10, npm 5.
-[codefixture-audit] Report generated : /path/to/your/project/audit-reports/SCA-REPORT-2026-11-20-13-17.html
+[codefixture-audit] Report generated: /path/to/your/project/audit-reports/SCA-REPORT-2026-11-20-13-17.html
 [codefixture-audit] 871 file(s) scanned, 91999 line(s) of code, 31 finding(s)
 ```
 

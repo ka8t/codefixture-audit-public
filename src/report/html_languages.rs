@@ -75,7 +75,10 @@ mod tests {
     /// Words that only an English text holds, for the texts no locale has
     /// (the severity codes `CRITICAL`, `HIGH`… are identifiers shown in
     /// every language and are not words).
-    const ENGLISH_ONLY: [&str; 12] = [
+    /// `Fixtures` and the lowercase `baseline` are not listed: the French,
+    /// Spanish and German locales use "Fixtures" as their own term, and the
+    /// French text quotes the `--baseline` option.
+    const ENGLISH_ONLY: [&str; 14] = [
         "Generated on",
         "Back to top",
         "Previous section",
@@ -87,7 +90,34 @@ mod tests {
         "Baseline",
         "Builtin",
         "Custom",
+        "Flows",
+        "finding",
         " High",
+    ];
+
+    /// Words the sweep of real reports (DVWA, juice-shop, Java, four
+    /// languages, 2026-11-24) flagged although they belong to the text's
+    /// own language, with why they are not in the lists above. Kept here
+    /// so that nobody adds them back as "foreign" words.
+    const NOT_FOREIGN: [(&str, &str); 6] = [
+        (
+            "des",
+            "German article (\"Sicherheit des Quellcodes\"), not only French",
+        ),
+        ("la", "Spanish article (\"la referencia\"), not only French"),
+        (
+            "Tests",
+            "a French and German word too (\"Tests unitaires\", \"Unit-Tests\")",
+        ),
+        ("version", "a French word too (\"règles de version\")"),
+        (
+            "source",
+            "a folder name in the project's paths (`vulnerabilities/exec/source/`)",
+        ),
+        (
+            "section",
+            "the name of the `data-nav-section` attribute, not its text",
+        ),
     ];
 
     /// Letters that a text of `lang` never holds.
@@ -557,6 +587,33 @@ mod tests {
         // A text of the charts is checked like the page.
         let chart = wrap("").replace(r#""total":"Total""#, r#""total":"Flows par règle""#);
         assert!(!foreign_texts("en", &chart).is_empty());
+    }
+
+    /// The words of [`NOT_FOREIGN`] are in no list of foreign words, and a
+    /// report text holding them in their own language passes the check.
+    #[test]
+    fn test_words_shared_by_languages_are_not_foreign() {
+        for (word, reason) in NOT_FOREIGN {
+            assert!(
+                !FRENCH_ONLY.contains(&word) && !ENGLISH_ONLY.contains(&word),
+                "{word}: {reason}"
+            );
+        }
+        let page = |body: &str| {
+            format!(
+                r#"<html><body>{body}<script id="report-i18n" type="application/json">{{}}</script><script>const data = {{"i18n":{{}},"history":{{"labels":[]}}}};</script></body></html>"#
+            )
+        };
+        let de = page("<p>Die Sicherheit des Quellcodes</p><p>🧪 Unit-Tests</p>");
+        assert!(
+            foreign_texts("de", &de).is_empty(),
+            "{:?}",
+            foreign_texts("de", &de)
+        );
+        let es = page("<p>Comparación con la referencia</p>");
+        assert!(foreign_texts("es", &es).is_empty());
+        let fr = page("<p>Règles de version du pack</p><p>Tests unitaires</p>");
+        assert!(foreign_texts("fr", &fr).is_empty());
     }
 
     /// Every chart label is filled from the locale in every language: the

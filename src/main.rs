@@ -580,9 +580,35 @@ fn print_phase_progress(label: &str, elapsed: std::time::Duration) {
 /// without capturing stderr).
 fn phase_progress_line(label: &str, elapsed: std::time::Duration) -> String {
     format!(
-        "[codefixture-audit]   {label} : {}",
+        "[codefixture-audit]   {label}{}{}",
+        console_colon(),
         format_duration(elapsed)
     )
+}
+
+/// The separator between a label and its value in the console's language
+/// (`label_colon` of the console locale: `": "`, French `" : "`), for
+/// the lines written by a plain `fn` callback that has no locale,
+/// `print_phase_progress`. Set by `run_scan_command` once the console
+/// language is known. The phase lines used to write `label : 34 ms`, the
+/// French way, in every language (2026-11-24).
+static CONSOLE_COLON: std::sync::RwLock<String> = std::sync::RwLock::new(String::new());
+
+/// Sets [`CONSOLE_COLON`].
+fn set_console_colon(colon: &str) {
+    if let Ok(mut current) = CONSOLE_COLON.write() {
+        *current = colon.to_string();
+    }
+}
+
+/// [`CONSOLE_COLON`], `": "` until a scan sets it.
+fn console_colon() -> String {
+    CONSOLE_COLON
+        .read()
+        .ok()
+        .map(|c| c.clone())
+        .filter(|c| !c.is_empty())
+        .unwrap_or_else(|| ": ".to_string())
 }
 
 /// Human-readable duration for the console (ticket #135): `850 ms`
@@ -1044,8 +1070,15 @@ mod tests {
     #[test]
     fn test_phase_progress_line_and_print() {
         let elapsed = std::time::Duration::from_millis(1_250);
+        // The console language's colon (2026-11-24): none before `:` in
+        // English, a space in French. The only test that sets it.
+        set_console_colon(": ");
+        let line = phase_progress_line("[2/4] phase A", elapsed);
+        assert_eq!(line, "[codefixture-audit]   [2/4] phase A: 1.2 s");
+        set_console_colon(" : ");
         let line = phase_progress_line("[2/4] phase A", elapsed);
         assert_eq!(line, "[codefixture-audit]   [2/4] phase A : 1.2 s");
+        set_console_colon(": ");
         // Writes the same line to stderr; must not panic.
         print_phase_progress("[2/4] phase A", elapsed);
     }
@@ -1626,6 +1659,8 @@ fn install_panic_hook(lang: &str) {
         // before anything else can fail.
         codefixture_audit::scan::debug_log::record_panic(info);
         let thread = std::thread::current();
+        // The build identifier, not the release version: a crash log is a
+        // diagnostic and names the exact build (2026-11-24).
         let entry = format!(
             "codefixture-audit {}\nincident: {incident}\nthread: {}\n{info}\n\nbacktrace:\n{}\n\n",
             codefixture_audit::BUILD_VERSION,
@@ -2570,7 +2605,8 @@ fn write_sbom(
         project_name,
         "",
         &effective_tool_name(brand),
-        codefixture_audit::BUILD_VERSION,
+        // A deliverable: the release version, never the build identifier.
+        codefixture_audit::RELEASE_VERSION,
         &now.to_rfc3339(),
     );
     let json = sbom
@@ -2593,6 +2629,8 @@ fn log_scan_header(project: &Path, resources: &codefixture_audit::scan::resource
     use codefixture_audit::debug_log;
     use codefixture_audit::scan::debug_log::mebibytes;
     use codefixture_audit::scan::resources::{CPU_VARIABLE, MAX_MEMORY_VARIABLE};
+    // The build identifier: the debug log names the exact build, unlike
+    // the deliverables, which show the release version (2026-11-24).
     debug_log!(
         "header",
         "build version={:?} os={} arch={} family={}",
@@ -2727,6 +2765,7 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
     // French regardless of `--lang`, only the HTML report was
     // translated.
     let script_locale = codefixture_audit::i18n::load_script_locale(&lang);
+    set_console_colon(&codefixture_audit::i18n::t(&script_locale, "label_colon"));
     if !path.is_dir() {
         emit_error(
             &codefixture_audit::i18n::t(&script_locale, "scan_invalid_path")
@@ -2921,11 +2960,13 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
         return ExitCode::from(4);
     }
 
-    // Ticket #149 — the exact build first, even with `--quiet`: one line,
-    // and the first thing a bug report needs.
+    // Ticket #149 — the version first, even with `--quiet`: one line, and
+    // the first thing a bug report needs. The release version since
+    // 2026-11-24, as in every deliverable: the build identifier is for
+    // `--version` and the debug log, which name the exact build.
     emit_result(&format!(
         "[codefixture-audit] codefixture-audit {}",
-        codefixture_audit::BUILD_VERSION
+        codefixture_audit::RELEASE_VERSION
     ));
 
     let (include_paths, base_excludes, paths_origin) = resolve_project_paths(&path, &script_locale);
@@ -3309,7 +3350,11 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
             Ok(sbom_path) => {
                 emit_progress(
                     quiet,
-                    &format!("[codefixture-audit] SBOM : {}", sbom_path.display()),
+                    &format!(
+                        "[codefixture-audit] SBOM{}{}",
+                        codefixture_audit::i18n::t(&script_locale, "label_colon"),
+                        sbom_path.display()
+                    ),
                 );
                 sbom_written = Some(sbom_path);
             }
@@ -3339,7 +3384,9 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
                 project_description: String::new(),
                 project_path: config.root.display().to_string(),
                 tool_name: effective_tool_name(&brand),
-                tool_version: codefixture_audit::BUILD_VERSION.to_string(),
+                // Footer, title and generator of the report: the release
+                // version, it showed "v0.1.0+506.ade3297" before 2026-11-24.
+                tool_version: codefixture_audit::RELEASE_VERSION.to_string(),
                 company_name: effective_company_name(&brand),
                 report_lang: lang,
                 // Written in the report's language by the report itself
@@ -3456,7 +3503,7 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
         let metrics = codefixture_audit::report::exports::metrics::build_scan_metrics(
             &report,
             "codefixture-audit",
-            codefixture_audit::BUILD_VERSION,
+            codefixture_audit::RELEASE_VERSION,
             &now.to_rfc3339(),
             t_command_start.elapsed().as_millis(),
             exit_code,
@@ -3485,7 +3532,7 @@ fn sarif_text(
     let sarif = build_sarif_report(
         findings,
         "codefixture-audit",
-        codefixture_audit::BUILD_VERSION,
+        codefixture_audit::RELEASE_VERSION,
         &effective_website_url(brand),
     );
     serde_json::to_string_pretty(&sarif).map_err(|e| {
@@ -3520,8 +3567,9 @@ fn write_scan_output(
     emit_progress(
         quiet,
         &format!(
-            "[codefixture-audit] {} : {}",
+            "[codefixture-audit] {}{}{}",
             codefixture_audit::i18n::t(script_locale, "report_generated"),
+            codefixture_audit::i18n::t(script_locale, "label_colon"),
             out_path.display()
         ),
     );
@@ -3641,7 +3689,11 @@ fn report_unchanged_scan(scan: UnchangedScan<'_>) -> ExitCode {
             Ok(sbom_path) => {
                 emit_progress(
                     scan.quiet,
-                    &format!("[codefixture-audit] SBOM : {}", sbom_path.display()),
+                    &format!(
+                        "[codefixture-audit] SBOM{}{}",
+                        codefixture_audit::i18n::t(scan.script_locale, "label_colon"),
+                        sbom_path.display()
+                    ),
                 );
                 // A record that cannot be written only costs the next run
                 // a new SBOM.
