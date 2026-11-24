@@ -3,6 +3,20 @@
  * Les données sont injectées via le placeholder {{CHART_DATA}}
  */
 
+// Numbers in the report's language (2026-11-24): the locale code and the
+// percent pattern come from CHART_DATA.i18n (initCharts), so a chart
+// writes "45 %" and "11 126" like the text around it in a French report.
+// Chart.js itself formats its ticks and tooltips with Chart.defaults.locale,
+// set to the same code rather than left to the browser's language.
+let reportLocale = 'en';
+let reportPercentPattern = '{n}%';
+function fmtNumber(n) {
+    return new Intl.NumberFormat(reportLocale).format(n);
+}
+function fmtPercent(n) {
+    return reportPercentPattern.replace('{n}', fmtNumber(n));
+}
+
 // Plugin pour afficher le texte au centre des doughnuts
 const centerTextPlugin = {
     id: 'centerText',
@@ -22,7 +36,7 @@ const centerTextPlugin = {
             ctx.textBaseline = 'middle';
             ctx.font = 'bold 24px sans-serif';
             ctx.fillStyle = centerText.color || '#333';
-            ctx.fillText(centerText.text || total, centerX, centerY);
+            ctx.fillText(centerText.text || fmtNumber(total), centerX, centerY);
             if (centerText.subtext) {
                 ctx.font = '12px sans-serif';
                 ctx.fillStyle = '#666';
@@ -54,8 +68,8 @@ const barValueLabelsPlugin = {
             const value = values[i];
             if (!value) return;
             const label = opts.showPercent && total > 0
-                ? value + ' (' + Math.round(value / total * 100) + '%)'
-                : String(value);
+                ? fmtNumber(value) + ' (' + fmtPercent(Math.round(value / total * 100)) + ')'
+                : fmtNumber(value);
             ctx.fillText(label, bar.x + 6, bar.y);
         });
         ctx.restore();
@@ -65,8 +79,8 @@ Chart.register(barValueLabelsPlugin);
 
 // Helper pour formater les labels avec pourcentage
 function formatLabelWithPct(label, value, total) {
-    const pct = total > 0 ? ((value / total) * 100).toFixed(0) : 0;
-    return label + ' (' + pct + '%)';
+    const pct = total > 0 ? Math.round((value / total) * 100) : 0;
+    return label + ' (' + fmtPercent(pct) + ')';
 }
 
 function initCharts() {
@@ -77,6 +91,9 @@ function initCharts() {
 
     const data = {{CHART_DATA}};
     const i18n = data.i18n || {};
+    reportLocale = i18n.locale || 'en';
+    reportPercentPattern = i18n.percentPattern || '{n}%';
+    Chart.defaults.locale = reportLocale;
     const critical = data.severity.CRITICAL || 0;
     const high = data.severity.HIGH || 0;
     const medium = data.severity.MEDIUM || 0;
@@ -93,11 +110,11 @@ function initCharts() {
         // scan précis (un scan différent pourrait très bien l'avoir).
         const severityMap = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'INFO'];
         const labels = [
-            formatLabelWithPct(i18n.critical || 'Critical', critical, totalFindings),
-            formatLabelWithPct(i18n.high || 'High', high, totalFindings),
-            formatLabelWithPct(i18n.medium || 'Medium', medium, totalFindings),
-            formatLabelWithPct(i18n.low || 'Low', low, totalFindings),
-            formatLabelWithPct(i18n.info || 'Info', info, totalFindings)
+            formatLabelWithPct(i18n.critical, critical, totalFindings),
+            formatLabelWithPct(i18n.high, high, totalFindings),
+            formatLabelWithPct(i18n.medium, medium, totalFindings),
+            formatLabelWithPct(i18n.low, low, totalFindings),
+            formatLabelWithPct(i18n.info, info, totalFindings)
         ];
         const values = [critical, high, medium, low, info];
         const colors = ['#7f1d1d', '#e74c3c', '#f39c12', '#3498db', '#6366f1'];
@@ -117,7 +134,7 @@ function initCharts() {
                 maintainAspectRatio: false,
                 plugins: {
                     legend: { position: 'bottom', labels: { boxWidth: 12, padding: 10, font: { size: 11 } } },
-                    centerText: { display: true, text: totalFindings, subtext: i18n.issues || 'issues', color: '#333' }
+                    centerText: { display: true, text: fmtNumber(totalFindings), subtext: i18n.issues, color: '#333' }
                 },
                 cutout: '60%',
                 onClick: function(e, elements) {
@@ -179,8 +196,8 @@ function initCharts() {
             type: 'doughnut',
             data: {
                 labels: [
-                    formatLabelWithPct(i18n.businessCode || 'Business code', data.codeVsDeps.business, totalCodeDeps),
-                    formatLabelWithPct(i18n.dependencies || 'Dependencies', data.codeVsDeps.deps, totalCodeDeps)
+                    formatLabelWithPct(i18n.businessCode, data.codeVsDeps.business, totalCodeDeps),
+                    formatLabelWithPct(i18n.dependencies, data.codeVsDeps.deps, totalCodeDeps)
                 ],
                 datasets: [{
                     data: [data.codeVsDeps.business, data.codeVsDeps.deps],
@@ -193,7 +210,7 @@ function initCharts() {
                 maintainAspectRatio: false,
                 plugins: {
                     legend: { position: 'bottom', labels: { boxWidth: 12, padding: 10, font: { size: 11 } } },
-                    centerText: { display: true, text: totalCodeDeps, subtext: i18n.total || 'total', color: '#6366f1' }
+                    centerText: { display: true, text: fmtNumber(totalCodeDeps), subtext: i18n.total, color: '#6366f1' }
                 },
                 cutout: '60%',
                 onClick: function(e, elements) {
@@ -211,7 +228,7 @@ function initCharts() {
                 labels: data.history.labels,
                 datasets: [
                     {
-                        label: (i18n.high || 'High') + ' (HIGH)',
+                        label: i18n.high + ' (HIGH)',
                         data: data.history.high,
                         borderColor: '#e74c3c',
                         backgroundColor: 'rgba(231, 76, 60, 0.1)',
@@ -219,7 +236,7 @@ function initCharts() {
                         tension: 0.3
                     },
                     {
-                        label: (i18n.medium || 'Medium') + ' (MEDIUM)',
+                        label: i18n.medium + ' (MEDIUM)',
                         data: data.history.medium,
                         borderColor: '#f39c12',
                         backgroundColor: 'rgba(243, 156, 18, 0.1)',
@@ -227,7 +244,7 @@ function initCharts() {
                         tension: 0.3
                     },
                     {
-                        label: (i18n.low || 'Low') + ' (LOW)',
+                        label: i18n.low + ' (LOW)',
                         data: data.history.low,
                         borderColor: '#3498db',
                         backgroundColor: 'rgba(52, 152, 219, 0.1)',
@@ -257,7 +274,7 @@ function initCharts() {
         const historyBox = document.getElementById('historyChart').parentElement;
         const historyNote = document.createElement('p');
         historyNote.className = 'chart-empty';
-        historyNote.textContent = i18n.historyNeedsTwoAudits || 'The trend appears from the second audit of this project.';
+        historyNote.textContent = i18n.historyNeedsTwoAudits;
         historyBox.replaceChildren(historyNote);
     }
 
@@ -267,10 +284,10 @@ function initCharts() {
             type: 'doughnut',
             data: {
                 labels: [
-                    formatLabelWithPct(i18n.passed || 'Passed', data.tests.passed, totalTests),
-                    formatLabelWithPct(i18n.failed || 'Failed', data.tests.failed, totalTests),
-                    formatLabelWithPct(i18n.errors || 'Errors', data.tests.errors, totalTests),
-                    formatLabelWithPct(i18n.skipped || 'Skipped', data.tests.skipped, totalTests)
+                    formatLabelWithPct(i18n.passed, data.tests.passed, totalTests),
+                    formatLabelWithPct(i18n.failed, data.tests.failed, totalTests),
+                    formatLabelWithPct(i18n.errors, data.tests.errors, totalTests),
+                    formatLabelWithPct(i18n.skipped, data.tests.skipped, totalTests)
                 ],
                 datasets: [{
                     data: [data.tests.passed, data.tests.failed, data.tests.errors, data.tests.skipped],
@@ -283,7 +300,7 @@ function initCharts() {
                 maintainAspectRatio: false,
                 plugins: {
                     legend: { position: 'bottom', labels: { boxWidth: 12, padding: 10, font: { size: 11 } } },
-                    centerText: { display: true, text: data.tests.successRate + '%', subtext: i18n.success || 'success', color: '#27ae60' }
+                    centerText: { display: true, text: fmtPercent(data.tests.successRate), subtext: i18n.success, color: '#27ae60' }
                 },
                 cutout: '60%',
                 onClick: function(e, elements) {
@@ -301,10 +318,10 @@ function initCharts() {
             type: 'doughnut',
             data: {
                 labels: [
-                    formatLabelWithPct('True +', data.fixtures.truePositives, totalFixtures),
-                    formatLabelWithPct('True -', data.fixtures.trueNegatives, totalFixtures),
-                    formatLabelWithPct('False -', data.fixtures.falseNegatives, totalFixtures),
-                    formatLabelWithPct('False +', data.fixtures.falsePositives, totalFixtures)
+                    formatLabelWithPct(i18n.fixturesTruePositive, data.fixtures.truePositives, totalFixtures),
+                    formatLabelWithPct(i18n.fixturesTrueNegative, data.fixtures.trueNegatives, totalFixtures),
+                    formatLabelWithPct(i18n.fixturesFalseNegative, data.fixtures.falseNegatives, totalFixtures),
+                    formatLabelWithPct(i18n.fixturesFalsePositive, data.fixtures.falsePositives, totalFixtures)
                 ],
                 datasets: [{
                     data: [data.fixtures.truePositives, data.fixtures.trueNegatives,
@@ -318,7 +335,7 @@ function initCharts() {
                 maintainAspectRatio: false,
                 plugins: {
                     legend: { position: 'bottom', labels: { boxWidth: 12, padding: 10, font: { size: 11 } } },
-                    centerText: { display: true, text: data.fixtures.successRate + '%', subtext: i18n.validated || 'validated', color: '#27ae60' }
+                    centerText: { display: true, text: fmtPercent(data.fixtures.successRate), subtext: i18n.validated, color: '#27ae60' }
                 },
                 cutout: '60%',
                 onClick: function(e, elements) {
@@ -334,9 +351,9 @@ function initCharts() {
         const depsLabels = [];
         const depsValues = [];
         const depsColors = [];
-        if (data.dependencies.vulnerable > 0) { depsLabels.push(formatLabelWithPct(i18n.vulnerable || 'Vulnerable', data.dependencies.vulnerable, depsTotal)); depsValues.push(data.dependencies.vulnerable); depsColors.push('#e74c3c'); }
-        if (data.dependencies.unpinned > 0) { depsLabels.push(formatLabelWithPct(i18n.unpinned || 'Unpinned', data.dependencies.unpinned, depsTotal)); depsValues.push(data.dependencies.unpinned); depsColors.push('#f39c12'); }
-        if (data.dependencies.ok > 0) { depsLabels.push(formatLabelWithPct(i18n.depsOk || 'OK', data.dependencies.ok, depsTotal)); depsValues.push(data.dependencies.ok); depsColors.push('#27ae60'); }
+        if (data.dependencies.vulnerable > 0) { depsLabels.push(formatLabelWithPct(i18n.vulnerable, data.dependencies.vulnerable, depsTotal)); depsValues.push(data.dependencies.vulnerable); depsColors.push('#e74c3c'); }
+        if (data.dependencies.unpinned > 0) { depsLabels.push(formatLabelWithPct(i18n.unpinned, data.dependencies.unpinned, depsTotal)); depsValues.push(data.dependencies.unpinned); depsColors.push('#f39c12'); }
+        if (data.dependencies.ok > 0) { depsLabels.push(formatLabelWithPct(i18n.depsOk, data.dependencies.ok, depsTotal)); depsValues.push(data.dependencies.ok); depsColors.push('#27ae60'); }
 
         new Chart(document.getElementById('dependenciesChart'), {
             type: 'doughnut',
@@ -353,7 +370,7 @@ function initCharts() {
                 maintainAspectRatio: false,
                 plugins: {
                     legend: { position: 'bottom', labels: { boxWidth: 12, padding: 10, font: { size: 11 } } },
-                    centerText: { display: true, text: depsTotal, subtext: i18n.scanned || 'scanned', color: '#6366f1' }
+                    centerText: { display: true, text: fmtNumber(depsTotal), subtext: i18n.scanned, color: '#6366f1' }
                 },
                 cutout: '60%',
                 onClick: function(e, elements) {
@@ -376,10 +393,10 @@ function initCharts() {
             new Chart(document.getElementById('databaseChart'), {
                 type: 'bar',
                 data: {
-                    labels: [i18n.tables || 'Tables', i18n.columns || 'Columns', i18n.indexes || 'Indexes'],
+                    labels: [i18n.tables, i18n.columns, i18n.indexes],
                     datasets: [
                         {
-                            label: i18n.additions || 'Additions',
+                            label: i18n.additions,
                             data: [
                                 dbChanges.added.tables || 0,
                                 dbChanges.added.columns || 0,
@@ -389,7 +406,7 @@ function initCharts() {
                             borderRadius: 4
                         },
                         {
-                            label: i18n.deletions || 'Deletions',
+                            label: i18n.deletions,
                             data: [
                                 -(dbChanges.dropped.tables || 0),
                                 -(dbChanges.dropped.columns || 0),
@@ -435,9 +452,9 @@ function initCharts() {
                 type: 'doughnut',
                 data: {
                     labels: [
-                        (i18n.tables || 'Tables') + ' (' + data.database.tables + ')',
-                        (i18n.columns || 'Columns') + ' (' + data.database.columns + ')',
-                        (i18n.indexes || 'Indexes') + ' (' + data.database.indexes + ')'
+                        i18n.tables + ' (' + fmtNumber(data.database.tables) + ')',
+                        i18n.columns + ' (' + fmtNumber(data.database.columns) + ')',
+                        i18n.indexes + ' (' + fmtNumber(data.database.indexes) + ')'
                     ],
                     datasets: [{
                         data: [data.database.tables, data.database.columns, data.database.indexes],
@@ -450,7 +467,7 @@ function initCharts() {
                     maintainAspectRatio: false,
                     plugins: {
                         legend: { position: 'bottom', labels: { boxWidth: 12, padding: 10, font: { size: 11 } } },
-                        centerText: { display: true, text: '✓', subtext: i18n.stable || 'stable', color: '#22c55e' }
+                        centerText: { display: true, text: '✓', subtext: i18n.stable, color: '#22c55e' }
                     },
                     cutout: '60%',
                     onClick: function(e, elements) {
@@ -469,7 +486,7 @@ function initCharts() {
                 labels: data.history.labels,
                 datasets: [
                     {
-                        label: i18n.successRate || 'Success rate (%)',
+                        label: i18n.successRate,
                         data: data.history.testsRate,
                         borderColor: '#27ae60',
                         backgroundColor: 'rgba(39, 174, 96, 0.1)',
@@ -478,7 +495,7 @@ function initCharts() {
                         yAxisID: 'y'
                     },
                     {
-                        label: i18n.testsPassed || 'Tests passed',
+                        label: i18n.testsPassed,
                         data: data.history.testsPassed,
                         borderColor: '#3498db',
                         backgroundColor: 'transparent',
@@ -500,14 +517,14 @@ function initCharts() {
                         position: 'left',
                         min: 0,
                         max: 100,
-                        title: { display: true, text: i18n.rate || 'Rate (%)' },
+                        title: { display: true, text: i18n.rate },
                         grid: { color: 'rgba(0,0,0,0.05)' }
                     },
                     y1: {
                         type: 'linear',
                         position: 'right',
                         min: 0,
-                        title: { display: true, text: i18n.count || 'Count' },
+                        title: { display: true, text: i18n.count },
                         grid: { display: false }
                     },
                     x: { grid: { display: false } }
@@ -525,7 +542,7 @@ function initCharts() {
                 labels: data.history.labels,
                 datasets: [
                     {
-                        label: i18n.tables || 'Tables',
+                        label: i18n.tables,
                         data: data.history.dbTables,
                         borderColor: '#3b82f6',
                         backgroundColor: 'rgba(59, 130, 246, 0.1)',
@@ -534,7 +551,7 @@ function initCharts() {
                         yAxisID: 'y'
                     },
                     {
-                        label: i18n.columns || 'Columns',
+                        label: i18n.columns,
                         data: data.history.dbColumns,
                         borderColor: '#10b981',
                         backgroundColor: 'transparent',
@@ -542,7 +559,7 @@ function initCharts() {
                         yAxisID: 'y'
                     },
                     {
-                        label: i18n.changes || 'Changes',
+                        label: i18n.changes,
                         data: data.history.dbChanges,
                         borderColor: '#f59e0b',
                         backgroundColor: 'rgba(245, 158, 11, 0.1)',
@@ -564,14 +581,14 @@ function initCharts() {
                         type: 'linear',
                         position: 'left',
                         min: 0,
-                        title: { display: true, text: i18n.structure || 'Structure' },
+                        title: { display: true, text: i18n.structure },
                         grid: { color: 'rgba(0,0,0,0.05)' }
                     },
                     y1: {
                         type: 'linear',
                         position: 'right',
                         min: 0,
-                        title: { display: true, text: i18n.changes || 'Changes' },
+                        title: { display: true, text: i18n.changes },
                         grid: { display: false }
                     },
                     x: { grid: { display: false } }
@@ -587,9 +604,9 @@ function initCharts() {
         const c = data.compliance;
         const coveredOnly = c.covered - c.withFindings;
         const compLabels = [], compValues = [], compColors = [];
-        if (coveredOnly > 0) { compLabels.push(i18n.complianceCovered || 'Covered'); compValues.push(coveredOnly); compColors.push('#27ae60'); }
-        if (c.withFindings > 0) { compLabels.push(i18n.complianceFindings || 'With Findings'); compValues.push(c.withFindings); compColors.push('#f39c12'); }
-        if (c.notCovered > 0) { compLabels.push(i18n.complianceNotCovered || 'Not Covered'); compValues.push(c.notCovered); compColors.push('#cbd5e1'); }
+        if (coveredOnly > 0) { compLabels.push(i18n.complianceCovered); compValues.push(coveredOnly); compColors.push('#27ae60'); }
+        if (c.withFindings > 0) { compLabels.push(i18n.complianceFindings); compValues.push(c.withFindings); compColors.push('#f39c12'); }
+        if (c.notCovered > 0) { compLabels.push(i18n.complianceNotCovered); compValues.push(c.notCovered); compColors.push('#cbd5e1'); }
         new Chart(document.getElementById('complianceCoverageChart'), {
             type: 'doughnut',
             data: { labels: compLabels, datasets: [{ data: compValues, backgroundColor: compColors, borderWidth: 0 }] },
@@ -597,7 +614,7 @@ function initCharts() {
                 responsive: true, maintainAspectRatio: false, cutout: '60%',
                 plugins: {
                     legend: { position: 'bottom', labels: { boxWidth: 12, padding: 10, font: { size: 11 } } },
-                    centerText: { display: true, text: c.coveragePct + '%', subtext: i18n.complianceCoverage || 'Coverage', color: '#333' }
+                    centerText: { display: true, text: fmtPercent(c.coveragePct), subtext: i18n.complianceCoverage, color: '#333' }
                 }
             }
         });
@@ -626,7 +643,7 @@ function initCharts() {
                 indexAxis: 'y', responsive: true, maintainAspectRatio: false,
                 plugins: { legend: { display: false } },
                 scales: {
-                    x: { beginAtZero: true, max: 100, grid: { display: false }, ticks: { callback: v => v + '%' } },
+                    x: { beginAtZero: true, max: 100, grid: { display: false }, ticks: { callback: v => fmtPercent(v) } },
                     y: { grid: { display: false } }
                 }
             }
@@ -648,17 +665,17 @@ function initCharts() {
                 labels: themeLabels,
                 datasets: [
                     {
-                        label: i18n.complianceCovered || 'Covered',
+                        label: i18n.complianceCovered,
                         data: themeOrder.map(t => themes[t].covered - themes[t].withFindings),
                         backgroundColor: '#27ae60', borderRadius: 2
                     },
                     {
-                        label: i18n.complianceFindings || 'With Findings',
+                        label: i18n.complianceFindings,
                         data: themeOrder.map(t => themes[t].withFindings),
                         backgroundColor: '#f39c12', borderRadius: 2
                     },
                     {
-                        label: i18n.complianceNotCovered || 'Not Covered',
+                        label: i18n.complianceNotCovered,
                         data: themeOrder.map(t => themes[t].total - themes[t].covered),
                         backgroundColor: '#cbd5e1', borderRadius: 2
                     }
@@ -684,9 +701,9 @@ function initCharts() {
         const a = data.asvs;
         const aCoveredOnly = a.covered - a.withFindings;
         const aLabels = [], aValues = [], aColors = [];
-        if (aCoveredOnly > 0) { aLabels.push(i18n.asvsCovered || 'Covered'); aValues.push(aCoveredOnly); aColors.push('#27ae60'); }
-        if (a.withFindings > 0) { aLabels.push(i18n.asvsFindings || 'With Findings'); aValues.push(a.withFindings); aColors.push('#f39c12'); }
-        if (a.notCovered > 0) { aLabels.push(i18n.asvsNotCovered || 'Not Covered'); aValues.push(a.notCovered); aColors.push('#cbd5e1'); }
+        if (aCoveredOnly > 0) { aLabels.push(i18n.asvsCovered); aValues.push(aCoveredOnly); aColors.push('#27ae60'); }
+        if (a.withFindings > 0) { aLabels.push(i18n.asvsFindings); aValues.push(a.withFindings); aColors.push('#f39c12'); }
+        if (a.notCovered > 0) { aLabels.push(i18n.asvsNotCovered); aValues.push(a.notCovered); aColors.push('#cbd5e1'); }
         new Chart(document.getElementById('asvsCoverageChart'), {
             type: 'doughnut',
             data: { labels: aLabels, datasets: [{ data: aValues, backgroundColor: aColors, borderWidth: 0 }] },
@@ -694,7 +711,7 @@ function initCharts() {
                 responsive: true, maintainAspectRatio: false, cutout: '60%',
                 plugins: {
                     legend: { position: 'bottom', labels: { boxWidth: 12, padding: 10, font: { size: 11 } } },
-                    centerText: { display: true, text: a.coveragePct + '%', subtext: i18n.asvsCoverage || 'Coverage', color: '#333' }
+                    centerText: { display: true, text: fmtPercent(a.coveragePct), subtext: i18n.asvsCoverage, color: '#333' }
                 }
             }
         });
@@ -724,7 +741,7 @@ function initCharts() {
                 indexAxis: 'y', responsive: true, maintainAspectRatio: false,
                 plugins: { legend: { display: false } },
                 scales: {
-                    x: { beginAtZero: true, max: 100, grid: { display: false }, ticks: { callback: v => v + '%' } },
+                    x: { beginAtZero: true, max: 100, grid: { display: false }, ticks: { callback: v => fmtPercent(v) } },
                     y: { grid: { display: false } }
                 }
             }
@@ -746,17 +763,17 @@ function initCharts() {
                 labels: chLabels,
                 datasets: [
                     {
-                        label: i18n.asvsCovered || 'Covered',
+                        label: i18n.asvsCovered,
                         data: chOrder.map(c => chapters[c].covered - chapters[c].withFindings),
                         backgroundColor: '#27ae60', borderRadius: 2
                     },
                     {
-                        label: i18n.asvsFindings || 'With Findings',
+                        label: i18n.asvsFindings,
                         data: chOrder.map(c => chapters[c].withFindings),
                         backgroundColor: '#f39c12', borderRadius: 2
                     },
                     {
-                        label: i18n.asvsNotCovered || 'Not Covered',
+                        label: i18n.asvsNotCovered,
                         data: chOrder.map(c => chapters[c].total - chapters[c].covered),
                         backgroundColor: '#cbd5e1', borderRadius: 2
                     }
@@ -782,9 +799,9 @@ function initCharts() {
         const n = data.nist;
         const nCoveredOnly = n.covered - n.withFindings;
         const nLabels = [], nValues = [], nColors = [];
-        if (nCoveredOnly > 0) { nLabels.push(i18n.nistCovered || 'Covered'); nValues.push(nCoveredOnly); nColors.push('#27ae60'); }
-        if (n.withFindings > 0) { nLabels.push(i18n.nistFindings || 'With Findings'); nValues.push(n.withFindings); nColors.push('#f39c12'); }
-        if (n.notCovered > 0) { nLabels.push(i18n.nistNotCovered || 'Not Covered'); nValues.push(n.notCovered); nColors.push('#cbd5e1'); }
+        if (nCoveredOnly > 0) { nLabels.push(i18n.nistCovered); nValues.push(nCoveredOnly); nColors.push('#27ae60'); }
+        if (n.withFindings > 0) { nLabels.push(i18n.nistFindings); nValues.push(n.withFindings); nColors.push('#f39c12'); }
+        if (n.notCovered > 0) { nLabels.push(i18n.nistNotCovered); nValues.push(n.notCovered); nColors.push('#cbd5e1'); }
         new Chart(document.getElementById('nistCoverageChart'), {
             type: 'doughnut',
             data: { labels: nLabels, datasets: [{ data: nValues, backgroundColor: nColors, borderWidth: 0 }] },
@@ -792,7 +809,7 @@ function initCharts() {
                 responsive: true, maintainAspectRatio: false, cutout: '60%',
                 plugins: {
                     legend: { position: 'bottom', labels: { boxWidth: 12, padding: 10, font: { size: 11 } } },
-                    centerText: { display: true, text: n.coveragePct + '%', subtext: i18n.nistCoverage || 'Coverage', color: '#333' }
+                    centerText: { display: true, text: fmtPercent(n.coveragePct), subtext: i18n.nistCoverage, color: '#333' }
                 }
             }
         });
@@ -822,7 +839,7 @@ function initCharts() {
                 indexAxis: 'y', responsive: true, maintainAspectRatio: false,
                 plugins: { legend: { display: false } },
                 scales: {
-                    x: { beginAtZero: true, max: 100, grid: { display: false }, ticks: { callback: v => v + '%' } },
+                    x: { beginAtZero: true, max: 100, grid: { display: false }, ticks: { callback: v => fmtPercent(v) } },
                     y: { grid: { display: false } }
                 }
             }
@@ -844,17 +861,17 @@ function initCharts() {
                 labels: fnLabels,
                 datasets: [
                     {
-                        label: i18n.nistCovered || 'Covered',
+                        label: i18n.nistCovered,
                         data: fnOrder.map(f => fns[f].covered - fns[f].withFindings),
                         backgroundColor: '#27ae60', borderRadius: 2
                     },
                     {
-                        label: i18n.nistFindings || 'With Findings',
+                        label: i18n.nistFindings,
                         data: fnOrder.map(f => fns[f].withFindings),
                         backgroundColor: '#f39c12', borderRadius: 2
                     },
                     {
-                        label: i18n.nistNotCovered || 'Not Covered',
+                        label: i18n.nistNotCovered,
                         data: fnOrder.map(f => fns[f].total - fns[f].covered),
                         backgroundColor: '#cbd5e1', borderRadius: 2
                     }
@@ -892,7 +909,7 @@ function initCharts() {
             data: {
                 labels: stdLabels,
                 datasets: [{
-                    label: i18n.complianceCoverageBar || 'Coverage',
+                    label: i18n.complianceCoverageBar,
                     data: stdPcts,
                     backgroundColor: stdColors.slice(0, stdLabels.length),
                     borderWidth: 0,
@@ -904,9 +921,9 @@ function initCharts() {
                 responsive: true, maintainAspectRatio: false,
                 // Title added 2026-11-20: the chart had none, and nothing said
                 // what its percentages measure (the table below details it).
-                plugins: { legend: { display: false }, title: { display: true, text: i18n.complianceCoverageBar || 'Share of requirements checked by the scan, per standard' } },
+                plugins: { legend: { display: false }, title: { display: true, text: i18n.complianceCoverageBar } },
                 scales: {
-                    x: { beginAtZero: true, max: 100, grid: { display: false }, ticks: { callback: v => v + '%' } },
+                    x: { beginAtZero: true, max: 100, grid: { display: false }, ticks: { callback: v => fmtPercent(v) } },
                     y: { grid: { display: false }, ticks: { font: { weight: 'bold' } } }
                 }
             }
@@ -939,7 +956,7 @@ function initCharts() {
                 const ctx = chart.ctx;
                 const meta = chart.getDatasetMeta(0);
                 meta.data.forEach(function(bar, i) {
-                    const label = String(sevCounts[i]);
+                    const label = fmtNumber(sevCounts[i]);
                     ctx.save();
                     ctx.font = 'bold 12px sans-serif';
                     ctx.textBaseline = 'middle';
@@ -964,7 +981,7 @@ function initCharts() {
             data: {
                 labels: sevLabels,
                 datasets: [{
-                    label: i18n.healthChartAxis || 'Findings',
+                    label: i18n.healthChartAxis,
                     data: sevCounts,
                     backgroundColor: sevColors,
                     borderWidth: 0,
@@ -975,16 +992,16 @@ function initCharts() {
                 responsive: true, maintainAspectRatio: false,
                 indexAxis: 'y',
                 scales: {
-                    x: { beginAtZero: true, grid: { color: 'rgba(0,0,0,0.05)' }, ticks: { precision: 0 }, title: { display: true, text: i18n.healthChartAxis || 'Findings' } },
+                    x: { beginAtZero: true, grid: { color: 'rgba(0,0,0,0.05)' }, ticks: { precision: 0 }, title: { display: true, text: i18n.healthChartAxis } },
                     y: { grid: { display: false } }
                 },
                 plugins: {
                     legend: { display: false },
                     title: {
                         display: true,
-                        text: (i18n.healthSeverityChart || 'Findings that count for the security score: {count} of {total}')
-                            .replace('{count}', sevCounts.reduce((a, b) => a + b, 0))
-                            .replace('{total}', totalFindings)
+                        text: i18n.healthSeverityChart
+                            .replace('{count}', fmtNumber(sevCounts.reduce((a, b) => a + b, 0)))
+                            .replace('{total}', fmtNumber(totalFindings))
                     }
                 }
             },
@@ -1002,7 +1019,7 @@ function initCharts() {
             data: {
                 labels: taintRules.map(function(r) { return r.replace('taint_', '').replace(/_/g, ' '); }),
                 datasets: [{
-                    label: i18n.taintFlows || 'Taint flows',
+                    label: i18n.taintFlows,
                     data: taintCounts,
                     backgroundColor: taintColors.slice(0, taintRules.length),
                     borderRadius: 4
@@ -1018,7 +1035,7 @@ function initCharts() {
                 },
                 plugins: {
                     legend: { display: false },
-                    title: { display: true, text: (i18n.taintFlows || 'Data flow traces') + ' (' + data.taint.totalFlows + ')' }
+                    title: { display: true, text: i18n.taintFlows + ' (' + fmtNumber(data.taint.totalFlows) + ')' }
                 }
             }
         });
@@ -1066,7 +1083,7 @@ function initCharts() {
                             callbacks: {
                                 footer: function(items) {
                                     var total = items.reduce(function(s, i) { return s + i.raw; }, 0);
-                                    return 'Total : ' + total;
+                                    return i18n.totalTitle + i18n.labelColon + fmtNumber(total);
                                 }
                             }
                         }
@@ -1079,7 +1096,7 @@ function initCharts() {
     // ========== FINDINGS BY SOURCE CHART ==========
     if (data.taint && document.getElementById('findingsBySourceChart')) {
         var src = data.taint.bySource;
-        var srcLabels = [i18n.taintPython || 'Python (regex)', i18n.taintBuiltin || 'JSON Builtin', i18n.taintCustom || 'JSON Custom'];
+        var srcLabels = [i18n.taintPython, i18n.taintBuiltin, i18n.taintCustom];
         var srcValues = [src.python || 0, src.json_builtin || 0, src.json_custom || 0];
         if (srcValues[1] > 0 || srcValues[2] > 0) {
             new Chart(document.getElementById('findingsBySourceChart'), {

@@ -10,6 +10,7 @@ use serde_json::Value;
 
 use crate::i18n::t;
 use crate::report::exports::sarif::ReportFinding;
+use crate::report::locale_format::LocaleFormat;
 use crate::report::report_assets::load_template;
 use crate::report::text::escape;
 
@@ -296,6 +297,7 @@ pub fn render_health_table(
     total_lines_code: usize,
     report_locale: &Value,
 ) -> String {
+    let fmt = LocaleFormat::of(report_locale);
     let rows: String = ["CRITICAL", "HIGH", "MEDIUM", "LOW"]
         .iter()
         .map(|sev| {
@@ -306,26 +308,23 @@ pub fn render_health_table(
                 r#"<tr><td><span class="severity-dot {cls}"></span>{label}</td><td class="num">{count}</td><td class="num">{penalty} <span class="health-table-each">({each})</span></td></tr>"#,
                 cls = sev.to_lowercase(),
                 label = t(report_locale, &format!("severity.{}", sev.to_lowercase())),
-                count = detail.count,
-                penalty = detail.penalty_total,
+                count = fmt.int(detail.count as u64),
+                penalty = fmt.int(detail.penalty_total as u64),
             )
         })
         .collect();
     let counted: usize = data.health_severity_detail.values().map(|d| d.count).sum();
     let loc_factor = (total_lines_code as f64 / 1000.0).max(1.0);
-    // Decimal comma everywhere but in English, as the report's own texts.
-    let mut factor = format!("{loc_factor:.1}");
-    if t(report_locale, "locale_code") != "en" {
-        factor = factor.replace('.', ",");
-    }
+    // One decimal kept even when it is 0 (`1.0`), as in the formula.
+    let factor = format!("{loc_factor:.1}").replace('.', &decimal_separator(&fmt));
     let computation = t(report_locale, "health_table_computation")
-        .replace("{lines}", &total_lines_code.to_string())
-        .replace("{penalty}", &data.total_penalty.to_string())
+        .replace("{lines}", &fmt.int(total_lines_code as u64))
+        .replace("{penalty}", &fmt.int(data.total_penalty as u64))
         .replace("{factor}", &factor)
         .replace("{score}", &data.health_score.to_string());
     let scope = t(report_locale, "health_table_scope")
-        .replace("{count}", &counted.to_string())
-        .replace("{total}", &data.total_findings.to_string());
+        .replace("{count}", &fmt.int(counted as u64))
+        .replace("{total}", &fmt.int(data.total_findings as u64));
     format!(
         r#"<div class="chart-card health-table-card"><h4 class="health-table-title">{title}</h4><table class="health-calc-table"><thead><tr><th>{h_sev}</th><th class="num">{h_count}</th><th class="num">{h_penalty}</th></tr></thead><tbody>{rows}</tbody><tfoot><tr class="health-calc-total"><td>{h_total}</td><td class="num">{counted}</td><td class="num">{penalty}</td></tr></tfoot></table><p class="health-table-note">{computation}</p><p class="health-table-note">{scope}</p></div>"#,
         title = t(report_locale, "health_table_title")
@@ -334,8 +333,15 @@ pub fn render_health_table(
         h_count = t(report_locale, "health_table_findings"),
         h_penalty = t(report_locale, "health_table_penalty"),
         h_total = t(report_locale, "health_table_total"),
-        penalty = data.total_penalty,
+        counted = fmt.int(counted as u64),
+        penalty = fmt.int(data.total_penalty as u64),
     )
+}
+
+/// The decimal separator of the report's language: the decimal form of
+/// 0.5 without its digits.
+fn decimal_separator(fmt: &LocaleFormat) -> String {
+    fmt.decimal(0.5, 1).replace(['0', '5'], "")
 }
 
 /// Threat context block (ZeroDayClock) for the executive summary —
@@ -369,7 +375,13 @@ pub fn build_threat_context(
         ]
         .iter()
         .filter(|(_, count)| *count > 0)
-        .map(|(label, count)| format!("{count} {}", t(report_locale, label)))
+        .map(|(label, count)| {
+            format!(
+                "{} {}",
+                LocaleFormat::of(report_locale).int(*count as u64),
+                t(report_locale, label)
+            )
+        })
         .collect::<Vec<_>>()
         .join(", ");
         let tpl = t(report_locale, "threat_risk_high_text");
@@ -381,7 +393,10 @@ pub fn build_threat_context(
     } else {
         let tpl = t(report_locale, "threat_risk_medium_text");
         let text = tpl
-            .replace("{count}", &total_medium.to_string())
+            .replace(
+                "{count}",
+                &LocaleFormat::of(report_locale).int(total_medium as u64),
+            )
             .replace("{severity_label}", &t(report_locale, "severity.medium"))
             .replace("{exposure_label}", &exposure_label);
         (t(report_locale, "threat_level_elevated"), "#f59e0b", text)
@@ -399,6 +414,7 @@ pub fn render_heatmap(top_files: &[crate::report::data::TopFile], report_locale:
         return String::new();
     }
     let max_count = top_files[0].score.max(1);
+    let fmt = LocaleFormat::of(report_locale);
     let item_tpl = load_template("heatmap-item.html");
     let severity_score_label = t(report_locale, "severity_score");
 
@@ -433,14 +449,15 @@ pub fn render_heatmap(top_files: &[crate::report::data::TopFile], report_locale:
             .iter()
             .filter_map(|(sev, cls)| {
                 let n = *tf.severities.get(sev).unwrap_or(&0);
-                if n > 0 {
-                    let sev_cap = format!("{}{}", &sev[..1], sev[1..].to_lowercase());
-                    Some(format!(
-                        r#"<span class="hm-chip {cls}">{n} {sev_cap}</span>"#
-                    ))
-                } else {
-                    None
-                }
+                // The severity code, as the report writes it next to every
+                // severity name (`Importants (HIGH)`): Audit wrote `4 High`,
+                // an English word, in every language (2026-11-24).
+                (n > 0).then(|| {
+                    format!(
+                        r#"<span class="hm-chip {cls}">{} {sev}</span>"#,
+                        fmt.int(n as u64)
+                    )
+                })
             })
             .collect();
             item_tpl
@@ -449,7 +466,7 @@ pub fn render_heatmap(top_files: &[crate::report::data::TopFile], report_locale:
                 .replace("{{filepath}}", &escape(&tf.file))
                 .replace("{{fname}}", &escape(&fname))
                 .replace("{{fdir}}", &escape(&fdir))
-                .replace("{{count}}", &tf.score.to_string())
+                .replace("{{count}}", &fmt.int(tf.score as u64))
                 .replace("{{chips}}", &chips)
                 .replace("{{i18n_severity_score}}", &severity_score_label)
         })
@@ -676,9 +693,9 @@ mod tests {
             html.contains(r#"<td class="num">3</td><td class="num">12</td>"#),
             "{html}"
         );
-        // 100 ÷ (1 + 12 ÷ (20 × 2,5)) = 80.
+        // 100 ÷ (1 + 12 ÷ (20 × 2,5)) = 80; 2 500 grouped the French way.
         assert!(
-            html.contains("Pour 2500 lignes de code : 100 ÷ (1 + 12 ÷ (20 × 2,5)) = 80 %."),
+            html.contains("Pour 2\u{202f}500 lignes de code : 100 ÷ (1 + 12 ÷ (20 × 2,5)) = 80 %."),
             "{html}"
         );
         assert!(html.contains("3 des 4 problèmes comptent"), "{html}");
@@ -732,7 +749,8 @@ mod tests {
         let html = render_heatmap(&top_files, &en);
         assert!(html.contains("views.py"));
         assert!(html.contains("src/app/"));
-        assert!(html.contains("2 High"));
+        // The severity code, not an English word (2026-11-24).
+        assert!(html.contains("2 HIGH"), "{html}");
     }
 
     /// Security regression (2026-11-15): the heatmap renders a file path

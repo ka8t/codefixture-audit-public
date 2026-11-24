@@ -40,15 +40,15 @@
     <div class="sidebar-resize-handle" id="sidebarResizeHandle"></div>
 
     <!-- Navigation buttons -->
-    <button class="back-to-top" onclick="scrollToTop()" title="Retour en haut">↑</button>
+    <button class="back-to-top" onclick="scrollToTop()" title="{{i18n_nav_back_to_top}}" aria-label="{{i18n_nav_back_to_top}}">↑</button>
     <div class="nav-buttons">
-        <button class="nav-btn" id="navPrev" onclick="navPrev()" title="Section précédente (k)">←</button>
-        <button class="nav-btn" id="navNext" onclick="navNext()" title="Section suivante (j)">→</button>
+        <button class="nav-btn" id="navPrev" onclick="navPrev()" title="{{i18n_nav_previous_section}}" aria-label="{{i18n_nav_previous_section}}">←</button>
+        <button class="nav-btn" id="navNext" onclick="navNext()" title="{{i18n_nav_next_section}}" aria-label="{{i18n_nav_next_section}}">→</button>
     </div>
-    <div class="keyboard-hint"><kbd>j</kbd>/<kbd>k</kbd> naviguer • <kbd>Ctrl+Home</kbd> début</div>
+    <div class="keyboard-hint"><kbd>j</kbd>/<kbd>k</kbd> {{i18n_keyboard_navigate}} • <kbd>Ctrl+Home</kbd> {{i18n_keyboard_top}}</div>
 
     <div class="container">
-        <!-- Sommaire -->
+        <!-- Table of contents -->
         <div class="toc-block" id="sommaire">
             <div class="toc-bar">
                 <button class="toc-toggle" onclick="toggleToc()" aria-expanded="false" aria-controls="toc-body">
@@ -94,13 +94,13 @@
             <div class="header-stats">📂 {{total_files_scanned}} {{i18n_files_scanned}} • 📝 {{total_lines_code}} {{i18n_lines_of_code}} • ⏱️ {{audit_total_time}}s</div>
             {{project_description_html}}
             <div class="health-bar">
-                <h3>{{i18n_health_score}} : {{health_score}}%</h3>
+                <h3>{{i18n_health_score}}{{i18n_label_colon}}{{health_score_text}}</h3>
                 <div class="health-track"><div class="health-fill {{health_class}}" style="width: {{health_score}}%"></div></div>
                 <p class="score-legend">{{score_legend}}</p>
             </div>
             {{COMPLIANCE_SCORE_BAR_START}}
             <div class="health-bar">
-                <h3>{{i18n_compliance_score}} : {{compliance_score}}%</h3>
+                <h3>{{i18n_compliance_score}}{{i18n_label_colon}}{{compliance_score_text}}</h3>
                 <div class="health-track"><div class="health-fill {{compliance_class}}" style="width: {{compliance_score}}%"></div></div>
                 <p class="score-legend">{{score_legend}}</p>
             </div>
@@ -161,7 +161,7 @@
                 <div class="chart-container"><canvas id="taintFlowsChart"></canvas></div>
             </div>
             <div class="chart-card" id="findingsBySourceChartCard" style="{{taint_display}}">
-                <h3>📊 Findings par source</h3>
+                <h3>📊 {{i18n_findings_by_source}}</h3>
                 <div class="chart-container"><canvas id="findingsBySourceChart"></canvas></div>
             </div>
         </div>
@@ -225,21 +225,21 @@
             <div class="stat-card clickable" onclick="scrollToSection('section-validations')"><div class="stat-value success">{{total_successes}}</div><div class="stat-label">{{i18n_validations}}</div></div>
             <div class="stat-card"><div class="stat-value business">{{total_business}}</div><div class="stat-label">📦 {{i18n_business_code}}</div></div>
             <div class="stat-card{{deps_card_link}}><div class="stat-value deps">{{total_deps}}</div><div class="stat-label">🔗 {{i18n_dependencies}}</div></div>
-            <div class="stat-card"><div class="stat-value {{tests_color}}">{{tests_rate}}%</div><div class="stat-label">🧪 Tests ({{tests_total}})</div></div>
-            <div class="stat-card"><div class="stat-value {{fixtures_color}}">{{fixtures_rate}}%</div><div class="stat-label">🔬 Fixtures ({{fixtures_total}})</div></div>
+            <div class="stat-card"><div class="stat-value {{tests_color}}">{{tests_rate_text}}</div><div class="stat-label">🧪 {{i18n_tests}} ({{tests_total}})</div></div>
+            <div class="stat-card"><div class="stat-value {{fixtures_color}}">{{fixtures_rate_text}}</div><div class="stat-label">🔬 {{i18n_fixtures}} ({{fixtures_total}})</div></div>
             <div class="stat-card"><div class="stat-value">{{audit_total_time}}s</div><div class="stat-label">⏱️ {{i18n_audit_duration}}</div></div>
         </div>
 
         {{threat_context_html}}
 
-        <!-- Séparateur visuel entre les 2 niveaux de lecture -->
+        <!-- Separator between the two reading levels -->
         <div class="level-separator" id="level-separator">
             <div class="level-separator-line"></div>
             <span class="level-separator-label">🔧 {{i18n_level_detail}}</span>
             <div class="level-separator-line"></div>
         </div>
 
-        <!-- ========== NIVEAU 2 — VUE TECHNICIEN ========== -->
+        <!-- ========== LEVEL 2: TECHNICAL VIEW ========== -->
         <div id="level-detail">
 
         <details class="exec-collapsed-block">
@@ -276,11 +276,11 @@
 
         <div id="section-custom-rules">{{custom_rules_html}}</div>
 
-        <div id="section-tests" data-nav-section="Tests">{{tests_html}}</div>
+        <div id="section-tests" data-nav-section="{{i18n_tests}}">{{tests_html}}</div>
 
         <div id="section-fixtures" style="{{fixtures_display}}">{{fixtures_html}}</div>
 
-        <div id="section-dependencies" data-nav-section="Dependencies" style="{{dependencies_display}}">
+        <div id="section-dependencies" data-nav-section="{{i18n_dependencies_title}}" style="{{dependencies_display}}">
             <h2 class="section-title">📦 {{i18n_dependencies_title}} <a href="#sommaire" class="back-to-toc">↑ {{i18n_toc}}</a></h2>
             <div class="stats">
                 <div class="stat-card"><div class="stat-value">{{deps_total_scanned}}</div><div class="stat-label">{{i18n_deps_scanned}}</div></div>
@@ -292,7 +292,7 @@
             {{deps_findings_html}}
         </div>
 
-        <!--DEV_ONLY_DB--><div id="section-database" data-nav-section="Database" style="{{database_display}}">
+        <!--DEV_ONLY_DB--><div id="section-database" data-nav-section="{{i18n_database_schema}}" style="{{database_display}}">
             <h2 class="section-title">🗄️ {{i18n_database_schema}} <a href="#sommaire" class="back-to-toc">↑ {{i18n_toc}}</a></h2>
             <div class="stats">
                 <div class="stat-card"><div class="stat-value">{{db_tables}}</div><div class="stat-label">{{i18n_tables}}</div></div>
@@ -376,18 +376,19 @@
             <p>{{tool_name}} v{{tool_version}} — {{project_name}} {{project_version_display}}| {{company_name}}</p>
         </div>
     </div>
-    <!-- Panneau de suppression de findings -->
+    <!-- Panel of the findings suppressed in this page -->
     <div id="suppressPanel" class="suppress-panel" style="display:none">
-        <span><span id="suppressCount">0</span> suppression(s)</span>
+        <span>{{i18n_suppress_count_html}}</span>
         <button onclick="downloadSuppressions()">{{i18n_suppress_download}}</button>
         <button onclick="copySuppressions()">{{i18n_suppress_copy}}</button>
         <button onclick="clearSuppressions()">{{i18n_suppress_clear}}</button>
     </div>
+    <script id="report-i18n" type="application/json">{{report_i18n_json}}</script>
     <script>{{chartjs_lib}}</script>
     <script>{{js}}</script>
     <script>{{charts_js}}</script>
     <script>
-    /* Suppression de findings — logique client */
+    /* Findings suppressed by the reader, written to .sca-suppress.json */
     var _suppressions = [];
 
     function toggleSuppression(btn) {
@@ -449,19 +450,19 @@
     }
 
     function navigateToFile(filepath) {
-        // Comparaison via getAttribute pour éviter les soucis d'échappement
-        // de sélecteur CSS (chemins avec [, (, ), espaces, etc.).
+        // Compared through getAttribute, so that a path holding [, (, ) or
+        // spaces needs no CSS selector escaping.
         var findings = Array.prototype.filter.call(
             document.querySelectorAll('.finding[data-file]'),
             function(el) { return el.getAttribute('data-file') === filepath; }
         );
         if (!findings.length) return;
-        // Conteneurs parents qui se déplient via la classe .open (et non
-        // via l'élément <details>) : section, sub-group, category-group,
+        // Parent containers unfolded by the .open class (not by a
+        // <details> element): section, sub-group, category-group,
         // rule-group, compliance-accordion.
         var openSelectors = '.section, .sub-group, .category-group, .rule-group, .compliance-accordion';
         findings.forEach(function(f) {
-            // Ouvrir tous les ancêtres "div.open"
+            // Open every "div.open" ancestor
             var parent = f.parentElement;
             while (parent && parent !== document.body) {
                 if (parent.matches && parent.matches(openSelectors)) {
@@ -472,16 +473,16 @@
                 }
                 parent = parent.parentElement;
             }
-            // Ouvrir aussi les <details> internes (playbook, fix, risk, solution, taint)
+            // Open the inner <details> too (playbook, fix, risk, solution, taint)
             f.querySelectorAll('details').forEach(function(d) { d.open = true; });
-            // Highlight visuel sur chaque occurrence du fichier
+            // Highlight every occurrence of the file
             f.classList.add('hm-highlight');
             setTimeout(function() { f.classList.remove('hm-highlight'); }, 2400);
         });
-        // Scroll vers la première finding, en compensant la TOC sticky
+        // Scroll to the first finding, below the sticky table of contents
         var target = findings[0];
         var rect = target.getBoundingClientRect();
-        var tocOffset = 80; // hauteur approximative de la TOC sticky
+        var tocOffset = 80; // approximate height of the sticky table of contents
         var y = window.scrollY + rect.top - tocOffset;
         window.scrollTo({ top: y, behavior: 'smooth' });
     }

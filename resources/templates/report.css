@@ -765,3 +765,93 @@ a.playbook-ref:hover { background: var(--primary-light); color: #fff; }
 .fix-proposal pre { margin: 0; white-space: pre-wrap; word-break: break-word; }
 .fix-proposal-note { margin: 0.3rem 0 0; font-size: 0.8rem; color: var(--gray-600); font-style: italic; }
 .fix-proposal-none { margin: 0.3rem 0; font-size: 0.8rem; color: var(--gray-600); font-style: italic; }
+
+/* French typography: a no-break space before the colon of a parameter
+   label (the other report languages write the colon right after it). */
+:lang(fr) .param-label::after { content: "\00a0:"; }
+
+/* ========== PHONE WIDTH (2026-11-24) ==========
+   At 375 px an opened finding was about 130 px wide and the page 550 to
+   790 px wide: every nesting level (section, business/dependencies group,
+   category, rule, finding) kept its desktop padding and border, flex rows
+   did not wrap, and the two score tables sat side by side. Below 640 px
+   the nesting gives its width back to the content, rows wrap, code lines
+   keep their shape and scroll inside their own box, and wide tables
+   scroll inside theirs, so that the page itself never scrolls sideways.
+   The desktop layout is untouched: every rule sits in this query. */
+@media (max-width: 640px) {
+    .container { padding: 0.75rem; }
+    .print-btn { position: static; margin: 0 0 0.75rem auto; padding: 0.5rem 0.9rem; font-size: 0.85rem; }
+    .toc-block { margin-bottom: 1rem; }
+    .toc-toggle { padding: 0.65rem 0.9rem; }
+
+    .header { padding: 1rem; margin-bottom: 1rem; border-radius: 10px; }
+    .header h1 { font-size: 1.25rem; flex-wrap: wrap; overflow-wrap: anywhere; }
+    .header .meta, .header-stats { font-size: 0.85rem; overflow-wrap: anywhere; }
+    .lang-badge { margin-left: 0; }
+    .health-charts-grid { grid-template-columns: minmax(0, 1fr); gap: 1rem; }
+    .health-table-card { padding: 0.75rem; }
+    /* German headers ("Sicherheitsbewertung") are cut at a syllable. */
+    .health-calc-table th, .health-calc-table td { padding: 0.35rem 0.4rem; overflow-wrap: anywhere; hyphens: auto; }
+
+    .charts-grid { grid-template-columns: minmax(0, 1fr); gap: 1rem; }
+    .chart-card { padding: 1rem; }
+    .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.6rem; }
+    .stat-card { padding: 0.9rem 0.5rem; }
+    .stat-value { font-size: 1.8rem; }
+    .exec-card { padding: 0.9rem; }
+
+    .section-title { font-size: 1.15rem; }
+    .section-header { padding: 0.75rem; gap: 0.5rem; flex-wrap: wrap; }
+    .section-header h2 { font-size: 1rem; min-width: 0; overflow-wrap: anywhere; }
+    .section-content { padding: 0.5rem; }
+    /* The groups inside a section keep their header and top/bottom lines,
+       not their side borders: four nested frames took 40 px of 375. */
+    .sub-group, .category-group { border-left: none; border-right: none; border-radius: 0; }
+    .sub-group-header { padding: 0.6rem 0.5rem; gap: 0.5rem; }
+    .sub-group-content { padding: 0.4rem 0; }
+    .category-group-header { padding: 0.45rem 0.4rem; }
+    .category-group-content { padding: 0.35rem 0; }
+    .rule-group { margin-left: 0; }
+    .rule-group-content { padding: 0.35rem 0 0.35rem 0.25rem; }
+    .rule-group-name, .category-group-header h4, .sub-group-header h3 { min-width: 0; overflow-wrap: anywhere; }
+
+    .finding { padding: 0.6rem; }
+    .finding-header { flex-wrap: wrap; gap: 0.3rem 0.4rem; align-items: center; }
+    .finding-rule { flex: 1 1 100%; min-width: 0; overflow-wrap: anywhere; }
+    .finding-file { flex: 1 1 100%; min-width: 0; overflow-wrap: anywhere; }
+    .finding-badge { margin-left: 0; }
+    .finding-risk-block, .finding-solution-block, .playbook-details, .file-check-explain { padding: 8px 10px; }
+    .finding-risk-block p, .finding-solution-block p, .playbook-steps li { overflow-wrap: anywhere; }
+    .playbook-steps { margin-left: 0.5rem; }
+
+    /* Code keeps its lines: a long line scrolls inside its own box. */
+    .finding-code-block > .finding-code-context, .finding-code-block > .finding-code-highlight { white-space: pre; word-break: normal; width: max-content; min-width: 100%; }
+    .finding-code-block .finding-code-label, .finding-file-scope-text { white-space: normal; overflow-wrap: anywhere; padding: 0 0.5rem; }
+    .container pre { max-width: 100%; overflow-x: auto; }
+    .taint-fix-step pre, .fix-proposal pre { margin-left: 0; white-space: pre; word-break: normal; }
+    .taint-fix-block, .taint-trace, .taint-fix, .fix-proposal { padding: 0.6rem; }
+    .taint-fix-step { padding: 0.3rem 0.4rem; min-width: 0; }
+    .taint-fix-loc, .taint-fix-todo, .taint-fix-fp, .taint-source, .taint-sink, .category-example-meta { overflow-wrap: anywhere; }
+    .taint-source code, .taint-sink code, .taint-step code { word-break: break-all; }
+    .category-examples-section { padding: 1rem; }
+    .category-example { padding: 0.6rem; }
+
+    /* Wide tables scroll inside their own box. */
+    .compliance-matrix, .fixtures-table { display: block; overflow-x: auto; }
+    .compliance-theme, .compliance-summary { padding: 0.75rem; }
+    .compliance-coverage { flex-wrap: wrap; gap: 0.25rem 0.5rem; }
+    .audit-params { padding: 0.9rem; }
+    .param-label { min-width: 0; white-space: normal; }
+
+    .heatmap-item { padding: 0.5rem; gap: 0.5rem; }
+    .comparison-item, .finding-mini { overflow-wrap: anywhere; }
+    .cmp-trend-banner { padding: 0.75rem; }
+    .level-separator { gap: 0.5rem; margin: 2rem 0; padding: 0; }
+    .level-separator-label { white-space: normal; text-align: center; font-size: 0.85rem; padding: 0.4rem 0.8rem; }
+    .custom-rule-card { padding: 0.6rem; overflow-wrap: anywhere; }
+
+    .nav-buttons { bottom: 0.75rem; right: 0.75rem; }
+    .back-to-top { bottom: 4rem; right: 0.75rem; }
+    .suppress-panel { left: 0.75rem; right: 0.75rem; bottom: 3.75rem; flex-wrap: wrap; gap: 0.5rem; padding: 0.6rem 0.8rem; }
+}

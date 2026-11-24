@@ -713,6 +713,10 @@ pub enum VersionRulesStatus {
         pack: PathBuf,
         created: String,
         counts: Vec<(String, usize)>,
+        /// Distinct vulnerabilities the records describe and those of them
+        /// with a CVE (`advisory_file::Header::vulnerabilities`), `None`
+        /// for a pack whose version rules predate the count.
+        vulnerabilities: Option<(usize, usize)>,
         /// The databases of the version rules and their licenses, for the
         /// credit of the report (ADR-0051). Empty for a pack built before.
         sources: Vec<crate::project::advisory_file::DataSource>,
@@ -2649,6 +2653,7 @@ pub fn run_scan(config: &ScanConfig) -> ScanReport {
                         .iter()
                         .map(|e| (e.name.clone(), e.advisories))
                         .collect(),
+                    vulnerabilities: file.header.vulnerabilities.zip(file.header.cves),
                 };
                 (
                     vulnerable_dependency_findings(

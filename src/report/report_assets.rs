@@ -166,6 +166,118 @@ mod tests {
         }
     }
 
+    /// `text` without its comments and without any whitespace outside its
+    /// strings: what a hand-kept `.min` copy must keep of its source.
+    /// `line_comments`: `//` starts a comment (JavaScript, not CSS).
+    fn code_tokens(text: &str, line_comments: bool) -> String {
+        let chars: Vec<char> = text.chars().collect();
+        let mut out = String::new();
+        let mut quote: Option<char> = None;
+        let mut i = 0;
+        while i < chars.len() {
+            let c = chars[i];
+            if let Some(q) = quote {
+                out.push(c);
+                if c == '\\' && i + 1 < chars.len() {
+                    out.push(chars[i + 1]);
+                    i += 2;
+                    continue;
+                }
+                if c == q {
+                    quote = None;
+                }
+                i += 1;
+                continue;
+            }
+            let next = chars.get(i + 1).copied();
+            if matches!(c, '\'' | '"' | '`') {
+                quote = Some(c);
+                out.push(c);
+            } else if c == '/' && next == Some('*') {
+                i += 2;
+                while i + 1 < chars.len() && !(chars[i] == '*' && chars[i + 1] == '/') {
+                    i += 1;
+                }
+                i += 1;
+            } else if line_comments && c == '/' && next == Some('/') {
+                while i < chars.len() && chars[i] != '\n' {
+                    i += 1;
+                }
+                continue;
+            } else if !c.is_whitespace() {
+                out.push(c);
+            }
+            i += 1;
+        }
+        out
+    }
+
+    /// The top-level rules of a stylesheet (a `@media` block is one rule),
+    /// without comments and whitespace, the `;` before `}` dropped.
+    fn css_rules(text: &str) -> Vec<String> {
+        let flat = code_tokens(text, false).replace(";}", "}");
+        let mut rules = Vec::new();
+        let (mut depth, mut start) = (0usize, 0usize);
+        for (i, c) in flat.char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        rules.push(flat[start..=i].to_string());
+                        start = i + 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+        rules
+    }
+
+    /// The report embeds the `.min` copies, kept by hand (2026-11-24, after
+    /// the language and phone work changed both): each script is its
+    /// source without comments and whitespace, and the stylesheet has the
+    /// same rules as its source. The stylesheet's rule order may differ:
+    /// `report.min.css` has its own, the one the report shows.
+    #[test]
+    fn test_min_copies_carry_the_code_of_their_sources() {
+        for (source, min) in [
+            ("report.js", "report.min.js"),
+            ("charts.js", "charts.min.js"),
+        ] {
+            assert_eq!(
+                code_tokens(load_template(source), true),
+                code_tokens(load_template(min), true),
+                "{min} differs from {source}"
+            );
+        }
+        let mut source = css_rules(load_template("report.css"));
+        let mut min = css_rules(load_template("report.min.css"));
+        source.sort();
+        min.sort();
+        assert_eq!(
+            source, min,
+            "report.min.css and report.css hold different rules"
+        );
+    }
+
+    /// The phone layout (2026-11-24) is in the stylesheet the report
+    /// embeds, after every other rule, so that it wins over them.
+    #[test]
+    fn test_phone_layout_closes_the_embedded_stylesheet() {
+        let rules = css_rules(load_asset("report.css"));
+        let last = rules.last().expect("rules");
+        assert!(last.starts_with("@media(max-width:640px){"), "{last}");
+        for rule in [
+            ".container{padding:0.75rem}",
+            ".health-charts-grid{grid-template-columns:minmax(0,1fr);gap:1rem}",
+            ".finding-header{flex-wrap:wrap;",
+            ".compliance-matrix,.fixtures-table{display:block;overflow-x:auto}",
+        ] {
+            assert!(last.contains(rule), "{rule} missing from the phone layout");
+        }
+    }
+
     #[test]
     #[should_panic(expected = "gabarit inconnu")]
     fn test_load_template_unknown_name_panics() {

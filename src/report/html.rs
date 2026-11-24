@@ -39,6 +39,7 @@ use crate::report::data::{ReportData, compute_report_data};
 use crate::report::export_json::HistoryPoint;
 use crate::report::exports::sarif::ReportFinding;
 use crate::report::findings_html::{dependencies_group_id, render_severity_section};
+use crate::report::locale_format::{LocaleFormat, parse_scan_timestamp};
 use crate::report::report_assets::{
     asset_data_uri, load_asset, load_template, load_vendor_chart_js,
 };
@@ -61,8 +62,11 @@ pub struct ReportContext<'a> {
     pub tool_version: String,
     pub company_name: String,
     pub report_lang: String,
-    pub date_str: String,
-    pub timestamp: String,
+    /// When the scan ran, local time: written in the report's language
+    /// (`locale_format`), in the header and the page title. Replaces the
+    /// date string the caller used to format the French way for every
+    /// language (deviation from Audit, see `locale_format`).
+    pub generated_at: chrono::NaiveDateTime,
     pub audit_total_time_secs: u64,
     pub total_lines_code: usize,
     pub total_files_scanned: usize,
@@ -247,18 +251,20 @@ struct ComplianceResults<'a> {
     score: f64,
 }
 
-/// X-axis label of one past scan: `DD/MM HH:MM` from a `YYYY-MM-DD-HH-MM`
-/// timestamp, the timestamp itself when it has another shape.
+/// X-axis label of one past scan: its day and time in the report's short
+/// format (`Nov 18, 9:18 AM`, `18/11 09:18`, `18.11. 09:18`) from a
+/// `YYYY-MM-DD-HH-MM` timestamp, the timestamp itself when it has another
+/// shape.
 ///
-/// Deviation from Python (`report.py`, history loop), which keeps only
-/// `DD/MM`: several scans of one day then share a label, and the chart
-/// cannot tell them apart. The time keeps each point distinct.
-fn history_label(timestamp: &str) -> String {
-    let parts: Vec<&str> = timestamp.split('-').collect();
-    match parts.as_slice() {
-        [_, month, day, hour, minute, ..] => format!("{day}/{month} {hour}:{minute}"),
-        [_, month, day] => format!("{day}/{month}"),
-        _ => timestamp.to_string(),
+/// Deviations from Python (`report.py`, history loop), which keeps only
+/// `DD/MM` whatever the language: several scans of one day then share a
+/// label, and the chart cannot tell them apart, so the time keeps each
+/// point distinct; and the day is written the way the report's language
+/// writes it (`DD/MM` read as a month first in English).
+fn history_label(timestamp: &str, fmt: &LocaleFormat) -> String {
+    match parse_scan_timestamp(timestamp) {
+        Some(at) => fmt.datetime_short(&at),
+        None => timestamp.to_string(),
     }
 }
 
@@ -267,7 +273,7 @@ fn history_label(timestamp: &str) -> String {
 /// each series. The tests and database series are zeros, the Rust export
 /// carries neither (`export_json::load_history`); their charts only draw
 /// when those features ran.
-fn history_chart_data(history: &[HistoryPoint]) -> Value {
+fn history_chart_data(history: &[HistoryPoint], fmt: &LocaleFormat) -> Value {
     let total = |severity: &str| -> Vec<usize> {
         history
             .iter()
@@ -276,7 +282,7 @@ fn history_chart_data(history: &[HistoryPoint]) -> Value {
     };
     let zeros = vec![0; history.len()];
     json!({
-        "labels": history.iter().map(|h| history_label(&h.timestamp)).collect::<Vec<_>>(),
+        "labels": history.iter().map(|h| history_label(&h.timestamp, fmt)).collect::<Vec<_>>(),
         "high": total("HIGH"),
         "medium": total("MEDIUM"),
         "low": total("LOW"),
@@ -296,6 +302,7 @@ fn build_chart_data(
     rule_catalog: &RuleCatalog,
     compliance: &ComplianceResults,
     history: &[HistoryPoint],
+    fmt: &LocaleFormat,
 ) -> Value {
     let (compliance, asvs, nist, compliance_score) = (
         compliance.iso27001,
@@ -355,8 +362,8 @@ fn build_chart_data(
         "nist": nist_chart_data(nist),
         "complianceScore": {"enabled": true, "score": compliance_score, "standards": standards},
         "healthSeverity": health_severity,
-        "history": history_chart_data(history),
-        "i18n": chart_i18n_labels(report_locale),
+        "history": history_chart_data(history, fmt),
+        "i18n": chart_i18n_labels(report_locale, fmt),
         "taint": taint_chart_data(findings, rule_catalog),
         "languageSeverity": language_severity_data(findings),
     })
@@ -434,8 +441,46 @@ const CHART_LABEL_KEYS_2: [(&str, &str); 12] = [
     ("historyNeedsTwoAudits", "history_needs_two_audits"),
 ];
 
-fn chart_i18n_labels(v: &Value) -> Value {
+/// Texts and formats the charts write (`charts.js`, `CHART_DATA.i18n`):
+/// every label comes from the report locale, and the charts carry no
+/// text of their own any more. `locale` is the code `Intl.NumberFormat`
+/// and Chart.js format numbers with; `percentPattern` and `labelColon`
+/// are those of [`LocaleFormat`], so a chart writes a percentage or a
+/// total like the text around it.
+///
+/// Deviation from Audit: its charts fell back on English labels written in
+/// `charts.js`, wrote `Flows par règle` and `Total : ` in every language,
+/// and let Chart.js format numbers in the browser's language.
+fn chart_i18n_labels(v: &Value, fmt: &LocaleFormat) -> Value {
     let mut map = serde_json::Map::new();
+    map.insert("locale".to_string(), json!(t(v, "locale_code")));
+    map.insert("percentPattern".to_string(), json!(fmt.percent_pattern()));
+    map.insert("labelColon".to_string(), json!(fmt.colon()));
+    for (js_key, locale_key) in [
+        ("taintByRule", "chart_labels.taint_by_rule"),
+        ("taintPython", "chart_labels.taint_python"),
+        ("taintBuiltin", "chart_labels.taint_builtin"),
+        ("taintCustom", "chart_labels.taint_custom"),
+        (
+            "fixturesTruePositive",
+            "chart_labels.fixtures_true_positive",
+        ),
+        (
+            "fixturesTrueNegative",
+            "chart_labels.fixtures_true_negative",
+        ),
+        (
+            "fixturesFalseNegative",
+            "chart_labels.fixtures_false_negative",
+        ),
+        (
+            "fixturesFalsePositive",
+            "chart_labels.fixtures_false_positive",
+        ),
+        ("totalTitle", "chart_labels.total_title"),
+    ] {
+        map.insert(js_key.to_string(), json!(t(v, locale_key)));
+    }
     for (js_key, locale_key) in CHART_LABEL_KEYS.iter().chain(CHART_LABEL_KEYS_2.iter()) {
         map.insert(
             (*js_key).to_string(),
@@ -463,10 +508,6 @@ fn chart_i18n_labels(v: &Value) -> Value {
         "taintImpactPoint".to_string(),
         json!(t(v, "taint_impact_point")),
     );
-    map.insert("taintByRule".to_string(), json!("Flows par règle"));
-    map.insert("taintPython".to_string(), json!("Python"));
-    map.insert("taintBuiltin".to_string(), json!("Builtin"));
-    map.insert("taintCustom".to_string(), json!("Custom"));
     Value::Object(map)
 }
 
@@ -495,6 +536,8 @@ fn render_glossary_html(report_locale: &Value) -> (String, String) {
         .and_then(|g| g.get("col_description"))
         .and_then(|v| v.as_str())
         .unwrap_or("Description");
+    let english = crate::i18n::load_report_locale("en");
+    let english_glossary = crate::i18n::get_nested(&english, "glossary.acronyms");
     let mut keys: Vec<&String> = acronyms.keys().collect();
     keys.sort();
     let rows: String = keys
@@ -504,8 +547,26 @@ fn render_glossary_html(report_locale: &Value) -> (String, String) {
             let term = acr.get("term").and_then(|v| v.as_str()).unwrap_or("");
             let full = acr.get("full").and_then(|v| v.as_str()).unwrap_or("");
             let desc = acr.get("desc").and_then(|v| v.as_str()).unwrap_or("");
+            // A name quoted in its own language is marked with it in the
+            // other reports, as HTML asks for a passage in another language
+            // (2026-11-24): the language the entry names (`full_lang`,
+            // RGPD's French name), else English when the locale keeps the
+            // English expansion of an English acronym (CVE, SBOM, JNDI).
+            let report_lang = t(report_locale, "locale_code");
+            let english_full = english_glossary
+                .and_then(|g| g.get(key))
+                .and_then(|a| a.get("full"))
+                .and_then(|v| v.as_str());
+            let quoted_lang = acr
+                .get("full_lang")
+                .and_then(|v| v.as_str())
+                .or((english_full == Some(full)).then_some("en"));
+            let full_lang = quoted_lang
+                .filter(|l| *l != report_lang)
+                .map(|l| format!(r#" lang="{l}""#))
+                .unwrap_or_default();
             format!(
-                r#"<tr id="acr-{key}"><td class="glossary-term"><strong>{term}</strong></td><td class="glossary-full">{full}</td><td class="glossary-desc">{desc}</td></tr>"#
+                r#"<tr id="acr-{key}"><td class="glossary-term"><strong>{term}</strong></td><td class="glossary-full"{full_lang}>{full}</td><td class="glossary-desc">{desc}</td></tr>"#
             )
         })
         .collect();
@@ -687,6 +748,7 @@ pub fn generate_html(
     test_results: Option<&crate::project::testing::TestResults>,
 ) -> String {
     let report_locale = crate::i18n::load_report_locale(&ctx.report_lang);
+    let fmt = LocaleFormat::of(&report_locale);
     let data = compute_report_data(findings, ctx.total_lines_code);
     // Computed here (not in `compute_report_data`): needs the report
     // language and the rule catalog, both only available at HTML
@@ -727,6 +789,7 @@ pub fn generate_html(
         ctx.rule_catalog,
         &compliance_results,
         ctx.history,
+        &fmt,
     );
     let charts_js = load_asset("charts.js").replace("{{CHART_DATA}}", &chart_data.to_string());
 
@@ -860,6 +923,12 @@ pub fn generate_html(
         ("{{i18n_suppress_download}}", "suppress_download"),
         ("{{i18n_suppress_copy}}", "suppress_copy"),
         ("{{i18n_suppress_clear}}", "suppress_clear"),
+        ("{{i18n_nav_back_to_top}}", "nav_back_to_top"),
+        ("{{i18n_nav_previous_section}}", "nav_previous_section"),
+        ("{{i18n_nav_next_section}}", "nav_next_section"),
+        ("{{i18n_keyboard_navigate}}", "keyboard_navigate"),
+        ("{{i18n_keyboard_top}}", "keyboard_top"),
+        ("{{i18n_findings_by_source}}", "findings_by_source"),
     ] {
         html = html.replace(placeholder, &t(&report_locale, key));
     }
@@ -881,10 +950,31 @@ pub fn generate_html(
     );
 
     // --- identity / branding --------------------------------------------
+    html = html.replace("{{i18n_label_colon}}", fmt.colon());
+    // The counter of the suppression panel: the locale's sentence around
+    // the number `report-base.html`'s script updates.
+    html = html.replace(
+        "{{i18n_suppress_count_html}}",
+        &t(&report_locale, "suppress_count")
+            .replace("{count}", r#"<span id="suppressCount">0</span>"#),
+    );
+    // Texts the report's own script writes (`report.js`), read from this
+    // JSON block rather than written in the script (they were French in
+    // every report). `</` is escaped so no text can close the block.
+    let report_i18n = json!({
+        "printVersion": t(&report_locale, "print_version"),
+        "printModeNormal": t(&report_locale, "print_mode_normal"),
+    });
+    html = html.replace(
+        "{{report_i18n_json}}",
+        &report_i18n.to_string().replace("</", "<\\/"),
+    );
+
     html = html.replace("{{lang}}", &ctx.report_lang);
     html = html.replace("{{lang_label}}", &t(&report_locale, "lang_label"));
     html = html.replace("{{project_name}}", &escape(&ctx.project_name));
-    html = html.replace("{{timestamp}}", &ctx.timestamp);
+    let generated_at = fmt.datetime(&ctx.generated_at);
+    html = html.replace("{{timestamp}}", &generated_at);
     html = html.replace("{{project_version}}", &escape(&ctx.project_version));
     html = html.replace("{{tool_version}}", &escape(&ctx.tool_version));
     // The project version is optional (never set by the CLI today): an
@@ -901,15 +991,15 @@ pub fn generate_html(
     html = html.replace("{{project_version_meta}}", &project_version_meta);
     html = html.replace("{{tool_name}}", &escape(&ctx.tool_name));
     html = html.replace("{{company_name}}", &escape(&ctx.company_name));
-    html = html.replace("{{date_str}}", &ctx.date_str);
+    html = html.replace("{{date_str}}", &generated_at);
+    html = html.replace("{{audit_total_time}}", &fmt.int(ctx.audit_total_time_secs));
     html = html.replace(
-        "{{audit_total_time}}",
-        &ctx.audit_total_time_secs.to_string(),
+        "{{total_lines_code}}",
+        &fmt.int(ctx.total_lines_code as u64),
     );
-    html = html.replace("{{total_lines_code}}", &ctx.total_lines_code.to_string());
     html = html.replace(
         "{{total_files_scanned}}",
-        &ctx.total_files_scanned.to_string(),
+        &fmt.int(ctx.total_files_scanned as u64),
     );
 
     let project_uuid_badge = if !ctx.project_uuid.is_empty() {
@@ -949,6 +1039,9 @@ pub fn generate_html(
     html = html.replace("{{favicon_type}}", "image/svg+xml");
 
     // --- health / compliance (bars + gauges) ----------------------------
+    // `_text` placeholders are read by the reader, in the report's number
+    // format; the plain ones are CSS widths and stay plain numbers.
+    html = html.replace("{{health_score_text}}", &fmt.percent(data.health_score));
     html = html.replace("{{health_score}}", &data.health_score.to_string());
     html = html.replace("{{health_class}}", health_class);
     html = html.replace("{{score_legend}}", &score_legend);
@@ -960,6 +1053,10 @@ pub fn generate_html(
             ctx.total_lines_code,
             &report_locale,
         ),
+    );
+    html = html.replace(
+        "{{compliance_score_text}}",
+        &fmt.percent_of(&fmt.decimal(compliance_score, 1)),
     );
     html = html.replace("{{compliance_score}}", &format!("{compliance_score}"));
     html = html.replace(
@@ -1009,22 +1106,22 @@ pub fn generate_html(
     );
 
     // --- stats -----------------------------------------------------------
-    html = html.replace("{{total_critical}}", &data.total_critical.to_string());
-    html = html.replace("{{total_high}}", &data.total_high.to_string());
-    html = html.replace("{{total_medium}}", &data.total_medium.to_string());
-    html = html.replace("{{total_low}}", &data.total_low.to_string());
-    html = html.replace("{{total_info}}", &data.total_info.to_string());
-    html = html.replace("{{total_findings}}", &data.total_findings.to_string());
-    html = html.replace("{{total_successes}}", &total_successes.to_string());
-    html = html.replace("{{total_business}}", &data.total_business.to_string());
-    html = html.replace("{{total_deps}}", &data.total_deps.to_string());
+    html = html.replace("{{total_critical}}", &fmt.int(data.total_critical as u64));
+    html = html.replace("{{total_high}}", &fmt.int(data.total_high as u64));
+    html = html.replace("{{total_medium}}", &fmt.int(data.total_medium as u64));
+    html = html.replace("{{total_low}}", &fmt.int(data.total_low as u64));
+    html = html.replace("{{total_info}}", &fmt.int(data.total_info as u64));
+    html = html.replace("{{total_findings}}", &fmt.int(data.total_findings as u64));
+    html = html.replace("{{total_successes}}", &fmt.int(total_successes as u64));
+    html = html.replace("{{total_business}}", &fmt.int(data.total_business as u64));
+    html = html.replace("{{total_deps}}", &fmt.int(data.total_deps as u64));
     html = html.replace("{{deps_card_link}}", &dependencies_card_link(&data));
     // Tests/fixtures: never active until testing.py is ported.
     html = html.replace("{{tests_color}}", "");
-    html = html.replace("{{tests_rate}}", "0");
+    html = html.replace("{{tests_rate_text}}", &fmt.percent(0));
     html = html.replace("{{tests_total}}", "0");
     html = html.replace("{{fixtures_color}}", "color-danger");
-    html = html.replace("{{fixtures_rate}}", "0");
+    html = html.replace("{{fixtures_rate_text}}", &fmt.percent(0));
     html = html.replace("{{fixtures_total}}", "0");
     html = html.replace("{{tests_chart_display}}", "display:none");
 
@@ -1048,7 +1145,14 @@ pub fn generate_html(
 
     // --- comparison ---------------------------------------------------------
     let comparison_html = comparison
-        .map(|c| crate::report::comparison_html::render_comparison_html(c, &data, &report_locale))
+        .map(|c| {
+            crate::report::comparison_html::render_comparison_html(
+                c,
+                &data,
+                &report_locale,
+                ctx.rule_catalog,
+            )
+        })
         .unwrap_or_default();
     html = html.replace(
         "{{comparison_display}}",
@@ -1177,8 +1281,7 @@ mod tests {
             tool_version: "2.0.0".to_string(),
             company_name: "CodeFixture SAS".to_string(),
             report_lang: "en".to_string(),
-            date_str: "25/08/2026 à 12:00".to_string(),
-            timestamp: "20260825_120000".to_string(),
+            generated_at: parse_scan_timestamp("2026-08-25-12-00").expect("valid timestamp"),
             audit_total_time_secs: 3,
             total_lines_code: 5000,
             total_files_scanned: 42,
@@ -1241,6 +1344,27 @@ mod tests {
             .into_iter()
             .filter_map(|r| Some((crate::rules::identity::RuleId::of(&r)?, r)))
             .collect()
+    }
+
+    /// A glossary name quoted in another language is marked with it: the
+    /// English expansion of CVE in a French report, RGPD's French name in
+    /// an English one; a name in the report's own language is not.
+    #[test]
+    fn test_glossary_marks_names_quoted_in_another_language() {
+        let (fr, _) = render_glossary_html(&crate::i18n::load_report_locale("fr"));
+        assert!(fr.contains(
+            r#"<td class="glossary-full" lang="en">Common Vulnerabilities and Exposures</td>"#
+        ));
+        assert!(fr.contains(
+            r#"<td class="glossary-full">Règlement Général sur la Protection des Données</td>"#
+        ));
+        let (en, _) = render_glossary_html(&crate::i18n::load_report_locale("en"));
+        assert!(en.contains(
+            r#"<td class="glossary-full" lang="fr">Règlement Général sur la Protection des Données</td>"#
+        ));
+        assert!(
+            en.contains(r#"<td class="glossary-full">Common Vulnerabilities and Exposures</td>"#)
+        );
     }
 
     /// Ticket #274: no client rule loaded, the empty state with a zero
@@ -1475,23 +1599,31 @@ mod tests {
         }
     }
 
-    /// The label keeps the time, so two scans of one day stay distinct;
-    /// another shape of timestamp is shown as it is.
+    /// The label keeps the time, so two scans of one day stay distinct,
+    /// in the report's language; another shape of timestamp is shown as
+    /// it is.
     #[test]
     fn test_history_label_keeps_day_month_and_time() {
-        assert_eq!(history_label("2026-11-18-09-18"), "18/11 09:18");
-        assert_eq!(history_label("2026-11-18"), "18/11");
-        assert_eq!(history_label("20260825_120000"), "20260825_120000");
+        let fr = LocaleFormat::of(&crate::i18n::load_report_locale("fr"));
+        let en = LocaleFormat::of(&crate::i18n::load_report_locale("en"));
+        assert_eq!(history_label("2026-11-18-09-18", &fr), "18/11 09:18");
+        assert_eq!(history_label("2026-11-18-09-18", &en), "Nov 18, 9:18 AM");
+        assert_eq!(history_label("2026-11-18", &fr), "2026-11-18");
+        assert_eq!(history_label("20260825_120000", &fr), "20260825_120000");
     }
 
     /// One entry per past scan in every series, severities read from the
     /// totals, a missing severity counted as 0.
     #[test]
     fn test_history_chart_data_has_one_entry_per_scan() {
-        let data = history_chart_data(&[
-            point("2026-11-14-09-47", 21, 38),
-            point("2026-11-18-09-18", 5, 2),
-        ]);
+        let fr = LocaleFormat::of(&crate::i18n::load_report_locale("fr"));
+        let data = history_chart_data(
+            &[
+                point("2026-11-14-09-47", 21, 38),
+                point("2026-11-18-09-18", 5, 2),
+            ],
+            &fr,
+        );
         assert_eq!(data["labels"], json!(["14/11 09:47", "18/11 09:18"]));
         assert_eq!(data["high"], json!([21, 5]));
         assert_eq!(data["medium"], json!([38, 2]));
@@ -1516,7 +1648,7 @@ mod tests {
         };
         let html = generate_html(&[], &context, None, None, None);
         assert!(
-            html.contains(r#""labels":["14/11 09:47","18/11 09:18"]"#),
+            html.contains(r#""labels":["Nov 14, 9:47 AM","Nov 18, 9:18 AM"]"#),
             "history labels missing from the chart data"
         );
         assert!(html.contains(r#""high":[21,5]"#));
@@ -1528,7 +1660,7 @@ mod tests {
     fn test_history_first_audit_message_in_every_language() {
         for lang in ["en", "fr", "es", "de"] {
             let locale = crate::i18n::load_report_locale(lang);
-            let labels = chart_i18n_labels(&locale);
+            let labels = chart_i18n_labels(&locale, &LocaleFormat::of(&locale));
             let text = labels["historyNeedsTwoAudits"].as_str().unwrap_or("");
             assert!(
                 !text.is_empty()

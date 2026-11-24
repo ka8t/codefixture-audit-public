@@ -29,7 +29,10 @@
 //! are optional: a file written before them reads as having none, and an
 //! engine that predates them ignores them. Each member holds the JSON of one ecosystem as
 //! `codefixture-audit-advisories` writes it (`tools/codefixture-audit-advisories/src/format.rs`);
-//! this module does not look inside.
+//! this module only reads the identifiers of its records, once, when it
+//! writes the file: the header then says how many distinct vulnerabilities
+//! the records describe (`Header::vulnerabilities`), so that a scan names
+//! them without decompressing anything (2026-11-24).
 //!
 //! **Deterministic**: the same ecosystems give the same bytes. The
 //! creation date is the newest OSV `modified` date of the data, not the
@@ -206,6 +209,80 @@ pub struct Header {
     /// ecosystems (ADR-0051). Empty in a file written before 2026-11-18.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tables: Vec<TableEntry>,
+    /// Distinct published vulnerabilities the records describe, across
+    /// the ecosystems: records sharing an id or an alias are one
+    /// vulnerability (the same CVE published by two databases, or
+    /// affecting packages of two ecosystems). The record counts of
+    /// `ecosystems` are larger: the console used to call them
+    /// vulnerabilities (26 records for 21 vulnerabilities in the demo
+    /// pack). `None` in a file written before 2026-11-24, or whose records
+    /// could not be read when it was written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vulnerabilities: Option<usize>,
+    /// Among `vulnerabilities`, those with a CVE identifier; the others
+    /// are known by another id only (GHSA, a malicious package's MAL).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cves: Option<usize>,
+}
+
+/// The identifiers of one record, all that [`count_vulnerabilities`]
+/// reads of an ecosystem's JSON.
+#[derive(Deserialize)]
+struct RecordIds {
+    id: String,
+    #[serde(default)]
+    aliases: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct EcosystemIds {
+    advisories: Vec<RecordIds>,
+}
+
+/// The distinct vulnerabilities described by the records of `ecosystems`
+/// (their JSON, `tools/codefixture-audit-advisories/src/format.rs`) and
+/// how many of them have a CVE identifier, or `None` when one of them is
+/// not that JSON. Records sharing an id or an alias are joined (a
+/// union-find over the identifiers), as the scan merges them on a
+/// dependency (`advisories::VulnerableDependency`).
+pub fn count_vulnerabilities<'a>(
+    ecosystems: impl Iterator<Item = &'a [u8]>,
+) -> Option<(usize, usize)> {
+    use std::collections::HashMap;
+    let mut index: HashMap<String, usize> = HashMap::new();
+    let mut parent: Vec<usize> = Vec::new();
+    fn root(parent: &mut [usize], mut x: usize) -> usize {
+        while parent[x] != x {
+            parent[x] = parent[parent[x]];
+            x = parent[x];
+        }
+        x
+    }
+    let slot = |id: &str, index: &mut HashMap<String, usize>, parent: &mut Vec<usize>| {
+        *index.entry(id.to_string()).or_insert_with(|| {
+            parent.push(parent.len());
+            parent.len() - 1
+        })
+    };
+    for json in ecosystems {
+        let file: EcosystemIds = serde_json::from_slice(json).ok()?;
+        for record in file.advisories {
+            let first = slot(&record.id, &mut index, &mut parent);
+            for alias in &record.aliases {
+                let other = slot(alias, &mut index, &mut parent);
+                let (a, b) = (root(&mut parent, first), root(&mut parent, other));
+                if a != b {
+                    parent[b] = a;
+                }
+            }
+        }
+    }
+    let mut groups: HashMap<usize, bool> = HashMap::new();
+    for (id, &at) in &index {
+        let group = root(&mut parent, at);
+        *groups.entry(group).or_default() |= id.starts_with("CVE-");
+    }
+    Some((groups.len(), groups.values().filter(|cve| **cve).count()))
 }
 
 /// One database whose data the file holds (ADR-0051).
@@ -389,6 +466,7 @@ pub fn encode(contents: &Contents<'_>) -> std::io::Result<Vec<u8>> {
     let created = newest_date(entries.iter().map(|e| e.last_modified.as_str()))
         .unwrap_or("")
         .to_string();
+    let counted = count_vulnerabilities(contents.ecosystems.iter().map(|e| e.json.as_slice()));
     let header = Header {
         format: FORMAT_VERSION,
         created,
@@ -396,6 +474,8 @@ pub fn encode(contents: &Contents<'_>) -> std::io::Result<Vec<u8>> {
         sources,
         ecosystems: entries,
         tables,
+        vulnerabilities: counted.map(|(all, _)| all),
+        cves: counted.map(|(_, cves)| cves),
     };
     let header_json = serde_json::to_vec(&header).map_err(std::io::Error::other)?;
     let mut out = Vec::with_capacity(12 + header_json.len() + body.len());
@@ -492,6 +572,74 @@ mod tests {
             last_modified: date.to_string(),
             json: format!("{{\"ecosystem\":\"{name}\",\"advisories\":[{n}]}}").into_bytes(),
         }
+    }
+
+    /// 2026-11-24: the header counts the distinct vulnerabilities of the
+    /// records, across ecosystems, and those with a CVE. Records sharing
+    /// an id or an alias are one vulnerability, even through a third
+    /// record; a file whose records cannot be read has no count.
+    #[test]
+    fn test_header_counts_distinct_vulnerabilities() {
+        let eco = |name: &str, json: &str| EcosystemPayload {
+            name: name.to_string(),
+            advisories: 0,
+            last_modified: "2026-11-10T00:00:00Z".to_string(),
+            json: json.as_bytes().to_vec(),
+        };
+        let ecosystems = [
+            eco(
+                "PyPI",
+                r#"{"format":1,"advisories":[
+                    {"id":"GHSA-1","aliases":["CVE-2021-1"],"summary":"s","severity":"HIGH","packages":[]},
+                    {"id":"PYSEC-1","aliases":["CVE-2021-1"]},
+                    {"id":"GHSA-2","aliases":[]}]}"#,
+            ),
+            eco(
+                "npm",
+                r#"{"format":1,"advisories":[
+                    {"id":"GHSA-3","aliases":["CVE-2022-3"]},
+                    {"id":"GHSA-4","aliases":["GHSA-3"]},
+                    {"id":"MAL-1"}]}"#,
+            ),
+        ];
+        // CVE-2021-1 (2 records), GHSA-2, CVE-2022-3 (2 records), MAL-1.
+        assert_eq!(
+            count_vulnerabilities(ecosystems.iter().map(|e| e.json.as_slice())),
+            Some((4, 2))
+        );
+        let bytes = encode(&plain("test", &ecosystems)).unwrap();
+        let file = decode(Path::new("x.cfdb"), bytes).unwrap();
+        assert_eq!(
+            (file.header.vulnerabilities, file.header.cves),
+            (Some(4), Some(2))
+        );
+        // A payload that is not records: no count, and the field is left
+        // out of the header, as in a file written before.
+        let other = [payload("PyPI", 3, "2026-11-10T00:00:00Z")];
+        let bytes = encode(&plain("test", &other)).unwrap();
+        let header_len = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
+        let header = String::from_utf8(bytes[12..12 + header_len].to_vec()).unwrap();
+        assert!(!header.contains("vulnerabilities"), "{header}");
+        assert_eq!(
+            decode(Path::new("x.cfdb"), bytes).unwrap().header.cves,
+            None
+        );
+    }
+
+    /// The committed demo selection says its counts: 26 records for 21
+    /// vulnerabilities, each with a CVE (`rules/advisories/demo-ids.txt`).
+    #[test]
+    fn test_demo_selection_counts_its_vulnerabilities() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("rules/advisories/demo.cfdb");
+        let Some(file) = read(&path).unwrap() else {
+            // The shared repository carries the pack, not the database.
+            return;
+        };
+        let records: usize = file.header.ecosystems.iter().map(|e| e.advisories).sum();
+        assert_eq!(
+            (records, file.header.vulnerabilities, file.header.cves),
+            (26, Some(21), Some(21))
+        );
     }
 
     /// Ticket #177: what is written is read back, ecosystem by

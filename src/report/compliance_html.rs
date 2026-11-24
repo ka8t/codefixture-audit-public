@@ -5,6 +5,14 @@
 //! helpers `_score_class`/`_pct_or_na`/`_render_compliance_dual_bars`/
 //! `_render_shared_specific_breakdown`). The computation part lives in
 //! `crate::report::compliance` (a separate work item, already ported).
+//!
+//! The names of the controls, subcategories, requirements and ASVS
+//! chapters are the standards' own English names in every language
+//! (`resources/mappings/`); since 2026-11-24 their cells carry
+//! `lang="en"`, as HTML asks for a passage in another language than the
+//! page's, and the report's language check skips them
+//! (`report::html_languages`). Numbers and percentages are written in the
+//! report's language (`locale_format`).
 
 use serde_json::Value;
 
@@ -12,6 +20,7 @@ use crate::i18n::{get_nested, t};
 use crate::report::compliance::{
     AsvsCompliance, ComplianceStatus, Iso27001Compliance, NistCsfCompliance, SharedVsSpecific,
 };
+use crate::report::locale_format::LocaleFormat;
 use crate::report::text::{escape, linkify_acronyms};
 
 /// Table « What the compliance score measures » shown beside the score
@@ -32,6 +41,7 @@ pub fn render_compliance_table(
     report_locale: &Value,
 ) -> String {
     let of = t(report_locale, "compliance_table_of");
+    let fmt = LocaleFormat::of(report_locale);
     let rows = [
         (
             "ISO 27001",
@@ -59,19 +69,16 @@ pub fn render_compliance_table(
         .iter()
         .map(|(label, covered, total, with_findings, pct)| {
             format!(
-                r#"<tr><td>{label}</td><td class="num">{covered} {of} {total}</td><td class="num">{with_findings}</td><td class="num">{pct} %</td></tr>"#
+                r#"<tr><td>{label}</td><td class="num">{covered} {of} {total}</td><td class="num">{with_findings}</td><td class="num">{pct}</td></tr>"#,
+                covered = fmt.int(*covered as u64),
+                total = fmt.int(*total as u64),
+                with_findings = fmt.int(*with_findings as u64),
+                pct = fmt.percent(*pct),
             )
         })
         .collect();
-    // Decimal comma everywhere but in English, as the report's own texts.
-    let decimal = |v: f64| {
-        let s = format!("{v}");
-        if t(report_locale, "locale_code") == "en" {
-            s
-        } else {
-            s.replace('.', ",")
-        }
-    };
+    // The decimal separator of the report's language (`locale_format`).
+    let decimal = |v: f64| fmt.decimal(v, 1);
     let computation = t(report_locale, "compliance_table_computation")
         .replace("{iso}", &iso.coverage_pct.to_string())
         .replace("{asvs}", &asvs.coverage_pct.to_string())
@@ -120,11 +127,13 @@ fn locale_str(v: &Value, path: &str, default: &str) -> String {
     if s == path { default.to_string() } else { s }
 }
 
-fn pct_or_na(pct: i64, denom: usize, na_label: &str) -> String {
+/// `pct` as a percentage in the report's language, or `na_label` when the
+/// share has no denominator.
+fn pct_or_na(pct: i64, denom: usize, na_label: &str, fmt: &LocaleFormat) -> String {
     if denom == 0 {
         na_label.to_string()
     } else {
-        format!("{pct}%")
+        fmt.percent(pct)
     }
 }
 
@@ -168,8 +177,9 @@ fn render_compliance_dual_bars(
     } else {
         "na"
     };
-    let applicability_display = pct_or_na(applicability_pct, total, &na_label);
-    let clean_display = pct_or_na(clean_pct, covered, &na_label);
+    let fmt = LocaleFormat::of(report_locale);
+    let applicability_display = pct_or_na(applicability_pct, total, &na_label, &fmt);
+    let clean_display = pct_or_na(clean_pct, covered, &na_label, &fmt);
     let applicability_width = if total > 0 { applicability_pct } else { 0 };
     let clean_width = if covered > 0 { clean_pct } else { 0 };
     format!(
@@ -204,8 +214,9 @@ fn render_shared_specific_breakdown(report_locale: &Value, sv: &SharedVsSpecific
     );
     let unit = locale_str(report_locale, "compliance_clean_unit", "clean");
     let na_label = locale_str(report_locale, "compliance_na_label", "N/A");
-    let shared_display = pct_or_na(sv.shared_clean_pct, sv.shared_total, &na_label);
-    let specific_display = pct_or_na(sv.specific_clean_pct, sv.specific_total, &na_label);
+    let fmt = LocaleFormat::of(report_locale);
+    let shared_display = pct_or_na(sv.shared_clean_pct, sv.shared_total, &na_label, &fmt);
+    let specific_display = pct_or_na(sv.specific_clean_pct, sv.specific_total, &na_label, &fmt);
     let shared_clean = sv.shared_clean;
     let shared_total = sv.shared_total;
     let specific_clean = sv.specific_clean;
@@ -385,7 +396,7 @@ pub fn generate_compliance_html(
                 r##"
                         <tr class="{badge_class}-row">
                             <td class="compliance-ctrl-id">{}</td>
-                            <td>{}</td>
+                            <td lang="en">{}</td>
                             <td><span class="compliance-badge {badge_class}">{badge_text}</span></td>
                             <td class="compliance-count">{}</td>
                             <td class="compliance-count">{finding_text}</td>
@@ -559,7 +570,7 @@ pub fn generate_nist_csf_html(
                 r##"
                         <tr class="{badge_class}-row">
                             <td class="compliance-ctrl-id">{}</td>
-                            <td>{}</td>
+                            <td lang="en">{}</td>
                             <td><span class="compliance-badge {badge_class}">{badge_text}</span></td>
                             <td class="compliance-count">{}</td>
                             <td class="compliance-count">{finding_text}</td>
@@ -691,7 +702,10 @@ pub fn generate_asvs_html(
             .find(|(k, _)| k == ch_key)
             .map(|(_, i)| *i)
             .unwrap_or("📋");
-        let ch_name = format!("{ch_key} — {}", ch_data.name);
+        let ch_name = format!(
+            r#"{ch_key} — <span lang="en">{}</span>"#,
+            escape(&ch_data.name)
+        );
         let mut ch_reqs: Vec<_> = data
             .requirements
             .values()
@@ -758,7 +772,7 @@ pub fn generate_asvs_html(
                 r##"
                         <tr class="{badge_class}-row">
                             <td class="compliance-ctrl-id">{}</td>
-                            <td>{}</td>
+                            <td lang="en">{}</td>
                             <td><span class="asvs-level-badge {level_class}">{}</span></td>
                             <td><span class="compliance-badge {badge_class}">{badge_text}</span></td>
                             <td class="compliance-count">{}</td>

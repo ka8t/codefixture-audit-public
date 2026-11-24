@@ -7,8 +7,10 @@ use crate::i18n::t;
 use crate::report::comparison::ComparisonResult;
 use crate::report::data::ReportData;
 use crate::report::exports::sarif::ReportFinding;
+use crate::report::locale_format::LocaleFormat;
 use crate::report::report_assets::load_template;
-use crate::report::text::escape;
+use crate::report::text::{escape, rule_display_name};
+use crate::rules::identity::RuleCatalog;
 
 fn format_delta(d: i64) -> String {
     let (class, value) = if d > 0 {
@@ -23,7 +25,38 @@ fn format_delta(d: i64) -> String {
         .replace("{{value}}", &value)
 }
 
-fn render_finding_mini(f: &ReportFinding, resolved: bool, report_locale: &Value) -> String {
+/// The name of a finding's rule in the report's language, read from the
+/// rule itself when the scan loaded it. Otherwise a finding of this scan
+/// keeps the name it carries, which the scan wrote in the report's
+/// language; a finding resolved since the baseline, whose rule this scan
+/// did not load (removed since, or of a pack the scan did not read), is
+/// named by its identity, `language/key`, which reads the same in every
+/// language.
+///
+/// Deviation from Audit, which shows the name the finding was saved with:
+/// a finding resolved since the baseline comes from the baseline's export,
+/// written in the language of that scan, which the export does not record,
+/// and an English report listed French rule names (found 2026-11-24 on
+/// DVWA, whose baseline was a French scan with the full catalog).
+fn rule_name_in_report_language(
+    f: &ReportFinding,
+    resolved: bool,
+    rule_catalog: &RuleCatalog,
+    report_locale: &Value,
+) -> String {
+    match rule_catalog.get(&f.rule_id()) {
+        Some(rule) => rule_display_name(rule, &crate::i18n::t(report_locale, "locale_code")),
+        None if !resolved || f.rule_key.is_empty() => f.rule_name.clone(),
+        None => f.rule_id().to_string(),
+    }
+}
+
+fn render_finding_mini(
+    f: &ReportFinding,
+    resolved: bool,
+    report_locale: &Value,
+    rule_catalog: &RuleCatalog,
+) -> String {
     let (severity_class, badge_class, badge_text) = if resolved {
         (
             "resolved".to_string(),
@@ -41,7 +74,15 @@ fn render_finding_mini(f: &ReportFinding, resolved: bool, report_locale: &Value)
         .replace("{{severity_class}}", &severity_class)
         .replace("{{badge_class}}", &badge_class)
         .replace("{{badge_text}}", &badge_text)
-        .replace("{{rule}}", &escape(&f.rule_name))
+        .replace(
+            "{{rule}}",
+            &escape(&rule_name_in_report_language(
+                f,
+                resolved,
+                rule_catalog,
+                report_locale,
+            )),
+        )
         // `file:line`, or the file alone for a whole-file finding
         // (ticket #214).
         .replace(
@@ -80,13 +121,15 @@ fn count_of(findings: &[ReportFinding], severity: &str) -> usize {
 /// baseline finding is fixed when no current finding matches it,
 /// remaining when one does; it is counted at its current severity.
 pub fn render_synthesis_table(comparison: &ComparisonResult, report_locale: &Value) -> String {
+    let fmt = LocaleFormat::of(report_locale);
     let pct = |fixed: usize, base: usize| {
         if base == 0 {
             "—".to_string()
         } else {
-            format!("{} %", (fixed as f64 * 100.0 / base as f64).round() as i64)
+            fmt.percent((fixed as f64 * 100.0 / base as f64).round() as i64)
         }
     };
+    let n = |count: usize| fmt.int(count as u64);
     let row = |label: String, fixed: usize, remaining: usize, new: usize, strong: bool| {
         let base = fixed + remaining;
         let (open, close) = if strong {
@@ -97,7 +140,11 @@ pub fn render_synthesis_table(comparison: &ComparisonResult, report_locale: &Val
         format!(
             r#"<tr><td>{open}{label}{close}</td><td class="num">{open}{base}{close}</td><td class="num fixed">{open}{fixed} ({p}){close}</td><td class="num">{open}{remaining}{close}</td><td class="num added">{open}{new}{close}</td><td class="num">{open}{current}{close}</td></tr>"#,
             p = pct(fixed, base),
-            current = remaining + new,
+            base = n(base),
+            fixed = n(fixed),
+            remaining = n(remaining),
+            new = n(new),
+            current = n(remaining + new),
         )
     };
     let mut rows = String::new();
@@ -122,8 +169,10 @@ pub fn render_synthesis_table(comparison: &ComparisonResult, report_locale: &Val
     ));
     format!(
         r#"<div class="cmp-synthesis"><h3>{title}</h3><table class="health-calc-table"><thead><tr><th>{h_sev}</th><th class="num">{h_base}</th><th class="num">{h_fixed}</th><th class="num">{h_remaining}</th><th class="num">{h_new}</th><th class="num">{h_current}</th></tr></thead><tbody>{rows}</tbody></table><p class="health-table-note">{note}</p></div>"#,
-        title = t(report_locale, "comparison_synthesis_title")
-            .replace("{date}", &escape(&comparison.baseline_date)),
+        title = t(report_locale, "comparison_synthesis_title").replace(
+            "{date}",
+            &escape(&fmt.scan_timestamp(&comparison.baseline_date))
+        ),
         h_sev = t(report_locale, "health_table_severity"),
         h_base = t(report_locale, "comparison_synthesis_baseline"),
         h_fixed = t(report_locale, "comparison_synthesis_fixed"),
@@ -142,7 +191,10 @@ pub fn render_comparison_html(
     comparison: &ComparisonResult,
     data: &ReportData,
     report_locale: &Value,
+    rule_catalog: &RuleCatalog,
 ) -> String {
+    let fmt = LocaleFormat::of(report_locale);
+    let n = |count: usize| fmt.int(count as u64);
     let total_critical = data.total_critical;
     let total_high = data.total_high;
     let total_medium = data.total_medium;
@@ -157,14 +209,14 @@ pub fn render_comparison_html(
     new_sorted.sort_by_key(sort_key);
     let new_items: String = new_sorted
         .iter()
-        .map(|f| render_finding_mini(f, false, report_locale))
+        .map(|f| render_finding_mini(f, false, report_locale, rule_catalog))
         .collect();
 
     let mut resolved_sorted = comparison.resolved_findings.clone();
     resolved_sorted.sort_by_key(sort_key);
     let resolved_items: String = resolved_sorted
         .iter()
-        .map(|f| render_finding_mini(f, true, report_locale))
+        .map(|f| render_finding_mini(f, true, report_locale, rule_catalog))
         .collect();
 
     // CRITICAL card added 2026-11-20: the grid showed HIGH to INFO only,
@@ -209,13 +261,15 @@ pub fn render_comparison_html(
     let mut trend_detail_parts = Vec::new();
     if resolved_count > 0 {
         trend_detail_parts.push(format!(
-            "{resolved_count} {}",
+            "{} {}",
+            n(resolved_count),
             t(report_locale, "comparison_resolved_short")
         ));
     }
     if new_count > 0 {
         trend_detail_parts.push(format!(
-            "{new_count} {}",
+            "{} {}",
+            n(new_count),
             t(report_locale, "comparison_new_short")
         ));
     }
@@ -251,30 +305,33 @@ pub fn render_comparison_html(
         .replace("{{trend_icon}}", trend_icon)
         .replace("{{trend_label}}", &trend_label)
         .replace("{{trend_detail}}", &trend_detail)
-        .replace("{{baseline_date}}", &escape(&comparison.baseline_date))
-        .replace("{{baseline_total}}", &baseline_total.to_string())
-        .replace("{{current_total}}", &current_total.to_string())
+        .replace(
+            "{{baseline_date}}",
+            &escape(&fmt.scan_timestamp(&comparison.baseline_date)),
+        )
+        .replace("{{baseline_total}}", &n(baseline_total))
+        .replace("{{current_total}}", &n(current_total))
         .replace(
             "{{synthesis_table}}",
             &render_synthesis_table(comparison, report_locale),
         )
-        .replace("{{baseline_critical}}", &baseline_critical.to_string())
-        .replace("{{total_critical}}", &total_critical.to_string())
+        .replace("{{baseline_critical}}", &n(baseline_critical))
+        .replace("{{total_critical}}", &n(total_critical))
         .replace("{{delta_critical}}", &format_delta(delta_critical))
-        .replace("{{baseline_high}}", &baseline_high.to_string())
-        .replace("{{baseline_medium}}", &baseline_medium.to_string())
-        .replace("{{baseline_low}}", &baseline_low.to_string())
-        .replace("{{baseline_info}}", &baseline_info.to_string())
-        .replace("{{total_high}}", &total_high.to_string())
-        .replace("{{total_medium}}", &total_medium.to_string())
-        .replace("{{total_low}}", &total_low.to_string())
-        .replace("{{total_info}}", &total_info.to_string())
+        .replace("{{baseline_high}}", &n(baseline_high))
+        .replace("{{baseline_medium}}", &n(baseline_medium))
+        .replace("{{baseline_low}}", &n(baseline_low))
+        .replace("{{baseline_info}}", &n(baseline_info))
+        .replace("{{total_high}}", &n(total_high))
+        .replace("{{total_medium}}", &n(total_medium))
+        .replace("{{total_low}}", &n(total_low))
+        .replace("{{total_info}}", &n(total_info))
         .replace("{{delta_high}}", &format_delta(delta_high))
         .replace("{{delta_medium}}", &format_delta(delta_medium))
         .replace("{{delta_low}}", &format_delta(delta_low))
         .replace("{{delta_info}}", &format_delta(delta_info))
-        .replace("{{new_count}}", &new_count.to_string())
-        .replace("{{resolved_count}}", &resolved_count.to_string())
+        .replace("{{new_count}}", &n(new_count))
+        .replace("{{resolved_count}}", &n(resolved_count))
         .replace(
             "{{new_items}}",
             if new_items.is_empty() {
@@ -298,6 +355,7 @@ mod tests {
     use super::*;
     use crate::i18n::load_report_locale;
     use crate::report::data::compute_report_data;
+    use crate::rules::identity::RuleId;
     use std::collections::BTreeMap;
 
     fn finding(file: &str, severity: &str, rule_name: &str) -> ReportFinding {
@@ -332,13 +390,14 @@ mod tests {
     fn test_render_finding_mini_location() {
         let en = load_report_locale("en");
         let line = finding("a.py", "HIGH", "R");
-        assert!(render_finding_mini(&line, false, &en).contains("a.py:1"));
+        let catalog = RuleCatalog::new();
+        assert!(render_finding_mini(&line, false, &en, &catalog).contains("a.py:1"));
         let mut whole = finding("big.py", "LOW", "R");
         whole.file_scope = Some(crate::scan::engine::FileScope {
             line_count: 700,
             min_lines: Some(500),
         });
-        let html = render_finding_mini(&whole, true, &en);
+        let html = render_finding_mini(&whole, true, &en, &catalog);
         assert!(html.contains("big.py (whole file)"), "{html}");
         assert!(!html.contains("big.py:1"), "{html}");
     }
@@ -362,12 +421,12 @@ mod tests {
         };
         let html = render_synthesis_table(&comparison, &fr);
         assert!(
-            html.contains("Synthèse depuis la référence du 2026-11-02-10-15"),
+            html.contains("Synthèse depuis la référence du 02/11/2026 à 10:15"),
             "{html}"
         );
         // HIGH: 3 in the baseline, 2 fixed (67 %), 1 remaining, 0 new, 1 now.
         assert!(
-            html.contains(r#"<td>Importants (HIGH)</td><td class="num">3</td><td class="num fixed">2 (67 %)</td><td class="num">1</td><td class="num added">0</td><td class="num">1</td>"#),
+            html.contains(&r#"<td>Importants (HIGH)</td><td class="num">3</td><td class="num fixed">2 (67 %)</td><td class="num">1</td><td class="num added">0</td><td class="num">1</td>"#.replace("67 %", "67\u{202f}%")),
             "{html}"
         );
         // CRITICAL: none in the baseline, 1 new.
@@ -377,7 +436,7 @@ mod tests {
         );
         // Total: 5 in the baseline, 3 fixed (60 %), 2 remaining, 1 new, 3 now.
         assert!(html.contains("<strong>5</strong>"), "{html}");
-        assert!(html.contains("<strong>3 (60 %)</strong>"), "{html}");
+        assert!(html.contains("<strong>3 (60\u{202f}%)</strong>"), "{html}");
     }
 
     /// The comparison shows a CRITICAL card, and lists critical findings
@@ -402,12 +461,36 @@ mod tests {
             baseline_date: "2026-11-02".to_string(),
             baseline_totals: totals,
         };
-        let html = render_comparison_html(&comparison, &data, &en);
+        let html = render_comparison_html(&comparison, &data, &en, &RuleCatalog::new());
         assert!(html.contains("cmp-sev-card-critical"), "{html}");
         assert!(
             html.find("Crit").unwrap() < html.find("Med").unwrap(),
             "{html}"
         );
+    }
+
+    /// A finding resolved since a baseline written in French is named in
+    /// the report's language when the scan loaded its rule, by its
+    /// identity otherwise, never in the baseline's language (2026-11-24).
+    #[test]
+    fn test_resolved_rule_named_in_the_report_language() {
+        let en = load_report_locale("en");
+        let rule = serde_json::json!({
+            "id": "r",
+            "language": "python",
+            "name": {"en": "Password in the code", "fr": "Mot de passe dans le code"},
+        });
+        let catalog: RuleCatalog = [(RuleId::of(&rule).expect("identity"), rule)]
+            .into_iter()
+            .collect();
+        let resolved = finding("a.py", "HIGH", "Mot de passe dans le code");
+        let html = render_finding_mini(&resolved, true, &en, &catalog);
+        assert!(html.contains("Password in the code"), "{html}");
+        let mut unloaded = finding("b.py", "HIGH", "Mot de passe dans le code");
+        unloaded.rule_key = "gone".to_string();
+        let html = render_finding_mini(&unloaded, true, &en, &catalog);
+        assert!(html.contains("<strong>python/gone</strong>"), "{html}");
+        assert!(!html.contains("Mot de passe"), "{html}");
     }
 
     #[test]
@@ -440,10 +523,24 @@ mod tests {
             finding("d.py", "HIGH", "F4"),
         ];
         let data = compute_report_data(&current_findings, 0);
-        let html = render_comparison_html(&comparison, &data, &en);
+        // The resolved finding's rule is loaded by this scan: its title is
+        // read from the rule, in the report's language (2026-11-24).
+        let rule = serde_json::json!({
+            "id": "r",
+            "language": "python",
+            "name": {"en": "SQL Injection", "fr": "Injection SQL"},
+        });
+        let catalog: RuleCatalog = [(RuleId::of(&rule).expect("identity"), rule)]
+            .into_iter()
+            .collect();
+        let html = render_comparison_html(&comparison, &data, &en, &catalog);
         assert!(html.contains("cmp-trend-improved"));
-        assert!(html.contains("SQL Injection"));
+        assert!(html.contains("SQL Injection"), "{html}");
         assert!(!html.contains("{{"));
+        let fr = load_report_locale("fr");
+        let html = render_comparison_html(&comparison, &data, &fr, &catalog);
+        assert!(html.contains("<strong>Injection SQL</strong>"), "{html}");
+        assert!(html.contains(&t(&fr, "resolved_issues")), "{html}");
     }
 
     #[test]
@@ -460,7 +557,7 @@ mod tests {
         };
         let current_findings = vec![finding("a.py", "HIGH", "SQL Injection")];
         let data = compute_report_data(&current_findings, 0);
-        let html = render_comparison_html(&comparison, &data, &en);
+        let html = render_comparison_html(&comparison, &data, &en, &RuleCatalog::new());
         assert!(html.contains(&t(&en, "no_new_issues")));
         assert!(html.contains(&t(&en, "no_resolved_issues")));
         assert!(html.contains("cmp-trend-stable"));
@@ -478,8 +575,11 @@ mod tests {
         };
         let current_findings = vec![finding("a.py", "HIGH", "New Issue")];
         let data = compute_report_data(&current_findings, 0);
-        let html = render_comparison_html(&comparison, &data, &en);
+        let html = render_comparison_html(&comparison, &data, &en, &RuleCatalog::new());
         assert!(html.contains("cmp-trend-regressed"));
-        assert!(html.contains("New Issue"));
+        // A finding of this scan keeps the name the scan wrote, in the
+        // report's language, even when its rule is not in the catalog.
+        assert!(html.contains("New Issue"), "{html}");
+        assert!(html.contains(&t(&en, "new_issues")), "{html}");
     }
 }

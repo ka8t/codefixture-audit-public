@@ -494,6 +494,29 @@ fn with_default_excludes(project_excludes: Vec<String>) -> Vec<String> {
 /// against (ADR-0042, ADR-0043), and whether it is a warning: the pack
 /// read with the date of its data and its advisories per ecosystem, or
 /// why the dependencies were not compared with published vulnerabilities.
+/// The text of `key` (`scan_version_rules_read`, `rules_list_version_rules`)
+/// with its counts: the advisory records of the pack and, when the pack
+/// says it, the distinct published vulnerabilities they describe and how
+/// many have a CVE. Until 2026-11-24 the records were called published
+/// vulnerabilities: the demo pack's 26 records describe 21 of them. A pack
+/// whose version rules predate the count (`advisory_file::Header`) gets
+/// the `<key>_records` text, which names the records only.
+fn version_rules_counts(
+    script_locale: &serde_json::Value,
+    key: &str,
+    records: usize,
+    vulnerabilities: Option<(usize, usize)>,
+) -> String {
+    let say = |key: &str| codefixture_audit::i18n::t(script_locale, key);
+    match vulnerabilities {
+        Some((all, cves)) => say(key)
+            .replace("{records}", &records.to_string())
+            .replace("{vulnerabilities}", &all.to_string())
+            .replace("{cves}", &cves.to_string()),
+        None => say(&format!("{key}_records")).replace("{records}", &records.to_string()),
+    }
+}
+
 fn version_rules_line(
     status: &codefixture_audit::scan::orchestrator::VersionRulesStatus,
     script_locale: &serde_json::Value,
@@ -505,6 +528,7 @@ fn version_rules_line(
             pack,
             created,
             counts,
+            vulnerabilities,
             ..
         } => {
             let total: usize = counts.iter().map(|(_, n)| n).sum();
@@ -514,11 +538,15 @@ fn version_rules_line(
                 .collect();
             (
                 false,
-                say("scan_version_rules_read")
-                    .replace("{total}", &total.to_string())
-                    .replace("{path}", &pack.display().to_string())
-                    .replace("{date}", created)
-                    .replace("{counts}", &counts.join(", ")),
+                version_rules_counts(
+                    script_locale,
+                    "scan_version_rules_read",
+                    total,
+                    *vulnerabilities,
+                )
+                .replace("{path}", &pack.display().to_string())
+                .replace("{date}", created)
+                .replace("{counts}", &counts.join(", ")),
             )
         }
         VersionRulesStatus::Missing => (true, say("scan_version_rules_missing")),
@@ -809,21 +837,50 @@ mod tests {
     fn test_version_rules_line_names_the_pack_or_says_not_checked() {
         use codefixture_audit::scan::orchestrator::VersionRulesStatus;
         let en = codefixture_audit::i18n::load_script_locale("en");
-        let (warning, line) = version_rules_line(
-            &VersionRulesStatus::Read {
-                pack: PathBuf::from("/x/rules.cfpack"),
-                created: "2026-11-11T00:00:00Z".into(),
-                counts: vec![("PyPI".into(), 12), ("npm".into(), 30)],
-                sources: vec![],
-            },
-            &en,
-        );
+        let read = |vulnerabilities| VersionRulesStatus::Read {
+            pack: PathBuf::from("/x/rules.cfpack"),
+            created: "2026-11-11T00:00:00Z".into(),
+            counts: vec![("PyPI".into(), 12), ("npm".into(), 30)],
+            vulnerabilities,
+            sources: vec![],
+        };
+        let (warning, line) = version_rules_line(&read(Some((40, 38))), &en);
         assert!(!warning);
         assert!(
             line.contains("/x/rules.cfpack")
                 && line.contains("2026-11-11")
-                && line.contains("PyPI 12, npm 30")
-                && line.contains("42"),
+                && line.contains("PyPI 12, npm 30"),
+            "{line}"
+        );
+        // 2026-11-24: the 42 records are not 42 vulnerabilities; the line
+        // says both numbers, in every language.
+        assert!(
+            line.contains("42 advisory records for 40 published vulnerabilities (38 with a CVE)"),
+            "{line}"
+        );
+        for (lang, words) in [
+            (
+                "fr",
+                "42 fiches d'avis pour 40 vulnérabilités publiées (dont 38 avec un CVE)",
+            ),
+            (
+                "es",
+                "42 fichas de aviso para 40 vulnerabilidades publicadas (38 con un CVE)",
+            ),
+            (
+                "de",
+                "42 Sicherheitshinweise zu 40 veröffentlichten Schwachstellen (38 mit CVE)",
+            ),
+        ] {
+            let locale = codefixture_audit::i18n::load_script_locale(lang);
+            let (_, line) = version_rules_line(&read(Some((40, 38))), &locale);
+            assert!(line.contains(words), "{lang}: {line}");
+        }
+        // A pack whose version rules predate the count names its records
+        // only, never as vulnerabilities.
+        let (_, line) = version_rules_line(&read(None), &en);
+        assert!(
+            line.contains("42 advisory records from") && !line.contains("vulnerabilities"),
             "{line}"
         );
         let (warning, line) = version_rules_line(&VersionRulesStatus::Missing, &en);
@@ -3285,8 +3342,9 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
                 tool_version: codefixture_audit::BUILD_VERSION.to_string(),
                 company_name: effective_company_name(&brand),
                 report_lang: lang,
-                date_str: now.format("%d/%m/%Y à %H:%M").to_string(),
-                timestamp,
+                // Written in the report's language by the report itself
+                // (`report::locale_format`), no longer here the French way.
+                generated_at: now.naive_local(),
                 audit_total_time_secs: t_scan_start.elapsed().as_secs(),
                 total_lines_code: report.total_loc,
                 total_files_scanned: report.files_scanned,

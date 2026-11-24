@@ -13,6 +13,9 @@ pub mod exports;
 pub mod findings_html;
 pub mod fix_proposal;
 pub mod html;
+#[cfg(test)]
+mod html_languages;
+pub mod locale_format;
 pub mod playbook;
 pub mod report_assets;
 pub mod successes;

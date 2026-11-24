@@ -96,7 +96,10 @@ pub fn compute_successes(
             .iter()
             .any(|f| f.severity == "CRITICAL" || f.severity == "HIGH");
         if !has_crit_or_high {
-            let msg = t(report_locale, "success_cat_no_critical").replace("{cat}", cat);
+            // The category's title in the report's language, not its code
+            // (`SECURITY : …` in every language before 2026-11-24).
+            let msg = t(report_locale, "success_cat_no_critical")
+                .replace("{cat}", &category_title(report_locale, cat));
             add(&mut successes, &mut seen, cat, msg);
         }
     }
@@ -134,7 +137,11 @@ pub fn render_successes_html(
             .replace("{{icon}}", category_icon(cat))
             .replace("{{category}}", &category_title(report_locale, cat))
             .replace("{{cat_key}}", &cat.to_lowercase())
-            .replace("{{count}}", &messages.len().to_string())
+            .replace(
+                "{{count}}",
+                &crate::report::locale_format::LocaleFormat::of(report_locale)
+                    .int(messages.len() as u64),
+            )
             .replace(
                 "{{i18n_validation_count}}",
                 &t(report_locale, "validation_count"),
@@ -243,7 +250,13 @@ mod tests {
         let successes = compute_successes(&findings, &BTreeMap::new(), None, &en, "en");
         let msgs = successes.get("MAINTENANCE").expect("MAINTENANCE success");
         assert_eq!(msgs.len(), 1);
-        assert!(msgs[0].contains("MAINTENANCE"));
+        // The category's title, not its code (2026-11-24).
+        assert!(
+            msgs[0].starts_with(&category_title(&en, "MAINTENANCE")),
+            "{}",
+            msgs[0]
+        );
+        assert!(!msgs[0].contains("MAINTENANCE"), "{}", msgs[0]);
     }
 
     #[test]

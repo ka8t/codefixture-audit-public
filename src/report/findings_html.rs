@@ -10,6 +10,7 @@ use serde_json::Value;
 use crate::i18n::t;
 use crate::project::suppress::line_hash;
 use crate::report::exports::sarif::{ReportFinding, TaintFlow};
+use crate::report::locale_format::LocaleFormat;
 use crate::report::playbook::render_playbook_inline;
 use crate::report::report_assets::load_template;
 use crate::report::text::{escape, is_dependency, lang_label, linkify_acronyms, rule_display_name};
@@ -125,6 +126,7 @@ fn render_file_check_explanation(
     if has.is_empty() && not_has.is_empty() {
         return String::new();
     }
+    let colon = LocaleFormat::of(report_locale).colon().to_string();
     let mut body = format!("<p>{}</p>", t(report_locale, "file_check_scope_note"));
     if !has.is_empty() {
         let items: String = has
@@ -133,7 +135,7 @@ fn render_file_check_explanation(
             .collect::<Vec<_>>()
             .join(", ");
         body.push_str(&format!(
-            "<p>✅ {} : {items}</p>",
+            "<p>✅ {}{colon}{items}</p>",
             t(report_locale, "file_check_has")
         ));
     }
@@ -144,7 +146,7 @@ fn render_file_check_explanation(
             .collect::<Vec<_>>()
             .join(", ");
         body.push_str(&format!(
-            "<p>🚫 {} : {items}</p>",
+            "<p>🚫 {}{colon}{items}</p>",
             t(report_locale, "file_check_not_has")
         ));
     }
@@ -586,7 +588,10 @@ fn render_findings(
 
         let group = rule_group_tpl
             .replace("{{rule_name}}", &escape(&first.rule_name))
-            .replace("{{count}}", &rule_findings.len().to_string())
+            .replace(
+                "{{count}}",
+                &LocaleFormat::of(report_locale).int(rule_findings.len() as u64),
+            )
             .replace("{{content}}", &(shared_html + &items_html));
         html.push_str(&group);
     }
@@ -630,7 +635,10 @@ fn render_by_category(
             .replace("{{category_key}}", cat_key)
             .replace("{{icon}}", category_icon(cat_key))
             .replace("{{title}}", &category_title(report_locale, cat_key))
-            .replace("{{count}}", &cat_findings.len().to_string())
+            .replace(
+                "{{count}}",
+                &LocaleFormat::of(report_locale).int(cat_findings.len() as u64),
+            )
             .replace("{{content}}", &cat_html);
         html.push_str(&group);
     }
@@ -666,6 +674,7 @@ pub fn render_severity_section(
         }
     };
     let (icon, _badge_class, title) = severity_meta(severity);
+    let fmt = LocaleFormat::of(report_locale);
 
     let findings_html = if !findings.is_empty() {
         let deps_findings: Vec<&ReportFinding> = findings
@@ -692,7 +701,7 @@ pub fn render_severity_section(
             .replace("{{group_id}}", "")
             .replace("{{icon}}", "📦")
             .replace("{{title}}", &t(report_locale, "stats.business_code"))
-            .replace("{{count}}", &business_findings.len().to_string())
+            .replace("{{count}}", &fmt.int(business_findings.len() as u64))
             .replace("{{content}}", &business_html);
 
         let deps_html = render_by_category(&deps_findings, severity, report_locale, rule_catalog)
@@ -711,7 +720,7 @@ pub fn render_severity_section(
             )
             .replace("{{icon}}", "🔗")
             .replace("{{title}}", &t(report_locale, "stats.dependencies"))
-            .replace("{{count}}", &deps_findings.len().to_string())
+            .replace("{{count}}", &fmt.int(deps_findings.len() as u64))
             .replace("{{content}}", &deps_html);
 
         format!("{business_group}{deps_group}")
@@ -727,7 +736,7 @@ pub fn render_severity_section(
         .replace("{{severity_id}}", &format!("section-{severity}"))
         .replace("{{icon}}", icon)
         .replace("{{severity}}", &title)
-        .replace("{{count}}", &findings.len().to_string())
+        .replace("{{count}}", &fmt.int(findings.len() as u64))
         .replace("{{issues_label}}", &t(report_locale, "issues_count_label"))
         .replace("{{content}}", &findings_html)
 }

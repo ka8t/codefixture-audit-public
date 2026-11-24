@@ -15,11 +15,24 @@ function toggleSubGroup(id) {
     group.classList.toggle('open');
 }
 
+// Texts this script writes, in the report's language: the JSON block
+// `#report-i18n` the engine fills from the report locale. They used to be
+// written here in French, whatever the report's language.
+function reportText(key) {
+    var block = document.getElementById('report-i18n');
+    if (!block) return '';
+    try {
+        return JSON.parse(block.textContent)[key] || '';
+    } catch (e) {
+        return '';
+    }
+}
+
 function togglePrintMode() {
     document.body.classList.toggle('print-mode');
     var btn = document.querySelector('.print-btn');
     var isPrint = document.body.classList.contains('print-mode');
-    btn.textContent = isPrint ? 'Mode normal' : 'Version imprimable';
+    btn.textContent = isPrint ? reportText('printModeNormal') : '🖨️ ' + reportText('printVersion');
 
     // Convertir les canvas Chart.js en images pour l'impression
     document.querySelectorAll('canvas').forEach(function(canvas) {
