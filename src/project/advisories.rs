@@ -205,8 +205,8 @@ pub fn load(
         if parsed.format != FORMAT_VERSION {
             errors.push(
                 reason(keys::ECOSYSTEM_UNSUPPORTED_FORMAT)
-                    .with("format", parsed.format.to_string())
-                    .with("expected", FORMAT_VERSION.to_string()),
+                    .with_number("format", parsed.format)
+                    .with_number("expected", FORMAT_VERSION),
             );
             continue;
         }
@@ -259,8 +259,8 @@ fn load_table<T: serde::de::DeserializeOwned>(
         Ok(table) => {
             errors.push(
                 reason(keys::TABLE_UNSUPPORTED_FORMAT)
-                    .with("format", table.format.to_string())
-                    .with("expected", FORMAT_VERSION.to_string()),
+                    .with_number("format", table.format)
+                    .with_number("expected", FORMAT_VERSION),
             );
             BTreeMap::new()
         }

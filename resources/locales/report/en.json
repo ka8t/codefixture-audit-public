@@ -880,6 +880,7 @@
   "formats": {
     "datetime": "%B %-d, %Y at %-I:%M %p",
     "datetime_short": "%b %-d, %-I:%M %p",
+    "date": "%B %-d, %Y",
     "number_group": ",",
     "number_group_min_digits": 1,
     "decimal": ".",

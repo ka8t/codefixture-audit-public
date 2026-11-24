@@ -50,6 +50,7 @@ use tree_sitter::Parser as TsParser;
 
 use crate::project::suppress::Suppressions;
 use crate::report::exports::sarif::{ReportFinding, TaintFlow, TaintStep};
+use crate::report::locale_format::LocaleFormat;
 use crate::scan::counters::{count_java_loc, count_js_loc, count_python_loc};
 use crate::scan::dataflow::line_facts::SourceLines;
 use crate::scan::dataflow::rule_loader::{extract_cwe, extract_message};
@@ -573,6 +574,16 @@ fn phase_label(config: &ScanConfig, key: &str, french_fallback: &str) -> String 
     match &config.script_locale {
         Some(locale) => crate::i18n::t(locale, key),
         None => french_fallback.to_string(),
+    }
+}
+
+/// The number formats of the console's language for the counts of the
+/// phase labels (`report::locale_format`), the English ones without a
+/// console locale (`config.script_locale == None`, the unit tests).
+fn console_numbers(config: &ScanConfig) -> &'static LocaleFormat {
+    match &config.script_locale {
+        Some(locale) => LocaleFormat::of_console(locale),
+        None => LocaleFormat::for_language("en"),
     }
 }
 
@@ -1938,10 +1949,13 @@ fn file_kind(pf: &ParsedFile) -> String {
 ///
 /// `colon` separates a language from its count the console language's
 /// way (`label_colon` of the console locale: `": "`, French `" : "`);
-/// every language wrote `php: 169` before 2026-11-24.
+/// every language wrote `php: 169` before 2026-11-24. The counts are in
+/// that language's number format (`numbers`: `java : 3 460` in French),
+/// they had no group separator before the same day.
 fn phase_a_language_summary(
     files: impl IntoIterator<Item = (&'static str, String)>,
     colon: &str,
+    numbers: &LocaleFormat,
 ) -> String {
     let mut groups: BTreeMap<&'static str, BTreeMap<String, usize>> = BTreeMap::new();
     for (lang, kind) in files {
@@ -1951,6 +1965,7 @@ fn phase_a_language_summary(
         .into_iter()
         .map(|(lang, kinds)| {
             let total: usize = kinds.values().sum();
+            let total = numbers.count(total);
             if kinds.len() < 2 {
                 return format!("{lang}{colon}{total}");
             }
@@ -1959,7 +1974,7 @@ fn phase_a_language_summary(
             split.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
             let detail = split
                 .iter()
-                .map(|(kind, n)| format!("{kind} {n}"))
+                .map(|(kind, n)| format!("{kind} {}", numbers.count(*n)))
                 .collect::<Vec<_>>()
                 .join(", ");
             format!("{lang}{colon}{total} ({detail})")
@@ -2514,6 +2529,7 @@ pub fn run_scan(config: &ScanConfig) -> ScanReport {
             .iter()
             .map(|pf| (pf.language.rule_tag(), file_kind(pf))),
         &phase_label(config, "label_colon", " : "),
+        console_numbers(config),
     );
     record_phase(
         &format!(
@@ -4764,19 +4780,35 @@ mod tests {
             ("html", "vue".to_string()),
             ("javascript", "ts".to_string()),
         ];
-        let summary = phase_a_language_summary(files.clone(), ": ");
+        let en = LocaleFormat::for_language("en");
+        let summary = phase_a_language_summary(files.clone(), ": ", en);
         assert_eq!(
             summary,
             "html: 4 (html 2, jsp 1, vue 1), java: 2, javascript: 1"
         );
         // French puts a space before the colon (2026-11-24).
-        let summary = phase_a_language_summary(files, " : ");
+        let fr = LocaleFormat::for_language("fr");
+        let summary = phase_a_language_summary(files, " : ", fr);
         assert_eq!(
             summary,
             "html : 4 (html 2, jsp 1, vue 1), java : 2, javascript : 1"
         );
+        // And groups the digits of its counts (2026-11-24).
+        let many: Vec<(&'static str, String)> =
+            std::iter::repeat_n(("java", "java".to_string()), 3460)
+                .chain(std::iter::repeat_n(("html", "jsp".to_string()), 1200))
+                .chain(std::iter::repeat_n(("html", "html".to_string()), 30))
+                .collect();
+        assert_eq!(
+            phase_a_language_summary(many.clone(), " : ", fr),
+            "html : 1\u{202f}230 (jsp 1\u{202f}200, html 30), java : 3\u{202f}460"
+        );
+        assert_eq!(
+            phase_a_language_summary(many, ": ", en),
+            "html: 1,230 (jsp 1,200, html 30), java: 3,460"
+        );
 
-        let empty = phase_a_language_summary(Vec::new(), ": ");
+        let empty = phase_a_language_summary(Vec::new(), ": ", en);
         assert_eq!(empty, "");
     }
 

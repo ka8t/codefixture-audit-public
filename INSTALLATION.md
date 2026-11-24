@@ -243,9 +243,9 @@ The terminal shows the progress, what was loaded and a summary. Here, the analys
 [codefixture-audit] Rules: 23/38 rule file(s) kept for the project's languages, from the pack /…/target/release/rules.cfpack
 [codefixture-audit] 23 rule(s) loaded for languages: dockerfile, html, javascript, python, yaml
 …
-[codefixture-audit] Version rules: 26 advisory records for 21 published vulnerabilities (21 with a CVE), from the rule pack /…/target/release/rules.cfpack, OSV data up to 2026-11-18T12:11:06.983073747Z: Maven 5, NuGet 3, Packagist 3, PyPI 10, npm 5.
+[codefixture-audit] Version rules: 26 advisory records for 21 published vulnerabilities (21 with a CVE), from the rule pack /…/target/release/rules.cfpack, OSV data up to November 18, 2026: Maven 5, NuGet 3, Packagist 3, PyPI 10, npm 5.
 [codefixture-audit] Report generated: /path/to/your/project/audit-reports/SCA-REPORT-2026-11-20-13-17.html
-[codefixture-audit] 871 file(s) scanned, 91999 line(s) of code, 31 finding(s)
+[codefixture-audit] 871 file(s) scanned, 91,999 line(s) of code, 31 finding(s)
 ```
 
 Options are added to the same command, for example `./target/release/codefixture-audit scan /path/to/your/project --lang en --no-cache`:

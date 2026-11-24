@@ -243,9 +243,9 @@ Le terminal affiche l'avancement, ce qui a été chargé et un résumé. Voici l
 [codefixture-audit] Rules: 23/38 rule file(s) kept for the project's languages, from the pack /…/target/release/rules.cfpack
 [codefixture-audit] 23 rule(s) loaded for languages: dockerfile, html, javascript, python, yaml
 …
-[codefixture-audit] Version rules: 26 advisory records for 21 published vulnerabilities (21 with a CVE), from the rule pack /…/target/release/rules.cfpack, OSV data up to 2026-11-18T12:11:06.983073747Z: Maven 5, NuGet 3, Packagist 3, PyPI 10, npm 5.
+[codefixture-audit] Version rules: 26 advisory records for 21 published vulnerabilities (21 with a CVE), from the rule pack /…/target/release/rules.cfpack, OSV data up to November 18, 2026: Maven 5, NuGet 3, Packagist 3, PyPI 10, npm 5.
 [codefixture-audit] Report generated: /path/to/your/project/audit-reports/SCA-REPORT-2026-11-20-13-17.html
-[codefixture-audit] 871 file(s) scanned, 91999 line(s) of code, 31 finding(s)
+[codefixture-audit] 871 file(s) scanned, 91,999 line(s) of code, 31 finding(s)
 ```
 
 Les options s'ajoutent à la même commande, par exemple `./target/release/codefixture-audit scan /path/to/your/project --lang en --no-cache` :
@@ -435,7 +435,7 @@ Par défaut, l'analyse laisse de la place sur la machine pour le reste du travai
 ```text
 [codefixture-audit] Mémoire : environ 4,6 Go prévus.
 [codefixture-audit] Cette machine a 13,0 Go disponibles sur 16,0 Go.
-[codefixture-audit] Plafond : 12,0 Go (par défaut : 75 % de la mémoire installée).
+[codefixture-audit] Plafond : 12,0 Go (par défaut : 75 % de la mémoire installée).
 [codefixture-audit] Fils d'exécution : 7 sur 8 cœurs (par défaut : tous les cœurs sauf un).
 ```
 

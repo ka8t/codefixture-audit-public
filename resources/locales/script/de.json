@@ -1,5 +1,6 @@
 {
   "label_colon": ": ",
+  "locale_code": "de",
   "scan_security": "Sicherheitsscan",
   "scan_architecture": "Architekturscan",
   "scan_ui": "Oberflächenscan",
@@ -460,7 +461,6 @@
   "scan_memory_source": "{language} {size} MB",
   "scan_memory_stop_hint": "Zum Analysieren: Module einzeln analysieren, Ordner ausschließen (`paths.exclude` in audit.config.json), andere Programme schließen oder trotzdem mit --skip-memory-check starten.",
   "scan_memory_limit": "Grenze: {limit} GB ({origin}).",
-  "decimal_separator": ",",
   "scan_memory_machine": "Dieser Rechner hat {available} GB von {total} GB verfügbar.",
   "scan_memory_stop_limit": "Vor dem Lesen der Dateien angehalten: Diese Analyse braucht voraussichtlich etwa {estimate} GB Speicher, mehr als die erlaubten {limit} GB ({origin}).",
   "scan_memory_fewer_rules": "Damit der Speicher reicht, laufen {rules} statt {max} Datenfluss-Regel(n) gleichzeitig: Die Analyse dauert länger.",
@@ -470,7 +470,7 @@
   "scan_limit_origin_option": "gesetzt mit {name}",
   "scan_limit_origin_environment": "gesetzt mit der Umgebungsvariable {name}",
   "scan_limit_origin_default_cpu": "Standard: alle Kerne bis auf einen",
-  "scan_limit_origin_default_memory": "Standard: {percent} % des installierten Speichers",
+  "scan_limit_origin_default_memory": "Standard: {percent} des installierten Speichers",
   "scan_limit_invalid_cpu": "Ungültiger Wert „{value}“ für {name}: eine Anzahl Threads von mindestens 1 (4) oder einen Anteil der Kerne von 1% bis 100% (50%) angeben.",
   "scan_limit_invalid_max_memory": "Ungültiger Wert „{value}“ für {name}: eine Anzahl GB über 0, mit Punkt als Dezimaltrennzeichen (8 oder 7.5), oder einen Anteil des installierten Speichers von 1% bis 100% (75%) angeben.",
   "scan_limit_percent_unknown_memory": "„{value}“ von {name} kann nicht angewendet werden: Dieses System nennt seinen installierten Speicher nicht; die Grenze in GB angeben.",

@@ -38,6 +38,15 @@ mod rules_crypto;
 #[allow(dead_code)]
 mod pack_format;
 
+/// The numbers of a `pack_format::PackError`, reached as
+/// `super::pack_number_text` like the crypto module above: the plain
+/// digits, since the build has no i18n and its errors are read by the
+/// publisher only. The library writes them in the console's language
+/// (`crate::rules::pack_number_text`).
+fn pack_number_text(_locale: &serde_json::Value, n: u64) -> String {
+    n.to_string()
+}
+
 #[path = "src/build_version.rs"]
 mod build_version;
 

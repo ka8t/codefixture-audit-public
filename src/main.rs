@@ -24,6 +24,7 @@ use codefixture_audit::report::compliance_html::HealthThresholds;
 use codefixture_audit::report::exports::sarif::ReportFinding;
 use codefixture_audit::report::exports::sarif::build_sarif_report;
 use codefixture_audit::report::html::{ReportContext, generate_html};
+use codefixture_audit::report::locale_format::LocaleFormat;
 use codefixture_audit::scan::orchestrator::{ScanConfig, ScanReport, run_scan};
 use codefixture_audit::scan::unchanged::{LastScan, ScanInputs};
 
@@ -212,6 +213,7 @@ fn scope_line(
     excludes: &[String],
     say: impl Fn(&str) -> String,
 ) -> String {
+    let numbers = console_format_of(&say);
     let source = match origin {
         PathsOrigin::ConfigFile => say("scan_scope_source_config"),
         PathsOrigin::InvalidConfig => say("scan_scope_source_invalid"),
@@ -226,7 +228,7 @@ fn scope_line(
             return items.join(", ");
         }
         let more =
-            say("scan_scope_more").replace("{count}", &(items.len() - SCOPE_LIST_MAX).to_string());
+            say("scan_scope_more").replace("{count}", &numbers.count(items.len() - SCOPE_LIST_MAX));
         format!("{}, {more}", items[..SCOPE_LIST_MAX].join(", "))
     };
     let include = if include.iter().all(|p| p == "." || p == "./") {
@@ -239,8 +241,8 @@ fn scope_line(
         .map(String::as_str)
         .filter(|p| !DEFAULT_EXCLUDES.contains(p))
         .collect();
-    let defaults =
-        say("scan_scope_default_excludes").replace("{count}", &DEFAULT_EXCLUDES.len().to_string());
+    let defaults = say("scan_scope_default_excludes")
+        .replace("{count}", &numbers.count(DEFAULT_EXCLUDES.len()));
     let exclude = if chosen.is_empty() {
         defaults
     } else {
@@ -250,6 +252,13 @@ fn scope_line(
         .replace("{source}", &source)
         .replace("{include}", &include)
         .replace("{exclude}", &exclude)
+}
+
+/// The number formats of the console whose texts `say` gives (its
+/// `locale_code`), for the helpers that receive the console's texts as a
+/// closure rather than its locale.
+fn console_format_of(say: &impl Fn(&str) -> String) -> &'static LocaleFormat {
+    LocaleFormat::for_language(&say("locale_code"))
 }
 
 /// Whether `--rules` and `rules list` accept a folder of plain `.sca`
@@ -338,6 +347,7 @@ fn declared_rule_languages(root: &Path, say: impl Fn(&str) -> String) -> Option<
 fn rule_source_lines(report: &ScanReport, script_locale: &serde_json::Value) -> Vec<String> {
     use codefixture_audit::rules::catalog::RuleSourceKind;
     let say = |key: &str| codefixture_audit::i18n::t(script_locale, key);
+    let numbers = LocaleFormat::of_console(script_locale);
     let mut lines: Vec<String> = report
         .rule_sources
         .iter()
@@ -347,14 +357,14 @@ fn rule_source_lines(report: &ScanReport, script_locale: &serde_json::Value) -> 
                 RuleSourceKind::Folder => "scan_rules_source_folder",
             };
             say(key)
-                .replace("{read}", &source.files_read.to_string())
-                .replace("{available}", &source.files_available.to_string())
+                .replace("{read}", &numbers.count(source.files_read))
+                .replace("{available}", &numbers.count(source.files_available))
                 .replace("{path}", &source.path.display().to_string())
         })
         .collect();
     lines.push(
         say("scan_rule_languages")
-            .replace("{count}", &report.rules_loaded.to_string())
+            .replace("{count}", &numbers.count(report.rules_loaded))
             .replace("{languages}", &report.rule_languages.join(", ")),
     );
     lines
@@ -371,6 +381,7 @@ fn cache_stat_line(
     t: impl Fn(&str) -> String,
 ) -> String {
     use codefixture_audit::scan::scan_cache::CacheMiss;
+    let numbers = console_format_of(&t);
     let patterns = stat.language == "patterns";
     let template = match (&stat.full, patterns) {
         (None, true) => t("scan_cache_patterns_line"),
@@ -391,10 +402,10 @@ fn cache_stat_line(
     };
     template
         .replace("{language}", &stat.language)
-        .replace("{dirty}", &stat.dirty.to_string())
-        .replace("{files}", &stat.files.to_string())
-        .replace("{analysed}", &stat.analysed.to_string())
-        .replace("{total}", &stat.total.to_string())
+        .replace("{dirty}", &numbers.count(stat.dirty))
+        .replace("{files}", &numbers.count(stat.files))
+        .replace("{analysed}", &numbers.count(stat.analysed))
+        .replace("{total}", &numbers.count(stat.total))
         .replace("{reason}", &reason)
 }
 
@@ -414,6 +425,7 @@ fn skipped_dirs_line(
     if skipped.is_empty() {
         return None;
     }
+    let numbers = console_format_of(&say);
     let items: Vec<String> = skipped
         .iter()
         .map(|(path, kind)| {
@@ -434,7 +446,7 @@ fn skipped_dirs_line(
         items.join(", ")
     } else {
         let more =
-            say("scan_scope_more").replace("{count}", &(items.len() - SCOPE_LIST_MAX).to_string());
+            say("scan_scope_more").replace("{count}", &numbers.count(items.len() - SCOPE_LIST_MAX));
         format!("{}, {more}", items[..SCOPE_LIST_MAX].join(", "))
     };
     Some(say("scan_skipped_dirs").replace("{dirs}", &dirs))
@@ -451,16 +463,17 @@ fn skipped_files_line(key: &str, files: &[String], say: impl Fn(&str) -> String)
     if files.is_empty() {
         return None;
     }
+    let numbers = console_format_of(&say);
     let list = if files.len() <= SCOPE_LIST_MAX + 1 {
         files.join(", ")
     } else {
         let more =
-            say("scan_scope_more").replace("{count}", &(files.len() - SCOPE_LIST_MAX).to_string());
+            say("scan_scope_more").replace("{count}", &numbers.count(files.len() - SCOPE_LIST_MAX));
         format!("{}, {more}", files[..SCOPE_LIST_MAX].join(", "))
     };
     Some(
         say(key)
-            .replace("{count}", &files.len().to_string())
+            .replace("{count}", &numbers.count(files.len()))
             .replace("{files}", &list),
     )
 }
@@ -508,12 +521,13 @@ fn version_rules_counts(
     vulnerabilities: Option<(usize, usize)>,
 ) -> String {
     let say = |key: &str| codefixture_audit::i18n::t(script_locale, key);
+    let numbers = LocaleFormat::of_console(script_locale);
     match vulnerabilities {
         Some((all, cves)) => say(key)
-            .replace("{records}", &records.to_string())
-            .replace("{vulnerabilities}", &all.to_string())
-            .replace("{cves}", &cves.to_string()),
-        None => say(&format!("{key}_records")).replace("{records}", &records.to_string()),
+            .replace("{records}", &numbers.count(records))
+            .replace("{vulnerabilities}", &numbers.count(all))
+            .replace("{cves}", &numbers.count(cves)),
+        None => say(&format!("{key}_records")).replace("{records}", &numbers.count(records)),
     }
 }
 
@@ -531,10 +545,11 @@ fn version_rules_line(
             vulnerabilities,
             ..
         } => {
+            let numbers = LocaleFormat::of_console(script_locale);
             let total: usize = counts.iter().map(|(_, n)| n).sum();
             let counts: Vec<String> = counts
                 .iter()
-                .map(|(name, n)| format!("{name} {n}"))
+                .map(|(name, n)| format!("{name} {}", numbers.count(*n)))
                 .collect();
             (
                 false,
@@ -545,7 +560,7 @@ fn version_rules_line(
                     *vulnerabilities,
                 )
                 .replace("{path}", &pack.display().to_string())
-                .replace("{date}", created)
+                .replace("{date}", &numbers.instant_date(created))
                 .replace("{counts}", &counts.join(", ")),
             )
         }
@@ -579,58 +594,55 @@ fn print_phase_progress(label: &str, elapsed: std::time::Duration) {
 /// `print_phase_progress` (kept separate so its format is testable
 /// without capturing stderr).
 fn phase_progress_line(label: &str, elapsed: std::time::Duration) -> String {
+    let console = console_locale();
     format!(
         "[codefixture-audit]   {label}{}{}",
-        console_colon(),
-        format_duration(elapsed)
+        console.colon,
+        console.format.duration(elapsed)
     )
 }
 
-/// The separator between a label and its value in the console's language
-/// (`label_colon` of the console locale: `": "`, French `" : "`), for
-/// the lines written by a plain `fn` callback that has no locale,
-/// `print_phase_progress`. Set by `run_scan_command` once the console
+/// What the lines written by a plain `fn` callback that has no locale,
+/// `print_phase_progress`, take from the console's language: the
+/// separator between a label and its value (`label_colon` of the console
+/// locale: `": "`, French `" : "`) and the number formats
+/// (`report::locale_format`). Set by `run_scan_command` once the console
 /// language is known. The phase lines used to write `label : 34 ms`, the
-/// French way, in every language (2026-11-24).
-static CONSOLE_COLON: std::sync::RwLock<String> = std::sync::RwLock::new(String::new());
+/// French way, in every language, then `1.2 s` with a dot in French
+/// (2026-11-24).
+struct ConsoleLocale {
+    colon: String,
+    format: &'static LocaleFormat,
+}
 
-/// Sets [`CONSOLE_COLON`].
-fn set_console_colon(colon: &str) {
-    if let Ok(mut current) = CONSOLE_COLON.write() {
-        *current = colon.to_string();
+/// The [`ConsoleLocale`] of this process; `None` until a scan sets it.
+static CONSOLE_LOCALE: std::sync::RwLock<Option<ConsoleLocale>> = std::sync::RwLock::new(None);
+
+/// Sets [`CONSOLE_LOCALE`] from the console locale `script_locale`.
+fn set_console_locale(script_locale: &serde_json::Value) {
+    if let Ok(mut current) = CONSOLE_LOCALE.write() {
+        *current = Some(ConsoleLocale {
+            colon: codefixture_audit::i18n::t(script_locale, "label_colon"),
+            format: LocaleFormat::of_console(script_locale),
+        });
     }
 }
 
-/// [`CONSOLE_COLON`], `": "` until a scan sets it.
-fn console_colon() -> String {
-    CONSOLE_COLON
+/// [`CONSOLE_LOCALE`], the English one until a scan sets it.
+fn console_locale() -> ConsoleLocale {
+    CONSOLE_LOCALE
         .read()
         .ok()
-        .map(|c| c.clone())
-        .filter(|c| !c.is_empty())
-        .unwrap_or_else(|| ": ".to_string())
-}
-
-/// Human-readable duration for the console (ticket #135): `850 ms`
-/// under a second, `12.4 s` under a minute, `1 min 12 s` under an hour,
-/// `1 h 02 min` beyond. Units are the same in the four console languages
-/// (SI symbols), hence no locale lookup. JSON logs keep the raw
-/// `duration_ms`. Truncates rather than rounds at each level, so a
-/// displayed value is never larger than the real one (`59.99 s` shows
-/// `59.9 s`, not `60.0 s`).
-fn format_duration(d: std::time::Duration) -> String {
-    let ms = d.as_millis();
-    if ms < 1_000 {
-        format!("{ms} ms")
-    } else if ms < 60_000 {
-        format!("{}.{} s", ms / 1_000, (ms % 1_000) / 100)
-    } else if ms < 3_600_000 {
-        let secs = ms / 1_000;
-        format!("{} min {} s", secs / 60, secs % 60)
-    } else {
-        let mins = ms / 60_000;
-        format!("{} h {:02} min", mins / 60, mins % 60)
-    }
+        .and_then(|current| {
+            current.as_ref().map(|c| ConsoleLocale {
+                colon: c.colon.clone(),
+                format: c.format,
+            })
+        })
+        .unwrap_or_else(|| ConsoleLocale {
+            colon: ": ".to_string(),
+            format: LocaleFormat::for_language("en"),
+        })
 }
 
 /// `scan --log-format json` (ticket #92): every console line becomes one
@@ -780,23 +792,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_format_duration_picks_unit_by_magnitude() {
-        use std::time::Duration;
-        let cases = [
-            (Duration::from_millis(31), "31 ms"),
-            (Duration::from_millis(999), "999 ms"),
-            (Duration::from_millis(12_480), "12.4 s"),
-            (Duration::from_millis(59_990), "59.9 s"),
-            (Duration::from_secs(72), "1 min 12 s"),
-            (Duration::from_secs(3_720), "1 h 02 min"),
-        ];
-        for (duration, expected) in cases {
-            // Called outside the macro so the code graph sees the call.
-            let formatted = format_duration(duration);
-            assert_eq!(formatted, expected);
-        }
-    }
+    // The durations of the console are tested with their formatter,
+    // `LocaleFormat::duration` (`report::locale_format`), in each language.
 
     /// Ticket #204: a pass that reused its cache says how many files
     /// changed; one that could not use it says the analysis was a full
@@ -874,7 +871,7 @@ mod tests {
         assert!(!warning);
         assert!(
             line.contains("/x/rules.cfpack")
-                && line.contains("2026-11-11")
+                && line.contains("November 11, 2026")
                 && line.contains("PyPI 12, npm 30"),
             "{line}"
         );
@@ -1070,17 +1067,229 @@ mod tests {
     #[test]
     fn test_phase_progress_line_and_print() {
         let elapsed = std::time::Duration::from_millis(1_250);
-        // The console language's colon (2026-11-24): none before `:` in
-        // English, a space in French. The only test that sets it.
-        set_console_colon(": ");
+        // The console language's colon and decimal separator (2026-11-24):
+        // none before `:` in English, a space in French; `1,2 s` in
+        // French. The only test that sets them.
+        let en = codefixture_audit::i18n::load_script_locale("en");
+        set_console_locale(&en);
         let line = phase_progress_line("[2/4] phase A", elapsed);
         assert_eq!(line, "[codefixture-audit]   [2/4] phase A: 1.2 s");
-        set_console_colon(" : ");
+        set_console_locale(&codefixture_audit::i18n::load_script_locale("fr"));
         let line = phase_progress_line("[2/4] phase A", elapsed);
-        assert_eq!(line, "[codefixture-audit]   [2/4] phase A : 1.2 s");
-        set_console_colon(": ");
+        assert_eq!(line, "[codefixture-audit]   [2/4] phase A : 1,2 s");
+        set_console_locale(&codefixture_audit::i18n::load_script_locale("de"));
+        let line = phase_progress_line("[2/4] phase A", elapsed);
+        assert_eq!(line, "[codefixture-audit]   [2/4] phase A: 1,2 s");
+        set_console_locale(&en);
         // Writes the same line to stderr; must not panic.
         print_phase_progress("[2/4] phase A", elapsed);
+    }
+
+    /// Every console line that writes a number, rendered in the four
+    /// languages with numbers large enough to need a group separator and
+    /// sizes and durations with a decimal: French, Spanish and German must
+    /// never write a decimal point (the French console wrote `Durée
+    /// totale : 12.7 s` and `11126 ligne(s)` until 2026-11-24). A dot that
+    /// is not a decimal point is allowed: in a path, in a version or an
+    /// IP-like value (`3.0.0`), and the Spanish and German group separator
+    /// (a dot followed by exactly three digits).
+    #[test]
+    fn test_console_numbers_follow_the_language() {
+        use codefixture_audit::rules::catalog::{RuleSourceKind, RuleSourceSummary};
+        use codefixture_audit::rules::identity::RuleId;
+        use codefixture_audit::scan::memory::{LanguageSources, MemoryEstimate, SystemMemory};
+        use codefixture_audit::scan::orchestrator::{CustomRuleDuplicate, VersionRulesStatus};
+        use codefixture_audit::scan::resources::{
+            LimitOrigin, MemoryLimit, ScanResources, ThreadLimit,
+        };
+        use codefixture_audit::scan::scan_cache::CacheStat;
+        use std::time::Duration;
+
+        const GB: u64 = 1_073_741_824;
+        let memory = MemoryEstimate {
+            bytes: GB * 54 / 10,
+            sources: vec![LanguageSources {
+                language: "java".into(),
+                bytes: 1_234 * 1_048_576,
+                followed: true,
+            }],
+            rules_at_once: 1_200,
+            max_rules_at_once: 2_400,
+            system: Some(SystemMemory {
+                total: GB * 32,
+                available: GB * 157 / 10,
+            }),
+            limit: Some(GB * 3 / 2),
+        };
+        let resources = ScanResources {
+            threads: ThreadLimit {
+                threads: 1_023,
+                cores: 1_024,
+                origin: LimitOrigin::Default,
+                input: None,
+                capped_at_cores: false,
+            },
+            memory: MemoryLimit {
+                bytes: Some(GB * 3 / 2),
+                origin: LimitOrigin::Default,
+                input: None,
+                percent: Some(75),
+            },
+        };
+        let report = ScanReport {
+            rule_sources: vec![RuleSourceSummary {
+                path: PathBuf::from("/opt/cfa-3.0.0/rules.cfpack"),
+                kind: RuleSourceKind::Pack,
+                files_available: 7_110,
+                files_read: 4_510,
+            }],
+            rules_loaded: 4_510,
+            rule_languages: vec!["java".into()],
+            ..ScanReport::default()
+        };
+        let cache = CacheStat {
+            language: "php".into(),
+            files: 1_690,
+            dirty: 1_001,
+            analysed: 30_420,
+            total: 30_420,
+            full: None,
+        };
+        let version_rules = VersionRulesStatus::Read {
+            pack: PathBuf::from("/opt/cfa-3.0.0/rules.cfpack"),
+            created: "2026-11-11T00:00:00Z".into(),
+            counts: vec![("Maven".into(), 12_345), ("npm".into(), 2_600)],
+            vulnerabilities: Some((14_000, 13_500)),
+            sources: vec![],
+        };
+        let duplicates: Vec<CustomRuleDuplicate> = (1..=1_234)
+            .map(|line| CustomRuleDuplicate {
+                custom_rule: RuleId::new("java", "my_rule"),
+                shipped_rule: RuleId::new("java", "sql_injection"),
+                file: "src/App.java".into(),
+                line,
+            })
+            .collect();
+        let minified: Vec<String> = (0..1_500).map(|i| format!("static/m{i}.min.js")).collect();
+
+        let render = |lang: &str| -> Vec<String> {
+            let locale = codefixture_audit::i18n::load_script_locale(lang);
+            let say = |key: &str| codefixture_audit::i18n::t(&locale, key);
+            let mut lines = memory_lines(&memory, &resources, false, &locale);
+            lines.extend(memory_lines(&memory, &resources, true, &locale));
+            lines.extend(rule_source_lines(&report, &locale));
+            lines.push(cache_stat_line(&cache, say));
+            lines.push(version_rules_line(&version_rules, &locale).1);
+            lines.extend(custom_duplicate_lines(&duplicates, &locale));
+            lines.extend(skipped_files_line("scan_skipped_minified", &minified, say));
+            lines.extend(scan_summary_lines(
+                1_870,
+                11_126,
+                4_160,
+                Duration::from_millis(12_780),
+                &locale,
+            ));
+            lines.push(scan_summary_lines(1, 1, 0, Duration::from_secs(4_000), &locale)[1].clone());
+            lines.push(try_summary_line(
+                1_234,
+                1_001,
+                3_460,
+                Duration::from_millis(1_250),
+                &locale,
+            ));
+            lines.push(try_summary_line(
+                0,
+                0,
+                3_460,
+                Duration::from_millis(59_990),
+                &locale,
+            ));
+            lines
+        };
+
+        // A dot between digits that is not a decimal point: inside a path
+        // or a dotted version (two dots or more), removed before the check.
+        let path_or_version =
+            regex::Regex::new(r"\S*[/\\]\S*|\d+(\.\d+){2,}").expect("valid regex");
+        // A dot between digits: a decimal point, unless the language
+        // groups digits with a dot and three digits follow.
+        let dot_between_digits = regex::Regex::new(r"\d\.(\d+)").expect("valid regex");
+        for lang in ["fr", "es", "de"] {
+            let groups_with_dot = LocaleFormat::for_language(lang).int(10_000u32) == "10.000";
+            for line in render(lang) {
+                let checked = path_or_version.replace_all(&line, "");
+                for found in dot_between_digits.captures_iter(&checked) {
+                    let is_group = groups_with_dot && found[1].len() == 3;
+                    assert!(is_group, "{lang}: decimal point in {line:?}");
+                }
+            }
+        }
+
+        // What each language writes, read from the lines themselves.
+        let joined = |lang: &str| render(lang).join("\n");
+        let en = joined("en");
+        for expected in [
+            "1,870 file(s) scanned, 11,126 line(s) of code, 4,160 finding(s)",
+            "12.7 s",
+            "1 h 06 min",
+            "about 5.4 GB",
+            "15.7 GB available of 32.0 GB",
+            "1.5 GB",
+            "java 1,234 MB",
+            "75%",
+            "1,023 of 1,024 cores",
+            "4,510/7,110",
+            "1,001/1,690",
+            "30,420/30,420",
+            "Maven 12,345, npm 2,600",
+            "November 11, 2026",
+            "1,234 line(s)",
+            "1,500 file(s)",
+            "1.2 s",
+            "59.9 s",
+        ] {
+            assert!(en.contains(expected), "en: {expected:?} missing in\n{en}");
+        }
+        let fr = joined("fr");
+        for expected in [
+            "1\u{202f}870 fichier(s)",
+            "11\u{202f}126 ligne(s)",
+            "12,7 s",
+            "environ 5,4 Go",
+            "15,7 Go",
+            "32,0 Go",
+            "1\u{202f}234 Mo",
+            "75\u{202f}%",
+            "4\u{202f}510/7\u{202f}110",
+            "Maven 12\u{202f}345, npm 2\u{202f}600",
+            "11/11/2026",
+            "59,9 s",
+        ] {
+            assert!(fr.contains(expected), "fr: {expected:?} missing in\n{fr}");
+        }
+        let es = joined("es");
+        // Spanish leaves a four-digit number whole, and groups from five.
+        for expected in [
+            "1870",
+            "11.126",
+            "12,7 s",
+            "5,4",
+            "Maven 12.345, npm 2600",
+            "11/11/2026",
+        ] {
+            assert!(es.contains(expected), "es: {expected:?} missing in\n{es}");
+        }
+        let de = joined("de");
+        for expected in [
+            "1.870",
+            "11.126",
+            "12,7 s",
+            "5,4",
+            "Maven 12.345, npm 2.600",
+            "11.11.2026",
+        ] {
+            assert!(de.contains(expected), "de: {expected:?} missing in\n{de}");
+        }
     }
 
     #[test]
@@ -1831,7 +2040,10 @@ fn start_scan_resources(
         emit_error(&format!(
             "[codefixture-audit] {}",
             say("scan_threads_pool_error")
-                .replace("{threads}", &resources.threads.threads.to_string())
+                .replace(
+                    "{threads}",
+                    &console_format_of(&say).count(resources.threads.threads)
+                )
                 .replace("{error}", &error.to_string())
         ));
         return Err(ExitCode::from(4));
@@ -1862,7 +2074,12 @@ fn limit_origin_text(
         (LimitOrigin::Environment, _) => given("scan_limit_origin_environment"),
         (LimitOrigin::Default, Setting::Cpu) => say("scan_limit_origin_default_cpu"),
         (LimitOrigin::Default, Setting::MaxMemory) => say("scan_limit_origin_default_memory")
-            .replace("{percent}", &percent.unwrap_or_default().to_string()),
+            .replace(
+                "{percent}",
+                // The percent sign as the language writes it (`75 %` with
+                // a narrow no-break space in French), no longer in the text.
+                &LocaleFormat::of_console(script_locale).percent(percent.unwrap_or_default()),
+            ),
     }
 }
 
@@ -1871,7 +2088,8 @@ fn limit_origin_text(
 /// bounds the memory (the machine's available memory, the limit and where
 /// it comes from), or, for a scan stopped before reading its files, which
 /// bound it passed, what it would have read, and what to do. Sizes in GB
-/// with the console language's decimal separator.
+/// and every count in the console language's number format
+/// (`report::locale_format`).
 fn memory_lines(
     memory: &codefixture_audit::scan::memory::MemoryEstimate,
     resources: &codefixture_audit::scan::resources::ScanResources,
@@ -1880,9 +2098,8 @@ fn memory_lines(
 ) -> Vec<String> {
     use codefixture_audit::scan::resources::Setting;
     let say = |key: &str| codefixture_audit::i18n::t(script_locale, key);
-    let separator = say("decimal_separator");
-    let decimal = |value: f64, digits: usize| format!("{value:.digits$}").replace('.', &separator);
-    let gb = |bytes: u64| decimal(bytes as f64 / 1_073_741_824.0, 1);
+    let numbers = LocaleFormat::of_console(script_locale);
+    let gb = |bytes: u64| numbers.fixed(bytes as f64 / 1_073_741_824.0, 1);
     let estimate = gb(memory.bytes);
     let machine = memory.system.map(|system| {
         say("scan_memory_machine")
@@ -1904,8 +2121,8 @@ fn memory_lines(
     let threads = &resources.threads;
     let mut threads_lines = vec![
         say("scan_threads")
-            .replace("{threads}", &threads.threads.to_string())
-            .replace("{cores}", &threads.cores.to_string())
+            .replace("{threads}", &numbers.count(threads.threads))
+            .replace("{cores}", &numbers.count(threads.cores))
             .replace(
                 "{origin}",
                 &limit_origin_text(
@@ -1920,7 +2137,7 @@ fn memory_lines(
     if threads.capped_at_cores {
         threads_lines.push(
             say("scan_threads_capped")
-                .replace("{cores}", &threads.cores.to_string())
+                .replace("{cores}", &numbers.count(threads.cores))
                 .replace(
                     "{name}",
                     &threads
@@ -1955,9 +2172,10 @@ fn memory_lines(
                 } else {
                     "scan_memory_source"
                 };
-                say(key)
-                    .replace("{language}", &source.language)
-                    .replace("{size}", &decimal(source.bytes as f64 / 1_048_576.0, 0))
+                say(key).replace("{language}", &source.language).replace(
+                    "{size}",
+                    &numbers.fixed(source.bytes as f64 / 1_048_576.0, 0),
+                )
             })
             .collect();
         lines.push(say("scan_memory_sources").replace("{sources}", &sources.join(", ")));
@@ -1979,8 +2197,8 @@ fn memory_lines(
     if memory.rules_at_once < memory.max_rules_at_once {
         lines.push(
             say("scan_memory_fewer_rules")
-                .replace("{rules}", &memory.rules_at_once.to_string())
-                .replace("{max}", &memory.max_rules_at_once.to_string()),
+                .replace("{rules}", &numbers.count(memory.rules_at_once))
+                .replace("{max}", &numbers.count(memory.max_rules_at_once)),
         );
     }
     lines
@@ -2048,13 +2266,14 @@ fn custom_duplicate_lines(
     duplicates: &[codefixture_audit::scan::orchestrator::CustomRuleDuplicate],
     script_locale: &serde_json::Value,
 ) -> Vec<String> {
+    let numbers = LocaleFormat::of_console(script_locale);
     codefixture_audit::scan::orchestrator::custom_duplicate_pairs(duplicates)
         .into_iter()
         .map(|(custom, shipped, lines)| {
             codefixture_audit::i18n::t(script_locale, "scan_custom_rule_duplicates")
                 .replace("{rule}", &custom.to_string())
                 .replace("{shipped}", &shipped.to_string())
-                .replace("{lines}", &lines.to_string())
+                .replace("{lines}", &numbers.count(lines))
         })
         .collect()
 }
@@ -2128,14 +2347,15 @@ fn print_case_outcomes(
         );
     }
     if !quiet || failed > 0 {
+        let numbers = LocaleFormat::of_console(script_locale);
         let _ = writeln!(
             out,
             "{}",
             say("rules_test_summary")
-                .replace("{cases}", &outcomes.len().to_string())
-                .replace("{rules}", &rules.len().to_string())
-                .replace("{passed}", &(outcomes.len() - failed).to_string())
-                .replace("{failed}", &failed.to_string())
+                .replace("{cases}", &numbers.count(outcomes.len()))
+                .replace("{rules}", &numbers.count(rules.len()))
+                .replace("{passed}", &numbers.count(outcomes.len() - failed))
+                .replace("{failed}", &numbers.count(failed))
         );
     }
     failed
@@ -2436,23 +2656,44 @@ fn run_custom_rules_try_command(
     }
     let files: std::collections::BTreeSet<&str> =
         findings.iter().map(|(f, _)| f.file.as_str()).collect();
-    let elapsed = format_duration(started.elapsed());
-    println_result(&if findings.is_empty() {
-        say("custom_rules_try_no_finding")
-            .replace("{read}", &report.files_scanned.to_string())
-            .replace("{elapsed}", &elapsed)
-    } else {
-        say("custom_rules_try_summary")
-            .replace("{count}", &findings.len().to_string())
-            .replace("{files}", &files.len().to_string())
-            .replace("{read}", &report.files_scanned.to_string())
-            .replace("{elapsed}", &elapsed)
-    });
+    println_result(&try_summary_line(
+        findings.len(),
+        files.len(),
+        report.files_scanned,
+        started.elapsed(),
+        &script_locale,
+    ));
     let owned: Vec<_> = duplicates.into_iter().cloned().collect();
     for line in custom_duplicate_lines(&owned, &script_locale) {
         println_result(&line);
     }
     ExitCode::SUCCESS
+}
+
+/// The last line of `custom-rules try`: the findings of the rule and the
+/// files they are in, the files read and the time taken, in the console
+/// language's number format (`report::locale_format`).
+fn try_summary_line(
+    findings: usize,
+    files: usize,
+    read: usize,
+    elapsed: std::time::Duration,
+    script_locale: &serde_json::Value,
+) -> String {
+    let say = |key: &str| codefixture_audit::i18n::t(script_locale, key);
+    let numbers = LocaleFormat::of_console(script_locale);
+    let elapsed = numbers.duration(elapsed);
+    if findings == 0 {
+        say("custom_rules_try_no_finding")
+            .replace("{read}", &numbers.count(read))
+            .replace("{elapsed}", &elapsed)
+    } else {
+        say("custom_rules_try_summary")
+            .replace("{count}", &numbers.count(findings))
+            .replace("{files}", &numbers.count(files))
+            .replace("{read}", &numbers.count(read))
+            .replace("{elapsed}", &elapsed)
+    }
 }
 
 /// Display order, icon and default activation of the listed categories
@@ -2526,12 +2767,13 @@ fn run_list_rules_command(lang: &str, rules: Option<PathBuf>) -> ExitCode {
     // The count is on the very first line, with no blank line before it
     // (deviation from Python's leading newline): the install guide reads
     // it with `list-rules | head -1` (`Select-Object -First 1`).
+    let numbers = LocaleFormat::of_console(&script_locale);
     let mut out = std::io::stdout().lock();
     let _ = writeln!(
         out,
         "📋 {} ({} {rules_label}):\n",
         codefixture_audit::i18n::t(&script_locale, "available_rules"),
-        listing.len()
+        numbers.count(listing.len())
     );
     for (display_key, icon, enabled_by_default) in LIST_RULES_CATEGORIES {
         let rules: Vec<_> = listing
@@ -2567,7 +2809,7 @@ fn run_list_rules_command(lang: &str, rules: Option<PathBuf>) -> ExitCode {
         let _ = writeln!(
             out,
             "{icon}  {title} ({} {rules_label}){suffix}",
-            rules.len()
+            numbers.count(rules.len())
         );
         for rule in rules {
             let _ = writeln!(out, "   {:<40} {}", rule.id, rule_display_name(rule, lang));
@@ -2765,7 +3007,7 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
     // French regardless of `--lang`, only the HTML report was
     // translated.
     let script_locale = codefixture_audit::i18n::load_script_locale(&lang);
-    set_console_colon(&codefixture_audit::i18n::t(&script_locale, "label_colon"));
+    set_console_locale(&script_locale);
     if !path.is_dir() {
         emit_error(
             &codefixture_audit::i18n::t(&script_locale, "scan_invalid_path")
@@ -3591,31 +3833,29 @@ fn finish_scan(
     // message guaranteed by a silent CI scan — without it, a run that
     // "succeeds" with no finding is indistinguishable from a run that scanned
     // nothing at all.
-    emit_result(&format!(
-        "[codefixture-audit] {}",
-        codefixture_audit::i18n::t(script_locale, "scan_summary")
-            .replace("{files}", &files_scanned.to_string())
-            .replace("{loc}", &total_loc.to_string())
-            .replace("{findings}", &findings.len().to_string())
-    ));
     // Whole command, from argument parsing to the written report
     // (ticket #135) — the per-phase lines don't add up to it (rule
     // loading aside, discovery and report rendering are not phases).
-    // Same never-suppressed treatment as the summary line above.
+    // Same never-suppressed treatment as the summary line.
     let total_elapsed = t_command_start.elapsed();
+    let [summary, duration] = scan_summary_lines(
+        files_scanned,
+        total_loc,
+        findings.len(),
+        total_elapsed,
+        script_locale,
+    );
+    emit_result(&format!("[codefixture-audit] {summary}"));
     if JSON_LOGS.load(std::sync::atomic::Ordering::Relaxed) {
+        // The message is the console's text; `duration_ms` is the
+        // neutral value for the machine reading the log.
         emit_json_line(
             LogLevel::Info,
-            &codefixture_audit::i18n::t(script_locale, "scan_total_duration")
-                .replace("{duration}", &format_duration(total_elapsed)),
+            &duration,
             Some(serde_json::json!(total_elapsed.as_millis())),
         );
     } else {
-        emit_result(&format!(
-            "[codefixture-audit] {}",
-            codefixture_audit::i18n::t(script_locale, "scan_total_duration")
-                .replace("{duration}", &format_duration(total_elapsed))
-        ));
+        emit_result(&format!("[codefixture-audit] {duration}"));
     }
 
     let high_count = findings
@@ -3630,6 +3870,29 @@ fn finish_scan(
     let max_high_threshold =
         codefixture_audit::project::project_config::read_max_high_threshold_config(root);
     u8::from(high_count as i64 > max_high_threshold)
+}
+
+/// The last two lines of a scan, without their `[codefixture-audit]`
+/// prefix: the summary (files, lines of code, findings) and the total
+/// duration, in the console language's number format
+/// (`report::locale_format`). Until 2026-11-24 they wrote `11126` and
+/// `12.7 s` in every language.
+fn scan_summary_lines(
+    files_scanned: usize,
+    total_loc: usize,
+    findings: usize,
+    elapsed: std::time::Duration,
+    script_locale: &serde_json::Value,
+) -> [String; 2] {
+    let numbers = LocaleFormat::of_console(script_locale);
+    [
+        codefixture_audit::i18n::t(script_locale, "scan_summary")
+            .replace("{files}", &numbers.count(files_scanned))
+            .replace("{loc}", &numbers.count(total_loc))
+            .replace("{findings}", &numbers.count(findings)),
+        codefixture_audit::i18n::t(script_locale, "scan_total_duration")
+            .replace("{duration}", &numbers.duration(elapsed)),
+    ]
 }
 
 /// What [`report_unchanged_scan`] needs from `run_scan_command`.
@@ -3665,12 +3928,10 @@ fn report_unchanged_scan(scan: UnchangedScan<'_>) -> ExitCode {
             return ExitCode::from(4);
         }
     };
-    // The export's `YYYY-MM-DD-HH-MM` stamp, as the reader writes a date.
-    let date = chrono::NaiveDateTime::parse_from_str(&export.timestamp, "%Y-%m-%d-%H-%M")
-        .map_or_else(
-            |_| export.timestamp.clone(),
-            |d| d.format("%d/%m/%Y %H:%M").to_string(),
-        );
+    // The export's `YYYY-MM-DD-HH-MM` stamp, as the console's language
+    // writes a date and time (`November 24, 2026 at 9:47 AM`): the French
+    // `24/11/2026 09:47` in every language before 2026-11-24.
+    let date = LocaleFormat::of_console(scan.script_locale).scan_timestamp(&export.timestamp);
     emit_result(&format!(
         "[codefixture-audit] {}",
         say("scan_unchanged").replace("{date}", &date)

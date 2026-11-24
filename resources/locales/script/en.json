@@ -1,5 +1,6 @@
 {
   "label_colon": ": ",
+  "locale_code": "en",
   "scan_security": "Security Scan",
   "scan_architecture": "Architecture Scan",
   "scan_ui": "Interface Scan",
@@ -460,7 +461,6 @@
   "scan_memory_source": "{language} {size} MB",
   "scan_memory_stop_hint": "To analyse it: analyse its modules one at a time, leave folders out (`paths.exclude` in audit.config.json), close other programs, or run anyway with --skip-memory-check.",
   "scan_memory_limit": "Limit: {limit} GB ({origin}).",
-  "decimal_separator": ".",
   "scan_memory_machine": "This machine has {available} GB available of {total} GB.",
   "scan_memory_stop_limit": "Stopped before reading the files: this analysis is expected to take about {estimate} GB of memory, more than the {limit} GB allowed ({origin}).",
   "scan_memory_fewer_rules": "To fit in memory, {rules} data flow rule(s) run at a time instead of {max}: the analysis takes longer.",
@@ -470,7 +470,7 @@
   "scan_limit_origin_option": "set with {name}",
   "scan_limit_origin_environment": "set with the environment variable {name}",
   "scan_limit_origin_default_cpu": "default: every core but one",
-  "scan_limit_origin_default_memory": "default: {percent}% of the installed memory",
+  "scan_limit_origin_default_memory": "default: {percent} of the installed memory",
   "scan_limit_invalid_cpu": "Invalid value \"{value}\" for {name}: give a number of threads of at least 1 (4) or a share of the cores from 1% to 100% (50%).",
   "scan_limit_invalid_max_memory": "Invalid value \"{value}\" for {name}: give a number of GB above 0, with a dot for decimals (8 or 7.5), or a share of the installed memory from 1% to 100% (75%).",
   "scan_limit_percent_unknown_memory": "Cannot apply \"{value}\" of {name}: this system does not tell its installed memory; give the limit in GB.",

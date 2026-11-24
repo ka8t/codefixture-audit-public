@@ -184,7 +184,7 @@ fn member_error(
             .with(name_arg, name)
     };
     match error {
-        DecompressError::TooLarge => base(too_large).with("cap", MAX_ECOSYSTEM_BYTES.to_string()),
+        DecompressError::TooLarge => base(too_large).with_number("cap", MAX_ECOSYSTEM_BYTES),
         DecompressError::Corrupt(error) => base(unreadable).with("error", error),
     }
 }
@@ -520,8 +520,8 @@ pub fn decode(path: &Path, bytes: Vec<u8>) -> Result<DatabaseFile, PackError> {
     let format = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
     if format != FORMAT_VERSION {
         return Err(fail(keys::UNSUPPORTED_FORMAT)
-            .with("format", format.to_string())
-            .with("expected", FORMAT_VERSION.to_string()));
+            .with_number("format", format)
+            .with_number("expected", FORMAT_VERSION));
     }
     let header_len = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
     if header_len > MAX_HEADER_BYTES || 12 + header_len as usize > bytes.len() {
@@ -531,7 +531,7 @@ pub fn decode(path: &Path, bytes: Vec<u8>) -> Result<DatabaseFile, PackError> {
     let header: Header = serde_json::from_slice(&bytes[12..header_end])
         .map_err(|e| fail(keys::INVALID_HEADER).with("error", e.to_string()))?;
     if header.format != FORMAT_VERSION {
-        return Err(fail(keys::HEADER_FORMAT_UNSUPPORTED).with("format", header.format.to_string()));
+        return Err(fail(keys::HEADER_FORMAT_UNSUPPORTED).with_number("format", header.format));
     }
     Ok(DatabaseFile {
         path: path.to_path_buf(),
@@ -874,5 +874,41 @@ mod tests {
         let header = r#"{"format":1,"created":"","source":"OSV","ecosystems":[]}"#;
         let parsed: Header = serde_json::from_str(header).unwrap();
         assert!(parsed.sources.is_empty() && parsed.tables.is_empty());
+    }
+
+    /// The numbers of a reason are written when it is shown, in the
+    /// console's language: the cap of a decompressed member was
+    /// `1073741824` in every language until 2026-11-24. The format
+    /// numbers go the same way (too small to show a separator).
+    #[test]
+    fn test_reason_numbers_follow_the_console_language() {
+        use crate::i18n::load_script_locale;
+        let too_large = member_error(
+            Path::new("/x/advisories.cfdb"),
+            ("ecosystem", "npm"),
+            DecompressError::TooLarge,
+            keys::ECOSYSTEM_TOO_LARGE,
+            keys::ECOSYSTEM_UNREADABLE,
+        );
+        let format = PackError::new(keys::UNSUPPORTED_FORMAT)
+            .with("path", "/x/advisories.cfdb")
+            .with_number("format", 7u32)
+            .with_number("expected", FORMAT_VERSION);
+        for (lang, cap) in [
+            ("en", "1,073,741,824"),
+            ("fr", "1\u{202f}073\u{202f}741\u{202f}824"),
+            ("es", "1.073.741.824"),
+            ("de", "1.073.741.824"),
+        ] {
+            let locale = load_script_locale(lang);
+            let text = too_large.render(&locale);
+            assert!(text.contains(cap), "{lang}: {text}");
+            assert!(!text.contains("1073741824"), "{lang}: {text}");
+            let text = format.render(&locale);
+            assert!(text.contains('7') && text.contains('1'), "{lang}: {text}");
+            assert!(!text.contains('{'), "{lang}: placeholder left in {text}");
+        }
+        // `Display` is English, numbers included.
+        assert!(too_large.to_string().contains("1,073,741,824"));
     }
 }

@@ -1,5 +1,6 @@
 {
   "label_colon": " : ",
+  "locale_code": "fr",
   "scan_security": "Scan Sécurité",
   "scan_architecture": "Scan Architecture",
   "scan_ui": "Scan Interface",
@@ -460,7 +461,6 @@
   "scan_memory_source": "{language} {size} Mo",
   "scan_memory_stop_hint": "Pour l'analyser : analysez ses modules un par un, écartez des dossiers (`paths.exclude` dans audit.config.json), fermez d'autres programmes, ou lancez quand même avec --skip-memory-check.",
   "scan_memory_limit": "Plafond : {limit} Go ({origin}).",
-  "decimal_separator": ",",
   "scan_memory_machine": "Cette machine a {available} Go disponibles sur {total} Go.",
   "scan_memory_stop_limit": "Arrêt avant la lecture des fichiers : cette analyse devrait prendre environ {estimate} Go de mémoire, plus que les {limit} Go autorisés ({origin}).",
   "scan_memory_fewer_rules": "Pour tenir en mémoire, {rules} règle(s) de suivi de données tournent à la fois au lieu de {max} : l'analyse prend plus de temps.",
@@ -470,7 +470,7 @@
   "scan_limit_origin_option": "fixé par {name}",
   "scan_limit_origin_environment": "fixé par la variable d'environnement {name}",
   "scan_limit_origin_default_cpu": "par défaut : tous les cœurs sauf un",
-  "scan_limit_origin_default_memory": "par défaut : {percent} % de la mémoire installée",
+  "scan_limit_origin_default_memory": "par défaut : {percent} de la mémoire installée",
   "scan_limit_invalid_cpu": "Valeur « {value} » invalide pour {name} : indiquez un nombre de fils d'exécution d'au moins 1 (4) ou une part des cœurs de 1% à 100% (50%).",
   "scan_limit_invalid_max_memory": "Valeur « {value} » invalide pour {name} : indiquez un nombre de Go supérieur à 0, avec un point pour les décimales (8 ou 7.5), ou une part de la mémoire installée de 1% à 100% (75%).",
   "scan_limit_percent_unknown_memory": "Impossible d'appliquer « {value} » de {name} : ce système n'indique pas sa mémoire installée ; indiquez le plafond en Go.",

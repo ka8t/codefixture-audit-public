@@ -182,12 +182,26 @@ pub mod keys {
 /// module is compiled into `build.rs`, which has neither the parser nor
 /// `crate::i18n`. A value taken from the system (`{error}` of a file that
 /// cannot be read) stays in the system's words.
+///
+/// Numbers (`{cap}`, `{format}`, `{expected}`) are kept as numbers, not
+/// as text: they are written only when the reason is rendered, in the
+/// number format of the console's language (`1 073 741 824` in French,
+/// `1.073.741.824` in German), by `super::pack_number_text`. That function
+/// is the parent module's, like `super::rules_crypto`: in the library
+/// it is `crate::rules::pack_number_text`, which reads the language's
+/// formats (`report::locale_format`); in `build.rs`, which has no i18n and
+/// only shows its errors to the publisher at build time, it writes the
+/// plain digits. Until 2026-11-24 a number was turned into text when the
+/// reason was made, and every language showed `1073741824`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PackError {
     /// The translation key, one of [`keys`].
     pub key: &'static str,
-    /// The value of each placeholder, by name.
+    /// The value of each text placeholder, by name.
     pub args: Vec<(&'static str, String)>,
+    /// The value of each number placeholder, by name, written at
+    /// [`PackError::render`] in the language's number format.
+    pub numbers: Vec<(&'static str, u64)>,
 }
 
 impl PackError {
@@ -196,28 +210,46 @@ impl PackError {
         PackError {
             key,
             args: Vec::new(),
+            numbers: Vec::new(),
         }
     }
 
-    /// Adds the value of placeholder `{name}`.
+    /// Adds the value of text placeholder `{name}`.
     pub fn with(mut self, name: &'static str, value: impl Into<String>) -> Self {
         self.args.push((name, value.into()));
+        self
+    }
+
+    /// Adds the value of number placeholder `{name}`: a size, a count or
+    /// a format number, written in the language's number format when
+    /// rendered.
+    pub fn with_number(mut self, name: &'static str, value: impl Into<u64>) -> Self {
+        self.numbers.push((name, value.into()));
         self
     }
 
     /// The reason in the language of `locale` (a console translation,
     /// `i18n::load_script_locale`). A key missing from `locale` falls
     /// back to English, then to the key itself, as `i18n::t` does; a test
-    /// checks that the four languages have every key.
+    /// checks that the four languages have every key. The numbers are
+    /// written in the number format of `locale`'s language (see
+    /// [`PackError`]).
     pub fn render(&self, locale: &serde_json::Value) -> String {
         let template = translation(locale, self.key)
             .or_else(|| translation(&ENGLISH, self.key))
             .unwrap_or(self.key);
-        self.args
+        let text = self
+            .args
             .iter()
             .fold(template.to_string(), |text, (name, value)| {
                 text.replace(&format!("{{{name}}}"), value)
-            })
+            });
+        self.numbers.iter().fold(text, |text, (name, value)| {
+            text.replace(
+                &format!("{{{name}}}"),
+                &super::pack_number_text(locale, *value),
+            )
+        })
     }
 }
 
@@ -409,9 +441,11 @@ fn parse_header(bytes: &[u8]) -> Result<(PackHeader, usize), PackError> {
     match header.get("format") {
         None => return Err(PackError::new(keys::MISSING_FIELD).with("field", "format")),
         Some(format) if format.as_u64() != Some(FORMAT_VERSION) => {
+            // `{format}` stays the header's own text (it may be a string,
+            // `"2"`); the format this engine reads is a number.
             return Err(PackError::new(keys::UNSUPPORTED_FORMAT)
                 .with("format", format.to_string())
-                .with("expected", FORMAT_VERSION.to_string()));
+                .with_number("expected", FORMAT_VERSION));
         }
         Some(_) => {}
     }
