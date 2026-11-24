@@ -588,6 +588,9 @@ pub struct ScanReport {
     /// Every other field is then empty.
     pub stopped_for_memory: bool,
     pub findings: Vec<ReportFinding>,
+    /// The client rule findings dropped because a delivered rule flags
+    /// the same line (`drop_custom_duplicates`, epic #278).
+    pub custom_rule_duplicates: Vec<CustomRuleDuplicate>,
     pub files_scanned: usize,
     pub total_loc: usize,
     /// `.sca` files whose parsing/compilation failed (path,
@@ -1415,6 +1418,13 @@ fn attach_taint_flows(existing: &mut ReportFinding, new_finding: &ReportFinding)
 /// must index `all_findings` (ticket #239): scanning every finding for
 /// each new one cost a time growing with the square of the number of
 /// findings.
+///
+/// A finding only merges into a finding of the same origin
+/// (`rule_source`: delivered rules, or the client's own), so that a
+/// delivered rule's finding is never folded into a client rule's: which
+/// one the report keeps on a line both flag is decided afterwards, by
+/// [`drop_custom_duplicates`]. Without client rules every finding has
+/// the delivered origin and the merge is exactly Audit's.
 fn integrate_taint_finding(
     all_findings: &mut Vec<ReportFinding>,
     by_line: &mut FindingsByLine,
@@ -1425,7 +1435,17 @@ fn integrate_taint_finding(
         new_finding.line,
         new_finding.category.clone(),
     );
-    let same_line: Vec<usize> = by_line.0.get(&key).cloned().unwrap_or_default();
+    let same_line: Vec<usize> = by_line
+        .0
+        .get(&key)
+        .map(|positions| {
+            positions
+                .iter()
+                .copied()
+                .filter(|&i| all_findings[i].rule_source == new_finding.rule_source)
+                .collect()
+        })
+        .unwrap_or_default();
 
     if same_line.is_empty() {
         // Mirrors Python: even a freshly created taint finding, with
@@ -1494,6 +1514,92 @@ impl FindingsByLine {
         }
         FindingsByLine(index)
     }
+}
+
+/// A line where a client rule (ADR-0057) flagged what a delivered rule
+/// already flags: same file, line and category. The report keeps the
+/// delivered rule's finding there and drops the client's; the scan and the
+/// report name each such pair so the client knows their rule duplicates a
+/// delivered one (epic #278, ADR-0064).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CustomRuleDuplicate {
+    /// The client rule whose finding was dropped.
+    pub custom_rule: crate::rules::identity::RuleId,
+    /// The delivered rule whose finding was kept (the first on the line).
+    pub shipped_rule: crate::rules::identity::RuleId,
+    /// Project-relative file of the line.
+    pub file: String,
+    /// The line.
+    pub line: usize,
+}
+
+/// Drops every client rule finding on a (file, line, category) that a
+/// delivered rule's finding also holds, and returns what was dropped, in
+/// findings order. Deliberate deviation from Audit, which merged a taint
+/// finding into whichever finding came first on the line and kept two
+/// pattern findings side by side: a client rule written for an in-house
+/// API could hide a delivered finding, or show twice what the catalog
+/// already reports. The delivered finding is the reference (it carries
+/// the catalog's texts, mappings and remediation); the client is told
+/// instead. Without client findings nothing changes.
+fn drop_custom_duplicates(findings: &mut Vec<ReportFinding>) -> Vec<CustomRuleDuplicate> {
+    let is_client = |f: &ReportFinding| f.rule_source == "json_custom";
+    if !findings.iter().any(is_client) {
+        return Vec::new();
+    }
+    let mut shipped: HashMap<(&str, usize, &str), crate::rules::identity::RuleId> = HashMap::new();
+    for f in findings.iter().filter(|f| !is_client(f)) {
+        shipped
+            .entry((f.file.as_str(), f.line, f.category.as_str()))
+            .or_insert_with(|| f.rule_id());
+    }
+    let mut duplicates = Vec::new();
+    let mut keep = Vec::with_capacity(findings.len());
+    for f in findings.iter() {
+        let covered = is_client(f)
+            .then(|| shipped.get(&(f.file.as_str(), f.line, f.category.as_str())))
+            .flatten();
+        match covered {
+            Some(shipped_rule) => {
+                duplicates.push(CustomRuleDuplicate {
+                    custom_rule: f.rule_id(),
+                    shipped_rule: shipped_rule.clone(),
+                    file: f.file.clone(),
+                    line: f.line,
+                });
+                keep.push(false);
+            }
+            None => keep.push(true),
+        }
+    }
+    let mut flags = keep.into_iter();
+    findings.retain(|_| flags.next().unwrap_or(true));
+    duplicates
+}
+
+/// The duplicates of [`drop_custom_duplicates`] grouped by (client rule,
+/// delivered rule), with the number of lines of each pair, sorted: what
+/// the console and the report print, one line per pair.
+pub fn custom_duplicate_pairs(
+    duplicates: &[CustomRuleDuplicate],
+) -> Vec<(
+    crate::rules::identity::RuleId,
+    crate::rules::identity::RuleId,
+    usize,
+)> {
+    let mut pairs: BTreeMap<
+        (
+            crate::rules::identity::RuleId,
+            crate::rules::identity::RuleId,
+        ),
+        usize,
+    > = BTreeMap::new();
+    for d in duplicates {
+        *pairs
+            .entry((d.custom_rule.clone(), d.shipped_rule.clone()))
+            .or_default() += 1;
+    }
+    pairs.into_iter().map(|((c, s), n)| (c, s, n)).collect()
 }
 
 /// A file already read and parsed, kept in memory for the whole scan
@@ -2452,6 +2558,10 @@ pub fn run_scan(config: &ScanConfig) -> ScanReport {
 
     let _ = rule_category; // kept for future use (CLI category filtering)
 
+    // Epic #278: on a line a delivered rule and a client rule both flag,
+    // the delivered finding is kept and the pair is named.
+    let custom_rule_duplicates = drop_custom_duplicates(&mut all_findings);
+
     let rule_catalog: crate::rules::identity::RuleCatalog = rule_jsons
         .iter()
         .filter_map(|r| Some((crate::rules::identity::RuleId::of(r)?, r.clone())))
@@ -2741,6 +2851,7 @@ pub fn run_scan(config: &ScanConfig) -> ScanReport {
         stopped_for_memory: false,
         governance_names,
         findings: all_findings,
+        custom_rule_duplicates,
         files_scanned: parsed_files.len(),
         total_loc,
         rule_errors,
@@ -3116,6 +3227,71 @@ mod tests {
         );
         assert_eq!(all[1].rule_key, "taint_rce");
         assert_eq!(all[0].rule_key, "regex_rule");
+    }
+
+    /// Epic #278: a taint finding only merges into a finding of its own
+    /// origin, so a delivered finding is never folded into a client one;
+    /// [`drop_custom_duplicates`] then keeps the delivered finding of each
+    /// line both flag and names the pair, and keeps a client finding no
+    /// delivered rule shares.
+    #[test]
+    fn test_client_duplicates_of_delivered_findings_are_dropped_and_named() {
+        let client = |rule: &str, line| ReportFinding {
+            rule_source: "json_custom".to_string(),
+            ..finding(rule, "SECURITY", "a.py", line)
+        };
+        // A client pattern finding first (phase B), then a delivered taint
+        // finding on its line, a client taint finding on a delivered line,
+        // and a client finding alone.
+        let mut all = vec![
+            client("my_pattern", 5),
+            finding("os_system_injection", "SECURITY", "a.py", 9),
+        ];
+        let mut by_line = FindingsByLine::new(&all);
+        integrate_taint_finding(
+            &mut all,
+            &mut by_line,
+            finding("taint_rce", "SECURITY", "a.py", 5),
+        );
+        integrate_taint_finding(&mut all, &mut by_line, client("my_flow", 9));
+        integrate_taint_finding(&mut all, &mut by_line, client("my_flow", 12));
+        assert_eq!(all.len(), 5, "no merge across origins");
+        let duplicates = drop_custom_duplicates(&mut all);
+        let kept: Vec<(&str, usize)> = all.iter().map(|f| (f.rule_key.as_str(), f.line)).collect();
+        assert_eq!(
+            kept,
+            [
+                ("os_system_injection", 9),
+                ("taint_rce", 5),
+                ("my_flow", 12)
+            ]
+        );
+        let named: Vec<(String, String, usize)> = duplicates
+            .iter()
+            .map(|d| {
+                (
+                    d.custom_rule.to_string(),
+                    d.shipped_rule.to_string(),
+                    d.line,
+                )
+            })
+            .collect();
+        assert_eq!(
+            named,
+            [
+                ("python/my_pattern".into(), "python/taint_rce".into(), 5),
+                (
+                    "python/my_flow".into(),
+                    "python/os_system_injection".into(),
+                    9
+                )
+            ]
+        );
+        assert_eq!(custom_duplicate_pairs(&duplicates).len(), 2);
+        // Without client findings nothing changes.
+        let mut delivered = vec![finding("taint_rce", "SECURITY", "a.py", 5)];
+        assert!(drop_custom_duplicates(&mut delivered).is_empty());
+        assert_eq!(delivered.len(), 1);
     }
 
     #[test]
@@ -4231,8 +4407,14 @@ mod tests {
         let pack = root.join(pack_format::PACK_FILE_NAME);
         std::fs::write(&pack, pack_format::write_pack("builtin", &catalog, None)).unwrap();
         let custom = root.join("custom");
-        write(&custom, "python/mine.sca", &rule("mine", "python"));
-        write(&root, "src/app.py", "MARKER = PACKED\n");
+        // On a line of its own: on the delivered rule's line, the client
+        // finding would be dropped as its duplicate (ADR-0064).
+        write(
+            &custom,
+            "python/mine.sca",
+            &rule("mine", "python").replace("PACKED", "MINE"),
+        );
+        write(&root, "src/app.py", "MARKER = PACKED\nMINE = 1\n");
         let report = run_scan(&ScanConfig {
             root: root.clone(),
             include_paths: vec!["src".to_string()],

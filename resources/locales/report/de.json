@@ -877,5 +877,6 @@
   "finding_file_scope": "Diese Regel betrifft die ganze Datei, nicht eine ihrer Zeilen.",
   "fix_none_file": "Keine Zeile zu korrigieren: Die ganze Datei ist betroffen. Wenden Sie die obige Lösung an; das allgemeine Beispiel zeigt das Prinzip.",
   "fix_note_button_submit": "Wenn diese Schaltfläche ein Formular absendet, verwenden Sie stattdessen type=\"submit\".",
-  "fix_note_th_row": "Wenn diese Zelle eine Zeile beschriftet, verwenden Sie stattdessen scope=\"row\"."
+  "fix_note_th_row": "Wenn diese Zelle eine Zeile beschriftet, verwenden Sie stattdessen scope=\"row\".",
+  "custom_rules_duplicate": "Doppelt die ausgelieferte Regel {shipped} in {lines} Zeile(n): dort werden die Befunde der ausgelieferten Regel behalten."
 }

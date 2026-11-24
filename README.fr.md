@@ -91,7 +91,8 @@ Depuis le dossier `codefixture-audit-public` (sous Windows, `.\target\release\co
 | Lister les règles | `./target/release/codefixture-audit list-rules` |
 | Un SBOM CycloneDX de vos dépendances | ajoutez `--sbom` (voir [Export SBOM](INSTALLATION.fr.md#export-sbom)) |
 | Laisser de la place sur la machine (par défaut : tous les cœurs sauf un, 75 % de la mémoire) | `--cpu 50%`, `--max-memory 8` (voir [Fils d'exécution et mémoire](INSTALLATION.fr.md#fils-dexécution-et-mémoire-de-lanalyse)) |
-| Ajouter vos propres règles | des fichiers `.sca` dans `~/.codefixture-audit/custom-rules/` (voir [Vos propres règles](INSTALLATION.fr.md#vos-propres-règles)) |
+| Ajouter vos propres règles | `./target/release/codefixture-audit custom-rules create`, ou des fichiers `.sca` dans `~/.codefixture-audit/custom-rules/` (voir [Vos propres règles](INSTALLATION.fr.md#vos-propres-règles), et le guide d'écriture des règles, [`RULE-LANGUAGE.fr.md`](RULE-LANGUAGE.fr.md)) |
+| Tester vos règles | `custom-rules test` lance leurs cas de test, `custom-rules try <règle> <projet>` en lance une sur un projet |
 | Mettre à jour le moteur | `git pull`, puis `cargo build --release` |
 
 Quand votre projet déclare des dépendances (`requirements.txt`, `package.json`, `pom.xml`, `composer.json`, `.csproj`…), leurs versions sont comparées, hors ligne, aux vulnérabilités publiées que portent les règles : la version qu'un fichier de verrouillage indique comme installée (`package-lock.json`, `poetry.lock`, `Pipfile.lock`, `composer.lock`…), sinon la version exacte, sinon la plus petite version qu'autorise un intervalle, que le constat indique. Les paquets qu'un fichier de verrouillage installe en plus des dépendances déclarées sont aussi vérifiés. Une vulnérabilité que la CISA répertorie comme exploitée dans de vraies attaques (KEV) rend le constat critique, et chaque CVE affiche son score EPSS : la probabilité qu'elle soit exploitée dans les 30 prochains jours.

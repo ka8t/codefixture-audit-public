@@ -386,11 +386,34 @@ Le préfixe de fichier `SCA` suit `brand.json` quand vous le personnalisez.
 
 ### Vos propres règles
 
-Vous pouvez ajouter vos propres règles, pour une API interne ou une convention de votre code : de simples fichiers `.sca` dans `~/.codefixture-audit/custom-rules/` (`%USERPROFILE%\.codefixture-audit\custom-rules\` sous Windows), rangés par langage (`python/security/ma_regle.sca`). Chaque analyse les charge en plus des règles livrées, pour les langages qu'elle analyse ; `--custom-rules-dir <DOSSIER>` lit un autre dossier à la place. Aucune compilation ni mise à jour ne touche ce dossier.
+Vous pouvez ajouter vos propres règles, pour une API interne ou une convention de votre code : de simples fichiers `.sca` dans `~/.codefixture-audit/custom-rules/` (`%USERPROFILE%\.codefixture-audit\custom-rules\` sous Windows), rangés par langage (`python/security/ma_regle.sca`). Chaque analyse les charge en plus des règles livrées, pour les langages qu'elle analyse ; `--custom-rules-dir <DOSSIER>` lit un autre dossier à la place. Aucune compilation ni mise à jour ne touche ce dossier. Le guide d'écriture des règles, [`RULE-LANGUAGE.fr.md`](RULE-LANGUAGE.fr.md), décrit le langage des règles, les cas de test et la façon dont vos règles apparaissent dans le rapport.
 
 - Le rapport les liste dans sa section « Règles personnalisées », chacune avec son nombre de constats, et étiquette leurs constats comme les vôtres.
 - Une de vos règles qui porte le langage et le nom d'une règle livrée la remplace, et l'analyse le dit.
 - Une règle qui ne compile pas est nommée dans un avertissement, avec l'erreur, et laissée de côté ; les autres s'exécutent.
+
+Pour en écrire une, laissez le moteur poser les questions :
+
+```bash
+./target/release/codefixture-audit custom-rules create --lang fr
+```
+
+Il demande le langage, le nom, la catégorie et la gravité, puis ce qu'il faut détecter : un texte à chercher dans le code, ou une donnée suivie depuis son entrée (un paramètre de requête, par exemple) jusqu'à un appel dangereux. Il demande ensuite pourquoi c'est dangereux et comment corriger, affiche la règle, vérifie qu'elle compile, nomme les règles livrées qui cherchent déjà le même texte, et écrit le fichier dans le dossier ci-dessus après votre confirmation. Si vous donnez le nom d'une de vos règles, il propose de la modifier ; si vous donnez le nom d'une règle livrée, il demande avant que la vôtre la remplace, et sinon demande un autre nom. Il a besoin d'un terminal : des réponses envoyées depuis un fichier sont refusées.
+
+Avec la règle, il écrit deux cas de test dans `cases/` du même dossier : un fichier vulnérable que la règle doit signaler et un fichier propre qu'elle ne doit pas signaler, listés dans `cases/registry.json`. Si vous avez donné un exemple de code (le code vulnérable et sa version corrigée), les cas sont cet exemple et passent aussitôt ; sinon, chacun est un commentaire à remplacer par du code, et le cas vulnérable échoue tant que vous ne l'avez pas fait. Lancez les cas de toutes les règles, ou d'une seule :
+
+```bash
+./target/release/codefixture-audit custom-rules test --lang fr
+./target/release/codefixture-audit custom-rules test python/ma_regle --lang fr
+```
+
+Chaque cas en échec est nommé avec sa raison (`ÉCHEC ma_regle_python_clean (python/ma_regle, clean) : aucune alerte attendue, levée lignes [3] — clean/python/ma_regle_clean.py`), puis viennent les comptes. Le code de sortie vaut 0 quand tous les cas passent, 1 quand l'un échoue, 2 quand le registre manque ou n'est pas cohérent (un fichier qu'il liste manque, un fichier de `cases/` n'appartient à aucun cas) ; `--json` donne le résultat en JSON. Une règle sans cas qu'elle doit signaler, ou sans cas qu'elle ne doit pas signaler, est nommée après les comptes.
+
+Pour mettre une règle au point sur du vrai code, lancez-la sur un projet : chaque ligne qu'elle signale s'affiche, sans rapport ; une ligne qu'une règle livrée signale aussi s'affiche avec le nom de cette règle. Sur une telle ligne, le rapport garde le constat de la règle livrée, et chaque analyse nomme votre règle et la règle livrée avec laquelle elle fait doublon. Les règles livrées viennent de `rules.cfpack`, à côté de l'exécutable, comme pour `scan` ; `--rules <dossier ou pack>` en lit d'autres.
+
+```bash
+./target/release/codefixture-audit custom-rules try python/ma_regle /chemin/vers/votre/projet --lang fr
+```
 
 ### Mémoire d'un gros projet
 

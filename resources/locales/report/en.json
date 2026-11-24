@@ -877,5 +877,6 @@
   "finding_file_scope": "This rule is about the whole file, not one of its lines.",
   "fix_none_file": "No line to correct: the whole file is concerned. Apply the solution above; the generic example shows the idea.",
   "fix_note_button_submit": "If this button submits a form, write type=\"submit\" instead.",
-  "fix_note_th_row": "If this cell heads a row, write scope=\"row\" instead."
+  "fix_note_th_row": "If this cell heads a row, write scope=\"row\" instead.",
+  "custom_rules_duplicate": "Duplicates the delivered rule {shipped} on {lines} line(s): the delivered rule's findings are kept there."
 }

@@ -1,10 +1,22 @@
-//! The client's own rules (ADR-0057): the folder a scan reads them from.
+//! The client's own rules (ADR-0057): the folder a scan reads them from,
+//! and the tools that write them there.
 //! The rules themselves are loaded with the catalog's
 //! (`rules::catalog::load_rules`, origin `Client`) and shown in the
 //! report's "Custom rules" section.
 //!
 //! Shared by both builds since ADR-0057: before it, the private build
 //! alone read this folder (ADR-0041).
+//!
+//! - [`create`]: the wizard that writes a rule into this folder
+//!   (`custom-rules create`, ticket #275);
+//! - [`skeleton`]: the test cases it adds for each rule, kept in
+//!   `cases/` of this folder (ticket #276);
+//! - [`try_rule`]: one rule run alone on a project (`custom-rules try`,
+//!   ticket #276).
+
+pub mod create;
+pub mod skeleton;
+pub mod try_rule;
 
 use std::path::PathBuf;
 

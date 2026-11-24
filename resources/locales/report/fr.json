@@ -877,5 +877,6 @@
   "finding_file_scope": "Cette règle porte sur le fichier entier, pas sur une de ses lignes.",
   "fix_none_file": "Aucune ligne à corriger : c'est le fichier entier qui est concerné. Appliquez la solution ci-dessus ; l'exemple générique en montre le principe.",
   "fix_note_button_submit": "Si ce bouton envoie un formulaire, mettez plutôt type=\"submit\".",
-  "fix_note_th_row": "Si cette cellule est un en-tête de ligne, mettez plutôt scope=\"row\"."
+  "fix_note_th_row": "Si cette cellule est un en-tête de ligne, mettez plutôt scope=\"row\".",
+  "custom_rules_duplicate": "Fait doublon avec la règle livrée {shipped} sur {lines} ligne(s) : les constats de la règle livrée y sont gardés."
 }

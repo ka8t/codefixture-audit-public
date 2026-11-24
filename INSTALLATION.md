@@ -386,11 +386,34 @@ The file prefix `SCA` follows `brand.json` when you customise it.
 
 ### Your own rules
 
-You can add rules of your own, for an in-house API or a convention of your code: plain `.sca` files in `~/.codefixture-audit/custom-rules/` (`%USERPROFILE%\.codefixture-audit\custom-rules\` on Windows), laid out by language (`python/security/my_rule.sca`). Every analysis loads them besides the delivered rules, for the languages it analyses; `--custom-rules-dir <FOLDER>` reads another folder instead. No build or update touches that folder.
+You can add rules of your own, for an in-house API or a convention of your code: plain `.sca` files in `~/.codefixture-audit/custom-rules/` (`%USERPROFILE%\.codefixture-audit\custom-rules\` on Windows), laid out by language (`python/security/my_rule.sca`). Every analysis loads them besides the delivered rules, for the languages it analyses; `--custom-rules-dir <FOLDER>` reads another folder instead. No build or update touches that folder. The guide to writing rules, [`RULE-LANGUAGE.md`](RULE-LANGUAGE.md), describes the rule language, the test cases and how your rules show in the report.
 
 - The report lists them in its "Custom Rules" section, each with its number of findings, and labels their findings as yours.
 - A rule of yours with the language and name of a delivered rule replaces it, and the analysis says so.
 - A rule that does not compile is named in a warning, with the error, and left out; the others still run.
+
+To write one, let the engine ask the questions:
+
+```bash
+./target/release/codefixture-audit custom-rules create --lang en
+```
+
+It asks the language, the name, the category and the severity, then what to detect: a text to search in the code, or data followed from where it enters (a request parameter, for instance) to a dangerous call. It then asks why it is dangerous and how to fix it, shows the rule, checks that it compiles, names the delivered rules that already search the same text, and writes the file into the folder above after your confirmation. Given the name of one of your rules, it offers to edit it; given the name of a delivered rule, it asks before yours replaces it, and asks another name otherwise. It needs a terminal: answers piped from a file are refused.
+
+With the rule, it writes two test cases into `cases/` of the same folder: a vulnerable file the rule must flag and a clean file it must not, listed in `cases/registry.json`. When you gave a code example (vulnerable code and its fixed version), the cases are that example and pass at once; otherwise each is a comment to replace with code, and the vulnerable case fails until you do. Run the cases of every rule, or of one:
+
+```bash
+./target/release/codefixture-audit custom-rules test
+./target/release/codefixture-audit custom-rules test python/my_rule
+```
+
+Each failed case is named with its reason (`FAILED my_rule_python_clean (python/my_rule, clean): expected no finding, got lines [3] — clean/python/my_rule_clean.py`), then the counts. The exit code is 0 when every case passes, 1 when one fails, 2 when the registry is missing or does not hold together (a file it lists is missing, a file of `cases/` is in no case); `--json` gives the result as JSON. A rule without a case it must flag, or one it must not, is named after the counts.
+
+To tune a rule on real code, run it on a project: every line it flags is printed, without a report; a line a delivered rule also flags is printed with that rule's name. On such a line the report keeps the delivered rule's finding, and every analysis names your rule and the delivered rule it duplicates. The delivered rules come from `rules.cfpack` next to the executable, as for `scan`; `--rules <folder or pack>` reads others.
+
+```bash
+./target/release/codefixture-audit custom-rules try python/my_rule /path/to/your/project
+```
 
 ### Memory of a large project
 

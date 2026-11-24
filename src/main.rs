@@ -1435,8 +1435,77 @@ enum Command {
         #[arg(long)]
         rules: Option<PathBuf>,
     },
+    /// Your own rules (ADR-0057), kept in `~/.codefixture-audit/custom-rules`
+    /// and added to every scan.
+    CustomRules {
+        #[command(subcommand)]
+        action: CustomRulesAction,
+    },
     // `rules` (pack tools) is a private tool: the shared binary scans and
     // lists its rules with `list-rules` (the maintainer, 2026-11-14).
+}
+
+/// Subcommands of `codefixture-audit custom-rules` (ADR-0057).
+#[derive(Subcommand)]
+enum CustomRulesAction {
+    /// Creates or edits one of your rules, question by question: a text to
+    /// search, or data followed from where it enters to a dangerous call.
+    /// The rule is checked before it is written, and compared with the
+    /// delivered rules.
+    Create {
+        /// Language of the questions (`en`/`fr`/`es`/`de`).
+        #[arg(long, default_value = "en")]
+        lang: String,
+        /// Folder of your rules — default: `~/.codefixture-audit/custom-rules`.
+        #[arg(long)]
+        custom_rules_dir: Option<PathBuf>,
+        /// Delivered rules your rule is compared with — default:
+        /// `rules.cfpack` next to the executable (same as `scan --rules`).
+        #[arg(long)]
+        rules: Option<PathBuf>,
+    },
+    /// Runs the test cases of your rules (`cases/registry.json` of your
+    /// rules folder): each vulnerable case must raise its rule, each clean
+    /// case must not. Exit code 0 if all pass, 1 if one fails, 2 if the
+    /// registry is missing or invalid.
+    Test {
+        /// Rules to test, as `<language>/<rule>` (repeatable) — default:
+        /// every case of the registry.
+        rules: Vec<String>,
+        /// Folder of your rules — default: `~/.codefixture-audit/custom-rules`.
+        #[arg(long)]
+        custom_rules_dir: Option<PathBuf>,
+        /// Machine-readable result on stdout.
+        #[arg(long)]
+        json: bool,
+        /// Prints the failed cases only.
+        #[arg(long)]
+        quiet: bool,
+        /// Message language (`en`/`fr`/`es`/`de`).
+        #[arg(long, default_value = "en")]
+        lang: String,
+    },
+    /// Runs one of your rules on a project and prints every line it flags,
+    /// to tune it: no report; a line a delivered rule also flags is named
+    /// with that rule, whose finding the report keeps.
+    Try {
+        /// The rule, as `<language>/<rule>`, or its name alone when only one
+        /// language has it.
+        rule: String,
+        /// The project to run it on (its `audit.config.json` paths apply).
+        project: PathBuf,
+        /// Folder of your rules — default: `~/.codefixture-audit/custom-rules`.
+        #[arg(long)]
+        custom_rules_dir: Option<PathBuf>,
+        /// Delivered rules run beside it, to name the lines where your rule
+        /// duplicates one of them — default: `rules.cfpack` next to the
+        /// executable (same as `scan --rules`).
+        #[arg(long)]
+        rules: Option<PathBuf>,
+        /// Message language (`en`/`fr`/`es`/`de`).
+        #[arg(long, default_value = "en")]
+        lang: String,
+    },
 }
 
 impl Command {
@@ -1444,7 +1513,14 @@ impl Command {
     /// it (the panic hook).
     fn lang(&self) -> &str {
         match self {
-            Command::Scan { lang, .. } | Command::ListRules { lang, .. } => lang,
+            Command::Scan { lang, .. }
+            | Command::ListRules { lang, .. }
+            | Command::CustomRules {
+                action:
+                    CustomRulesAction::Create { lang, .. }
+                    | CustomRulesAction::Test { lang, .. }
+                    | CustomRulesAction::Try { lang, .. },
+            } => lang,
         }
     }
 }
@@ -1578,6 +1654,34 @@ fn dispatch(command: Command) -> ExitCode {
             })
         }
         Command::ListRules { lang, rules } => run_list_rules_command(&lang, rules),
+        Command::CustomRules {
+            action:
+                CustomRulesAction::Create {
+                    lang,
+                    custom_rules_dir,
+                    rules,
+                },
+        } => run_custom_rules_create_command(&lang, custom_rules_dir, rules),
+        Command::CustomRules {
+            action:
+                CustomRulesAction::Test {
+                    rules,
+                    custom_rules_dir,
+                    json,
+                    quiet,
+                    lang,
+                },
+        } => run_custom_rules_test_command(&lang, &rules, custom_rules_dir, json, quiet),
+        Command::CustomRules {
+            action:
+                CustomRulesAction::Try {
+                    rule,
+                    project,
+                    custom_rules_dir,
+                    rules,
+                    lang,
+                },
+        } => run_custom_rules_try_command(&lang, &rule, &project, custom_rules_dir, rules),
     }
 }
 
@@ -1788,6 +1892,475 @@ fn memory_lines(
         );
     }
     lines
+}
+
+/// `codefixture-audit custom-rules create` (ADR-0057, ticket #275): the
+/// shared rule wizard writing into the client's rules folder
+/// (`rules::custom::create`). It needs a terminal, as `create-rule`: without
+/// one it refuses at once (exit 2) rather than reading answers from a
+/// pipe; input closed mid-way stops it (exit 2) with nothing written. A
+/// rule declined or that does not compile is exit 1, nothing written.
+fn run_custom_rules_create_command(
+    lang: &str,
+    custom_rules_dir: Option<PathBuf>,
+    rules: Option<PathBuf>,
+) -> ExitCode {
+    use std::io::IsTerminal;
+
+    let script_locale = codefixture_audit::i18n::load_script_locale(lang);
+    let say = |key: &str| codefixture_audit::i18n::t(&script_locale, key);
+    if !std::io::stdin().is_terminal() {
+        emit_error(&say("wizard_needs_terminal"));
+        return ExitCode::from(2);
+    }
+    let Some(rules_dir) =
+        codefixture_audit::rules::custom::resolve_custom_rules_dir(false, custom_rules_dir)
+    else {
+        emit_error(&say("custom_rules_no_home"));
+        return ExitCode::from(2);
+    };
+    let pack = match resolve_rules_path(rules, &script_locale) {
+        Ok(path) => path,
+        Err(code) => return code,
+    };
+    let stdin = std::io::stdin();
+    let stdout = std::io::stdout();
+    match codefixture_audit::rules::custom::create::run_client_wizard(
+        &mut stdin.lock(),
+        &mut stdout.lock(),
+        &script_locale,
+        &rules_dir,
+        &pack,
+    ) {
+        Ok(Some(_)) => ExitCode::SUCCESS,
+        // Declined, or the rule did not compile: the wizard has said why;
+        // nothing was written.
+        Ok(None) => ExitCode::from(1),
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+            emit_error(&say("wizard_input_closed"));
+            ExitCode::from(2)
+        }
+        Err(e) => {
+            emit_error(&format!("[codefixture-audit] {e}"));
+            ExitCode::from(4)
+        }
+    }
+}
+
+/// One line per (client rule, delivered rule) pair of
+/// `ScanReport::custom_rule_duplicates` (epic #278), in the console
+/// language: the client rule flags lines the delivered rule flags, and the
+/// delivered findings are the ones kept. Shared by `scan` and
+/// `custom-rules try`.
+fn custom_duplicate_lines(
+    duplicates: &[codefixture_audit::scan::orchestrator::CustomRuleDuplicate],
+    script_locale: &serde_json::Value,
+) -> Vec<String> {
+    codefixture_audit::scan::orchestrator::custom_duplicate_pairs(duplicates)
+        .into_iter()
+        .map(|(custom, shipped, lines)| {
+            codefixture_audit::i18n::t(script_locale, "scan_custom_rule_duplicates")
+                .replace("{rule}", &custom.to_string())
+                .replace("{shipped}", &shipped.to_string())
+                .replace("{lines}", &lines.to_string())
+        })
+        .collect()
+}
+
+/// Prints the outcome of test cases, for `rules test` (the catalog's
+/// cases, private) and `custom-rules test` (the client's, ticket #276):
+/// one line per failed case with its reason in the console language,
+/// then the counts (not with `quiet` when every case passed); with
+/// `json`, one JSON object instead (`format`, `cases`, `passed`,
+/// `failed`, `rules`), with `extra` merged in. Returns the number of
+/// failed cases.
+fn print_case_outcomes(
+    outcomes: &[codefixture_audit::rules::cases::CaseOutcome],
+    json: bool,
+    quiet: bool,
+    script_locale: &serde_json::Value,
+    extra: serde_json::Map<String, serde_json::Value>,
+) -> usize {
+    use codefixture_audit::rules::cases::{Expect, Failure};
+    let say = |key: &str| codefixture_audit::i18n::t(script_locale, key);
+    let failed = outcomes.iter().filter(|o| !o.passed).count();
+    let rules: std::collections::BTreeSet<_> =
+        outcomes.iter().map(|o| (&o.language, &o.rule)).collect();
+    let mut out = std::io::stdout().lock();
+    if json {
+        let mut value = serde_json::json!({
+            "format": 1,
+            "cases": outcomes,
+            "passed": outcomes.len() - failed,
+            "failed": failed,
+            "rules": rules.len(),
+        });
+        if let Some(object) = value.as_object_mut() {
+            object.extend(extra);
+        }
+        let _ = writeln!(out, "{value}");
+        return failed;
+    }
+    for outcome in outcomes.iter().filter(|o| !o.passed) {
+        let lines = format!("{:?}", outcome.found_lines);
+        let reason = match &outcome.failure {
+            Some(Failure::NoFinding) => say("rules_test_no_finding"),
+            Some(Failure::WrongLines { expected }) => say("rules_test_wrong_lines")
+                .replace("{expected}", &format!("{expected:?}"))
+                .replace("{lines}", &lines),
+            Some(Failure::UnexpectedFinding) => {
+                say("rules_test_unexpected_finding").replace("{lines}", &lines)
+            }
+            Some(Failure::CouldNotRun { error }) => say("rules_test_could_not_run").replace(
+                "{error}",
+                &outcome
+                    .error
+                    .as_ref()
+                    .map_or_else(|| error.clone(), |e| e.render(script_locale)),
+            ),
+            None => String::new(),
+        };
+        let expect = match outcome.expect {
+            Expect::Detected => "detected",
+            Expect::Clean => "clean",
+        };
+        let _ = writeln!(
+            out,
+            "{}",
+            say("rules_test_failed_case")
+                .replace("{key}", &outcome.key)
+                .replace("{rule}", &format!("{}/{}", outcome.language, outcome.rule))
+                .replace("{expect}", expect)
+                .replace("{reason}", &reason)
+                .replace("{file}", &outcome.file)
+        );
+    }
+    if !quiet || failed > 0 {
+        let _ = writeln!(
+            out,
+            "{}",
+            say("rules_test_summary")
+                .replace("{cases}", &outcomes.len().to_string())
+                .replace("{rules}", &rules.len().to_string())
+                .replace("{passed}", &(outcomes.len() - failed).to_string())
+                .replace("{failed}", &failed.to_string())
+        );
+    }
+    failed
+}
+
+/// Reads a test case registry and checks it against the rules folder
+/// `rules_dir`, then turns the `<language>/<rule>` filters into the set
+/// `run_cases` takes: shared by `rules test` and `custom-rules test`. A
+/// registry that cannot be read, a problem in it, or a filter naming no
+/// case stops before any case runs (exit 2), every problem named in the
+/// console language: a case that cannot run must never count as passed.
+fn load_checked_registry(
+    registry_path: &Path,
+    rules_dir: &Path,
+    filters: &[String],
+    script_locale: &serde_json::Value,
+) -> Result<
+    (
+        codefixture_audit::rules::cases::Registry,
+        std::collections::BTreeSet<(String, String)>,
+    ),
+    ExitCode,
+> {
+    use codefixture_audit::rules::cases;
+    let say = |key: &str| codefixture_audit::i18n::t(script_locale, key);
+    let registry = cases::read_registry(registry_path).map_err(|error| {
+        emit_error(
+            &say("rules_test_registry_error").replace("{error}", &error.render(script_locale)),
+        );
+        ExitCode::from(2)
+    })?;
+    let problems = cases::registry_problems(&registry, rules_dir);
+    if !problems.is_empty() {
+        for problem in &problems {
+            emit_error(
+                &say("rules_test_registry_problem")
+                    .replace("{problem}", &problem.render(script_locale)),
+            );
+        }
+        return Err(ExitCode::from(2));
+    }
+    let mut only = std::collections::BTreeSet::new();
+    for filter in filters {
+        let Some((language, rule)) = filter.split_once('/') else {
+            emit_error(&say("rules_test_bad_filter").replace("{value}", filter));
+            return Err(ExitCode::from(2));
+        };
+        let pair = (language.to_string(), rule.to_string());
+        if !registry
+            .cases
+            .iter()
+            .any(|(_, c)| c.language == pair.0 && c.rule == pair.1)
+        {
+            emit_error(&say("rules_test_no_case").replace("{value}", filter));
+            return Err(ExitCode::from(2));
+        }
+        only.insert(pair);
+    }
+    Ok((registry, only))
+}
+
+/// `codefixture-audit custom-rules test` (ADR-0057, ticket #276): runs the
+/// client's test cases (`<rules folder>/cases/registry.json`, the catalog's
+/// format) through the engine, with the exit code of `rules test`: 0 when
+/// every case passes, 1 when one fails, 2 when the registry is missing or
+/// invalid. Every rule may be tested, or the `<language>/<rule>` given.
+/// A rule of the folder without a case it must flag, or one it must not,
+/// is named afterwards (Audit's `--custom-rules-match` listed them the
+/// same way); it does not change the exit code, since such a rule has no
+/// case that fails.
+fn run_custom_rules_test_command(
+    lang: &str,
+    filters: &[String],
+    custom_rules_dir: Option<PathBuf>,
+    json: bool,
+    quiet: bool,
+) -> ExitCode {
+    use codefixture_audit::rules::cases;
+    use codefixture_audit::rules::custom::skeleton::registry_path;
+    let script_locale = codefixture_audit::i18n::load_script_locale(lang);
+    let say = |key: &str| codefixture_audit::i18n::t(&script_locale, key);
+    let Some(rules_dir) =
+        codefixture_audit::rules::custom::resolve_custom_rules_dir(false, custom_rules_dir)
+    else {
+        emit_error(&say("custom_rules_no_home"));
+        return ExitCode::from(2);
+    };
+    let registry_file = registry_path(&rules_dir);
+    if !registry_file.is_file() {
+        emit_error(
+            &say("custom_rules_test_no_registry")
+                .replace("{path}", &registry_file.display().to_string()),
+        );
+        return ExitCode::from(2);
+    }
+    let (registry, only) =
+        match load_checked_registry(&registry_file, &rules_dir, filters, &script_locale) {
+            Ok(loaded) => loaded,
+            Err(code) => return code,
+        };
+    let outcomes = cases::run_cases(&registry, &rules_dir, &only);
+    // The rules lacking a case, among those tested.
+    let missing: Vec<(String, (bool, bool))> = cases::rules_without_cases(&registry, &rules_dir)
+        .into_iter()
+        .filter(|(rule, _)| only.is_empty() || only.contains(rule))
+        .map(|((language, rule), have)| (format!("{language}/{rule}"), have))
+        .collect();
+    let mut extra = serde_json::Map::new();
+    extra.insert(
+        "rules_without_cases".to_string(),
+        serde_json::Value::Array(
+            missing
+                .iter()
+                .map(|(rule, (detected, clean))| {
+                    serde_json::json!({"rule": rule, "detected": detected, "clean": clean})
+                })
+                .collect(),
+        ),
+    );
+    let failed = print_case_outcomes(&outcomes, json, quiet, &script_locale, extra);
+    if !json {
+        for (rule, (detected, clean)) in &missing {
+            let key = match (detected, clean) {
+                (false, false) => "custom_rules_test_missing_both",
+                (false, true) => "custom_rules_test_missing_detected",
+                _ => "custom_rules_test_missing_clean",
+            };
+            emit_warning(
+                &say(key)
+                    .replace("{rule}", rule)
+                    .replace("{registry}", &registry_file.display().to_string()),
+            );
+        }
+    }
+    if failed == 0 {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    }
+}
+
+/// `codefixture-audit custom-rules try <rule> <project>` (ADR-0057,
+/// ticket #276): runs one client rule on a project and prints every line
+/// it flags, to tune it (`rules::custom::try_rule`). The delivered rules
+/// of its language run beside it (epic #278): a line a delivered rule also
+/// flags is printed with that rule's name, since the report keeps the
+/// delivered finding there, then each such pair is counted as `scan` does.
+/// No report, no history. The project's `audit.config.json` paths and the
+/// machine limits of a scan apply. Exit 0 whether the rule finds something
+/// or not, 2 when the rule, the pack or the project cannot be used.
+fn run_custom_rules_try_command(
+    lang: &str,
+    spec: &str,
+    project: &Path,
+    custom_rules_dir: Option<PathBuf>,
+    rules: Option<PathBuf>,
+) -> ExitCode {
+    use codefixture_audit::rules::custom::try_rule::{RuleLookupError, find_client_rule, try_rule};
+    let script_locale = codefixture_audit::i18n::load_script_locale(lang);
+    let say = |key: &str| codefixture_audit::i18n::t(&script_locale, key);
+    let Some(rules_dir) =
+        codefixture_audit::rules::custom::resolve_custom_rules_dir(false, custom_rules_dir)
+    else {
+        emit_error(&say("custom_rules_no_home"));
+        return ExitCode::from(2);
+    };
+    if !project.is_dir() {
+        emit_error(&say("scan_invalid_path").replace("{path}", &project.display().to_string()));
+        return ExitCode::from(2);
+    }
+    let rule = match find_client_rule(&rules_dir, spec) {
+        Ok(rule) => rule,
+        Err(RuleLookupError::NotFound { available }) => {
+            emit_error(
+                &say("custom_rules_try_not_found")
+                    .replace("{value}", spec)
+                    .replace("{dir}", &rules_dir.display().to_string()),
+            );
+            emit_error(&if available.is_empty() {
+                say("custom_rules_try_none_available")
+            } else {
+                say("custom_rules_try_available").replace("{list}", &available.join(", "))
+            });
+            return ExitCode::from(2);
+        }
+        Err(RuleLookupError::Ambiguous { languages }) => {
+            emit_error(
+                &say("custom_rules_try_ambiguous")
+                    .replace("{name}", spec)
+                    .replace("{languages}", &languages.join(", ")),
+            );
+            return ExitCode::from(2);
+        }
+    };
+    let pack = match resolve_rules_path(rules, &script_locale) {
+        Ok(path) => path,
+        Err(code) => return code,
+    };
+    let resources = match start_scan_resources(None, None, lang) {
+        Ok(resources) => resources,
+        Err(code) => return code,
+    };
+    let (include_paths, exclude_patterns, _) = resolve_project_paths(project, &script_locale);
+    let started = std::time::Instant::now();
+    let base = ScanConfig {
+        root: project.to_path_buf(),
+        include_paths,
+        exclude_patterns,
+        memory_check: true,
+        memory_limit: resources.memory.bytes,
+        lang: lang.to_string(),
+        script_locale: Some(script_locale.clone()),
+        ..ScanConfig::default()
+    };
+    let report = match try_rule(&rule, Some(&pack), base) {
+        Ok(report) => report,
+        Err(error) => {
+            emit_error(
+                &say("scan_internal_error")
+                    .replace("{error}", &format!("{}: {error}", rule.file.display())),
+            );
+            return ExitCode::from(4);
+        }
+    };
+    if report.stopped_for_memory {
+        if let Some(memory) = &report.memory {
+            for line in memory_lines(memory, &resources, true, &script_locale) {
+                emit_error(&line);
+            }
+        }
+        return ExitCode::from(2);
+    }
+    // The rule's own error; one of a delivered rule is the scan's concern.
+    let rule_file_name = format!("{}.sca", rule.name);
+    if let Some((_, error)) = report
+        .rule_errors
+        .iter()
+        .find(|(path, _)| path.ends_with(&rule_file_name))
+    {
+        emit_error(
+            &say("custom_rules_try_rule_error").replace("{error}", &error.render(&script_locale)),
+        );
+        return ExitCode::from(2);
+    }
+    let id = codefixture_audit::rules::identity::RuleId::new(&rule.language, &rule.name);
+    // The findings go to standard output, as `rules test` prints its
+    // cases: they are the command's result, the errors go to stderr.
+    let println_result = |line: &str| println!("{line}");
+    let rule_name = format!("{}/{}", rule.language, rule.name);
+    println_result(
+        &say("custom_rules_try_header")
+            .replace("{rule}", &rule_name)
+            .replace("{file}", &rule.file.display().to_string())
+            .replace("{project}", &project.display().to_string()),
+    );
+    // The rule's own findings, and the lines it shares with a delivered
+    // rule, shown with the delivered finding the report keeps there.
+    let duplicates: Vec<&codefixture_audit::scan::orchestrator::CustomRuleDuplicate> = report
+        .custom_rule_duplicates
+        .iter()
+        .filter(|d| d.custom_rule == id)
+        .collect();
+    let mut findings: Vec<(&ReportFinding, Option<String>)> = report
+        .findings
+        .iter()
+        .filter(|f| f.rule_source == "json_custom" && f.rule_id() == id)
+        .map(|f| (f, None))
+        .collect();
+    for duplicate in &duplicates {
+        if let Some(kept) = report.findings.iter().find(|f| {
+            f.file == duplicate.file
+                && f.line == duplicate.line
+                && f.rule_id() == duplicate.shipped_rule
+        }) {
+            findings.push((kept, Some(duplicate.shipped_rule.to_string())));
+        }
+    }
+    findings.sort_by(|a, b| (&a.0.file, a.0.line).cmp(&(&b.0.file, b.0.line)));
+    for (finding, shipped) in &findings {
+        let code: String = finding.code.trim().chars().take(120).collect();
+        println_result(&format!("  {}:{} — {code}", finding.file, finding.line));
+        if let Some(shipped) = shipped {
+            println_result(&format!(
+                "      {}",
+                say("custom_rules_try_duplicate").replace("{shipped}", shipped)
+            ));
+            continue;
+        }
+        for flow in finding.taint_flow.iter() {
+            println_result(&format!(
+                "      {}",
+                say("custom_rules_try_source")
+                    .replace("{source}", flow.source_expr.trim())
+                    .replace("{file}", &flow.source_file)
+                    .replace("{line}", &flow.source_line.to_string())
+            ));
+        }
+    }
+    let files: std::collections::BTreeSet<&str> =
+        findings.iter().map(|(f, _)| f.file.as_str()).collect();
+    let elapsed = format_duration(started.elapsed());
+    println_result(&if findings.is_empty() {
+        say("custom_rules_try_no_finding")
+            .replace("{read}", &report.files_scanned.to_string())
+            .replace("{elapsed}", &elapsed)
+    } else {
+        say("custom_rules_try_summary")
+            .replace("{count}", &findings.len().to_string())
+            .replace("{files}", &files.len().to_string())
+            .replace("{read}", &report.files_scanned.to_string())
+            .replace("{elapsed}", &elapsed)
+    });
+    let owned: Vec<_> = duplicates.into_iter().cloned().collect();
+    for line in custom_duplicate_lines(&owned, &script_locale) {
+        println_result(&line);
+    }
+    ExitCode::SUCCESS
 }
 
 /// Display order, icon and default activation of the listed categories
@@ -2601,6 +3174,12 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
             RuleConflictKind::DuplicateInSource => emit_warning(&message),
         }
     }
+    // Epic #278: a client rule flagging lines a delivered rule flags; the
+    // delivered findings are kept. A warning: the client's rule does less
+    // than they think, and `--quiet` must not hide it.
+    for line in custom_duplicate_lines(&report.custom_rule_duplicates, &script_locale) {
+        emit_warning(&line);
+    }
     // ADR-0040: where the rules came from and how many were kept, then the
     // languages found in the project but left out of `languages`, whose
     // files got no rule — a warning, never suppressed by `--quiet`.
@@ -2714,6 +3293,7 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
                 health_thresholds: HealthThresholds::default(),
                 rule_catalog: &report.rule_catalog,
                 history: &report.history,
+                custom_rule_duplicates: &report.custom_rule_duplicates,
             };
             let audit_params_info = codefixture_audit::report::audit_params::AuditParamsInfo {
                 languages: report.languages.clone(),

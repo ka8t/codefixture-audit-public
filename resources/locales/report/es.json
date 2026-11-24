@@ -877,5 +877,6 @@
   "finding_file_scope": "Esta regla se refiere al archivo completo, no a una de sus líneas.",
   "fix_none_file": "Ninguna línea que corregir: se trata del archivo completo. Aplique la solución de arriba; el ejemplo genérico muestra la idea.",
   "fix_note_button_submit": "Si este botón envía un formulario, use type=\"submit\".",
-  "fix_note_th_row": "Si esta celda encabeza una fila, use scope=\"row\"."
+  "fix_note_th_row": "Si esta celda encabeza una fila, use scope=\"row\".",
+  "custom_rules_duplicate": "Duplica la regla entregada {shipped} en {lines} línea(s): allí se conservan los hallazgos de la regla entregada."
 }

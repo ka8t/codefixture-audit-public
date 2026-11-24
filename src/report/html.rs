@@ -72,6 +72,10 @@ pub struct ReportContext<'a> {
     /// points of the trend chart (`ScanReport::history`). Empty without
     /// a history directory.
     pub history: &'a [HistoryPoint],
+    /// The client rule findings the scan dropped because a delivered rule
+    /// flags the same line (`ScanReport::custom_rule_duplicates`, epic
+    /// #278): the "Custom rules" section names each pair.
+    pub custom_rule_duplicates: &'a [crate::scan::orchestrator::CustomRuleDuplicate],
 }
 
 fn category_severity_matrix(
@@ -523,12 +527,18 @@ fn render_glossary_html(report_locale: &Value) -> (String, String) {
 ///   (2026-11-15);
 /// - findings are counted per rule identity (language and name), not per
 ///   name: two client rules of one name in two languages are two cards
-///   (CONTEXT.md, "Rule identity").
+///   (CONTEXT.md, "Rule identity");
+/// - a card names each delivered rule the client rule duplicates, with
+///   the number of lines, whose findings the report keeps there (epic
+///   #278, `drop_custom_duplicates`); Audit merged such findings without
+///   a word.
 fn render_custom_rules_section(
     report_locale: &Value,
     findings: &[ReportFinding],
     rule_catalog: &RuleCatalog,
+    duplicates: &[crate::scan::orchestrator::CustomRuleDuplicate],
 ) -> String {
+    let duplicate_pairs = crate::scan::orchestrator::custom_duplicate_pairs(duplicates);
     let custom_rules: Vec<(&crate::rules::identity::RuleId, &Value)> = rule_catalog
         .iter()
         .filter(|(_, rule)| is_client_rule(rule))
@@ -575,11 +585,21 @@ fn render_custom_rules_section(
                 };
                 let text = |key: &str| rule.get(key).and_then(|v| v.as_str()).unwrap_or("");
                 let risk = crate::scan::orchestrator::extract_i18n_block(rule, "risk", &lang);
-                let description = if risk.is_empty() {
+                let mut description = if risk.is_empty() {
                     String::new()
                 } else {
                     format!(r#"<p class="custom-rule-desc">{}</p>"#, escape(&risk))
                 };
+                for (_, shipped, lines) in duplicate_pairs.iter().filter(|(c, _, _)| c == *id) {
+                    description.push_str(&format!(
+                        r#"<p class="custom-rule-desc custom-rule-duplicate">{}</p>"#,
+                        escape(
+                            &t(report_locale, "custom_rules_duplicate")
+                                .replace("{shipped}", &shipped.to_string())
+                                .replace("{lines}", &lines.to_string())
+                        )
+                    ));
+                }
                 format!(
                     r#"<div class="custom-rule-card"><div class="custom-rule-header"><code class="custom-rule-id">{}</code><span class="sev-tag sev-{}">{}</span><span class="custom-rule-lang">{}</span><span class="custom-rule-cat">{}</span><span class="custom-rule-findings">{}</span></div>{}</div>"#,
                     escape(text("id")),
@@ -1052,7 +1072,12 @@ pub fn generate_html(
     html = html.replace("{{sections_html}}", &sections_html);
     html = html.replace(
         "{{custom_rules_html}}",
-        &render_custom_rules_section(&report_locale, findings, ctx.rule_catalog),
+        &render_custom_rules_section(
+            &report_locale,
+            findings,
+            ctx.rule_catalog,
+            ctx.custom_rule_duplicates,
+        ),
     );
 
     // --- unported sections: tests/fixtures/dependencies/database/SLA/git-blame
@@ -1160,6 +1185,7 @@ mod tests {
             health_thresholds: HealthThresholds::default(),
             rule_catalog,
             history: &[],
+            custom_rule_duplicates: &[],
         }
     }
 
@@ -1223,7 +1249,7 @@ mod tests {
     fn test_custom_rules_section_without_client_rule_is_empty() {
         let locale = crate::i18n::load_report_locale("en");
         let catalog = catalog_of(vec![catalog_rule("eval_usage", "HIGH", false)]);
-        let html = render_custom_rules_section(&locale, &[], &catalog);
+        let html = render_custom_rules_section(&locale, &[], &catalog, &[]);
         assert!(html.contains("custom-rules-empty"), "{html}");
         assert!(html.contains(r#"<span class="badge badge-neutral">0</span>"#));
         assert!(!html.contains("custom-rule-card"));
@@ -1249,13 +1275,30 @@ mod tests {
         );
         hit.rule_source = "json_custom".to_string();
         let catalog_hit = finding("security", "HIGH", "eval_usage", "Eval", "app.py");
-        let html = render_custom_rules_section(&locale, &[hit.clone(), hit, catalog_hit], &catalog);
+        // Epic #278: house_secret duplicated the delivered eval_usage on
+        // two lines, whose findings the scan dropped.
+        let duplicate = |line| crate::scan::orchestrator::CustomRuleDuplicate {
+            custom_rule: crate::rules::identity::RuleId::new("python", "house_secret"),
+            shipped_rule: crate::rules::identity::RuleId::new("python", "eval_usage"),
+            file: "app.py".to_string(),
+            line,
+        };
+        let html = render_custom_rules_section(
+            &locale,
+            &[hit.clone(), hit, catalog_hit],
+            &catalog,
+            &[duplicate(3), duplicate(9)],
+        );
+        assert!(
+            html.contains("Duplicates the delivered rule python/eval_usage on 2 line(s)"),
+            "{html}"
+        );
         assert!(
             html.contains(r#"<span class="badge badge-info">2</span>"#),
             "{html}"
         );
         assert_eq!(html.matches("custom-rule-card").count(), 2);
-        assert!(!html.contains("eval_usage"));
+        assert!(!html.contains("<code class=\"custom-rule-id\">eval_usage"));
         assert!(html.contains("house_api_call"));
         assert!(html.contains(r#"<span class="badge badge-medium">2</span>"#));
         assert!(html.contains("No findings on this project"));
@@ -1468,6 +1511,7 @@ mod tests {
         ];
         let context = ReportContext {
             history: &history,
+            custom_rule_duplicates: &[],
             ..ctx(&catalog)
         };
         let html = generate_html(&[], &context, None, None, None);

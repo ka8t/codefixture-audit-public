@@ -521,6 +521,7 @@ mod tests {
             health_thresholds: HealthThresholds::default(),
             rule_catalog,
             history: &[],
+            custom_rule_duplicates: &[],
         }
     }
 
