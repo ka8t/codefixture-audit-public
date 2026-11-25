@@ -496,7 +496,7 @@ Le moteur et `rules.cfpack` sont tout ce dont une analyse a besoin : copiez-les 
 
 ### Dans une chaîne CI/CD
 
-Compilez le moteur une fois, sur une machine qui a le même processeur et le même système que le serveur qui exécute votre CI (sous Linux, avec une bibliothèque C, la glibc, pas plus récente que celle du serveur), puis copiez ensemble `codefixture-audit` et `rules.cfpack` sur ce serveur. Copiez aussi vos propres règles, et désignez leur dossier pour toutes les analyses du serveur avec `CODEFIXTURE_AUDIT_CUSTOM_RULES` : chaque analyse dit, sur sa ligne `Your rules:`, lesquelles elle a lues. Gardez `audit.config.json` dans le dépôt analysé ; sans terminal, rien n'est demandé.
+Compilez le moteur une fois, sur une machine qui a le même processeur et le même système que le serveur qui exécute votre CI (sous Linux, avec une bibliothèque C, la glibc, pas plus récente que celle du serveur), puis copiez ensemble `codefixture-audit` et `rules.cfpack` sur ce serveur. Copiez aussi vos propres règles, et désignez leur dossier pour toutes les analyses du serveur avec `CODEFIXTURE_AUDIT_CUSTOM_RULES` : chaque analyse dit, sur sa ligne `Your rules:`, lesquelles elle a lues. Gardez `audit.config.json` dans le dépôt analysé ; sans terminal, rien n'est demandé. Vérifié le 2026-11-25 sur Linux x86_64 et Linux Arm64 (Ubuntu 24.04, glibc 2.39) : le moteur et son pack, copiés seuls dans un autre dossier et lancés avec un `HOME` vide, ont rendu 1 sur des constats bloquants, puis avec `--fail-on-new --baseline` 0 sans changement et 1 après l'ajout d'une ligne vulnérable, et 2 sans `--baseline`.
 
 Un job lance alors, par exemple :
 
@@ -516,6 +516,112 @@ codefixture-audit scan . --quiet --format sarif --output result.sarif \
 - **Le SARIF pour une plateforme de code.** Chaque constat porte une empreinte, pour qu'une plateforme ne rouvre pas un constat dont la ligne a bougé, et chaque dépendance vulnérable s'affiche avec sa propre gravité. Quand le fichier dépasse une limite de GitHub code scanning (10 Mo compressés, 25 000 résultats dont GitHub garde 5 000, 20 étiquettes par règle…), l'analyse le dit dans un avertissement, et précise si GitHub refuserait le fichier ou n'en garderait qu'une partie. L'action `upload-sarif` de GitHub calcule une empreinte à elle à partir du code source et écrit un avertissement par constat (`found existing inconsistent fingerprint value`) : elle garde l'empreinte du moteur, qui suit un constat exactement, y compris quand le fichier est envoyé par l'API REST, sans l'action.
 - **Chiffres et journaux.** `--metrics-output <fichier>` écrit les chiffres de l'analyse et son code de sortie en JSON ; `--log-format json` écrit chaque ligne de la console comme un objet JSON.
 - **SBOM.** `--sbom-output <fichier>` écrit le SBOM CycloneDX sous un nom fixe, pour les artefacts du job ou un outil comme Dependency-Track.
+- **Copiez aussi** `brand.json` à côté du moteur si vous personnalisez le rapport. **Gardez le cache** de `audit-reports/audit-datas/cache/` avec le cache de votre CI (`actions/cache`, `cache:` dans GitLab) pour accélérer les analyses suivantes ; sans lui, chaque analyse est complète.
+- **Windows** n'a pas encore été testé comme serveur de CI.
+
+#### GitHub Actions sur votre propre runner
+
+Ses étapes ont été vérifiées le 2026-11-25 sur un dépôt de test public, sur un runner hébergé par GitHub qui compilait le moteur dans le job : l'analyse a tourné, GitHub code scanning a accepté le fichier SARIF, et le job a échoué avec le code de sortie 1 sur des constats bloquants. La forme auto-hébergée ci-dessous n'a pas été exécutée telle quelle. Elle tourne sur un runner auto-hébergé, le serveur où vous avez copié le moteur ; il ne bloque une pull request que sur les constats qu'elle ajoute par rapport à la dernière analyse de la branche principale, gardée sur le serveur. Avant le premier passage, créez cette référence une fois : lancez le moteur sur la branche principale et copiez son `SCA-DATA-<date>.json` au chemin de `BASELINE`.
+
+```yaml
+name: codefixture-audit
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+  security-events: write
+jobs:
+  scan:
+    runs-on: self-hosted
+    env:
+      ENGINE: /opt/codefixture-audit/codefixture-audit
+      BASELINE: /var/lib/codefixture-audit/main.json
+    steps:
+      - uses: actions/checkout@v7
+      - name: Analyse
+        id: scan
+        run: |
+          set +e
+          "$ENGINE" scan . --quiet --format sarif --output result.sarif \
+            --sbom-output sbom.json --fail-on-new --baseline "$BASELINE"
+          echo "code=$?" >> "$GITHUB_OUTPUT"
+      - name: Keep the main branch's analysis as the next baseline
+        if: github.ref == 'refs/heads/main' && steps.scan.outputs.code == '0'
+        run: cp audit-reports/audit-datas/SCA-DATA-*.json "$BASELINE"
+      - uses: github/codeql-action/upload-sarif@v4
+        if: always()
+        with:
+          sarif_file: result.sarif
+          category: codefixture-audit
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: codefixture-audit
+          path: |
+            result.sarif
+            sbom.json
+            audit-reports/
+      - name: Fail on blocking findings
+        if: steps.scan.outputs.code != '0'
+        run: exit "${{ steps.scan.outputs.code }}"
+```
+
+Sur un runner hébergé par GitHub, rien ne persiste d'un job à l'autre : compilez le moteur dans le job (`actions/checkout` du dépôt du moteur avec `path: engine`, puis `cargo build --release --locked --manifest-path engine/Cargo.toml`, environ 2 minutes), ajoutez `--exclude engine/` à l'analyse, et gardez la référence comme artefact des exécutions de la branche principale.
+
+Le graphe de dépendances de GitHub lit lui-même vos manifestes et vos fichiers de verrouillage, sauf les dépendances transitives de Python. Pour les ajouter, le SBOM peut être envoyé à l'[API de soumission des dépendances](https://docs.github.com/en/code-security/supply-chain-security/understanding-your-software-supply-chain/using-the-dependency-submission-api) avec la « SBOM Dependency Submission Action » que cite cette page, une action tierce que GitHub ne maintient pas (non testé ici).
+
+#### GitLab CI
+
+Pas encore testé. Tant que le moteur n'écrit pas le format de rapport propre à GitLab (ticket #295), gardez le fichier SARIF, le SBOM et le rapport HTML comme artefacts du job, sur un runner où le moteur a été copié :
+
+```yaml
+codefixture-audit:
+  tags: [codefixture-audit]
+  script:
+    - /opt/codefixture-audit/codefixture-audit scan . --quiet --format sarif --output result.sarif
+        --sbom-output sbom.json --fail-on-new --baseline /var/lib/codefixture-audit/main.json
+  artifacts:
+    when: always
+    paths: [result.sarif, sbom.json, audit-reports/]
+    reports:
+      cyclonedx: sbom.json
+```
+
+#### Jenkins
+
+Pas encore testé. Sur un agent où le moteur a été copié :
+
+```groovy
+pipeline {
+  agent { label 'codefixture-audit' }
+  environment {
+    ENGINE = '/opt/codefixture-audit/codefixture-audit'
+    BASELINE = '/var/lib/codefixture-audit/main.json'
+  }
+  stages {
+    stage('codefixture-audit') {
+      steps {
+        sh '"$ENGINE" scan . --quiet --format sarif --output result.sarif --sbom-output sbom.json --fail-on-new --baseline "$BASELINE"'
+      }
+      post {
+        always {
+          archiveArtifacts artifacts: 'result.sarif, sbom.json, audit-reports/**', allowEmptyArchive: true
+        }
+        success {
+          script {
+            if (env.BRANCH_NAME == 'main') {
+              sh 'cp audit-reports/audit-datas/SCA-DATA-*.json "$BASELINE"'
+            }
+          }
+        }
+      }
+    }
+  }
+}
+```
+
 
 ### En cas de problème
 

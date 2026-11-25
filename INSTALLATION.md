@@ -496,7 +496,7 @@ The engine and `rules.cfpack` are all an analysis needs: copy them together to a
 
 ### In a CI/CD pipeline
 
-Build the engine once, on a machine with the same processor and system as the server that runs your CI (on Linux, with a C library, glibc, no newer than the server's), then copy `codefixture-audit` and `rules.cfpack` together onto that server. Copy your own rules too, and name their folder for every analysis of the server with `CODEFIXTURE_AUDIT_CUSTOM_RULES`: each analysis says on its `Your rules:` line which of them it read. Keep `audit.config.json` in the analysed repository; without a terminal, nothing is asked.
+Build the engine once, on a machine with the same processor and system as the server that runs your CI (on Linux, with a C library, glibc, no newer than the server's), then copy `codefixture-audit` and `rules.cfpack` together onto that server. Copy your own rules too, and name their folder for every analysis of the server with `CODEFIXTURE_AUDIT_CUSTOM_RULES`: each analysis says on its `Your rules:` line which of them it read. Keep `audit.config.json` in the analysed repository; without a terminal, nothing is asked. Checked on 2026-11-25 on Linux x86_64 and Linux Arm64 (Ubuntu 24.04, glibc 2.39): the engine and its pack, copied alone to another folder and run with an empty `HOME`, exited 1 on blocking findings, then with `--fail-on-new --baseline` 0 when nothing changed and 1 after a vulnerable line was added, and 2 without `--baseline`.
 
 A job then runs, for example:
 
@@ -516,6 +516,112 @@ codefixture-audit scan . --quiet --format sarif --output result.sarif \
 - **SARIF for a code platform.** Each finding carries a fingerprint, so that a platform does not reopen a finding whose line moved, and each vulnerable dependency shows with its own severity. When the file goes beyond a limit of GitHub code scanning (10 MB compressed, 25,000 results of which GitHub keeps 5,000, 20 tags per rule…), the analysis says so in a warning, and whether GitHub would reject the file or keep part of it. GitHub's `upload-sarif` action computes a fingerprint of its own from the source and writes one warning per finding (`found existing inconsistent fingerprint value`): it keeps the engine's fingerprint, which follows a finding exactly, also when the file is sent by the REST API without the action.
 - **Numbers and logs.** `--metrics-output <file>` writes the analysis's numbers and its exit code as JSON; `--log-format json` writes each console line as a JSON object.
 - **SBOM.** `--sbom-output <file>` writes the CycloneDX SBOM under a fixed name, for the job's artifacts or a tool such as Dependency-Track.
+- **Also copy** `brand.json` next to the engine if you customise the report. **Keep the cache** of `audit-reports/audit-datas/cache/` with your CI's cache (`actions/cache`, `cache:` in GitLab) to speed up the next analyses; without it, each analysis is a full one.
+- **Windows** has not been tested yet as a CI server.
+
+#### GitHub Actions on your own runner
+
+Its steps were checked on 2026-11-25 on a public test repository, on a runner hosted by GitHub that built the engine in the job: the analysis ran, GitHub code scanning accepted the SARIF file, and the job failed with exit code 1 on blocking findings. The self-hosted form below has not been run as such. It runs on a self-hosted runner, the server where you copied the engine; it blocks a pull request only on the findings it adds against the main branch's last analysis, kept on the server. Before the first run, create that baseline once: run the engine on the main branch and copy its `SCA-DATA-<date>.json` to the path of `BASELINE`.
+
+```yaml
+name: codefixture-audit
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+  security-events: write
+jobs:
+  scan:
+    runs-on: self-hosted
+    env:
+      ENGINE: /opt/codefixture-audit/codefixture-audit
+      BASELINE: /var/lib/codefixture-audit/main.json
+    steps:
+      - uses: actions/checkout@v7
+      - name: Analyse
+        id: scan
+        run: |
+          set +e
+          "$ENGINE" scan . --quiet --format sarif --output result.sarif \
+            --sbom-output sbom.json --fail-on-new --baseline "$BASELINE"
+          echo "code=$?" >> "$GITHUB_OUTPUT"
+      - name: Keep the main branch's analysis as the next baseline
+        if: github.ref == 'refs/heads/main' && steps.scan.outputs.code == '0'
+        run: cp audit-reports/audit-datas/SCA-DATA-*.json "$BASELINE"
+      - uses: github/codeql-action/upload-sarif@v4
+        if: always()
+        with:
+          sarif_file: result.sarif
+          category: codefixture-audit
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: codefixture-audit
+          path: |
+            result.sarif
+            sbom.json
+            audit-reports/
+      - name: Fail on blocking findings
+        if: steps.scan.outputs.code != '0'
+        run: exit "${{ steps.scan.outputs.code }}"
+```
+
+On a runner hosted by GitHub, nothing persists between jobs: build the engine in the job (`actions/checkout` of the engine's repository with `path: engine`, then `cargo build --release --locked --manifest-path engine/Cargo.toml`, about 2 minutes), add `--exclude engine/` to the analysis, and keep the baseline as an artifact of the main branch's runs.
+
+GitHub's dependency graph reads your manifests and lockfiles by itself, except the transitive dependencies of Python. To add them, the SBOM can be sent to the [dependency submission API](https://docs.github.com/en/code-security/supply-chain-security/understanding-your-software-supply-chain/using-the-dependency-submission-api) with the "SBOM Dependency Submission Action" that page lists, a third-party action GitHub does not maintain (not tested here).
+
+#### GitLab CI
+
+Not tested yet. Until the engine writes GitLab's own report format (ticket #295), keep the SARIF file, the SBOM and the HTML report as artifacts of the job, on a runner where the engine was copied:
+
+```yaml
+codefixture-audit:
+  tags: [codefixture-audit]
+  script:
+    - /opt/codefixture-audit/codefixture-audit scan . --quiet --format sarif --output result.sarif
+        --sbom-output sbom.json --fail-on-new --baseline /var/lib/codefixture-audit/main.json
+  artifacts:
+    when: always
+    paths: [result.sarif, sbom.json, audit-reports/]
+    reports:
+      cyclonedx: sbom.json
+```
+
+#### Jenkins
+
+Not tested yet. On an agent where the engine was copied:
+
+```groovy
+pipeline {
+  agent { label 'codefixture-audit' }
+  environment {
+    ENGINE = '/opt/codefixture-audit/codefixture-audit'
+    BASELINE = '/var/lib/codefixture-audit/main.json'
+  }
+  stages {
+    stage('codefixture-audit') {
+      steps {
+        sh '"$ENGINE" scan . --quiet --format sarif --output result.sarif --sbom-output sbom.json --fail-on-new --baseline "$BASELINE"'
+      }
+      post {
+        always {
+          archiveArtifacts artifacts: 'result.sarif, sbom.json, audit-reports/**', allowEmptyArchive: true
+        }
+        success {
+          script {
+            if (env.BRANCH_NAME == 'main') {
+              sh 'cp audit-reports/audit-datas/SCA-DATA-*.json "$BASELINE"'
+            }
+          }
+        }
+      }
+    }
+  }
+}
+```
+
 
 ### When something goes wrong
 
