@@ -575,7 +575,7 @@ GitHub's dependency graph reads your manifests and lockfiles by itself, except t
 
 #### GitLab CI
 
-Not tested on a GitLab instance yet. `--format gitlab-sast` writes GitLab's own SAST report (schema 15.2.5), with every finding, vulnerable dependencies included; the SBOM goes to GitLab as a `cyclonedx` report. Uploading the report works in every GitLab tier; the merge request widget, the vulnerability report and the dependency list that show it are Ultimate features. GitLab ingests a report only from a job that succeeds: the first job below keeps the engine's exit code and fails only on an error (2 or 4), a second job fails on blocking findings.
+Checked on 2026-11-25 on gitlab.com, Free tier, with the two jobs below and the engine built in the job: the first job succeeded and GitLab registered its files as `sast` and `cyclonedx` reports, the second failed with exit code 1 on blocking findings. The Free tier does not show the findings, so their ingestion could not be seen there. `--format gitlab-sast` writes GitLab's own SAST report (schema 15.2.5), with every finding, vulnerable dependencies included; the SBOM goes to GitLab as a `cyclonedx` report. Uploading the report works in every GitLab tier; the merge request widget, the vulnerability report and the dependency list that show it are Ultimate features. GitLab ingests a report only from a job that succeeds: the first job below keeps the engine's exit code and fails only on an error (2 or 4), a second job fails on blocking findings.
 
 ```yaml
 stages: [test, gate]

@@ -575,7 +575,7 @@ Le graphe de dépendances de GitHub lit lui-même vos manifestes et vos fichiers
 
 #### GitLab CI
 
-Pas encore testé sur une instance GitLab. `--format gitlab-sast` écrit le rapport SAST propre à GitLab (schéma 15.2.5), avec tous les constats, dépendances vulnérables comprises ; le SBOM part vers GitLab comme rapport `cyclonedx`. L'envoi du rapport fonctionne dans toutes les offres de GitLab ; le widget de merge request, le rapport des vulnérabilités et la liste des dépendances qui l'affichent sont réservés à l'offre Ultimate. GitLab n'ingère un rapport que d'un job qui réussit : le premier job ci-dessous garde le code de sortie du moteur et n'échoue que sur une erreur (2 ou 4), un second job échoue sur les constats bloquants.
+Vérifié le 2026-11-25 sur gitlab.com, en offre gratuite, avec les deux jobs ci-dessous et le moteur compilé dans le job : le premier job a réussi et GitLab a enregistré ses fichiers comme rapports `sast` et `cyclonedx`, le second a échoué avec le code de sortie 1 sur les constats bloquants. L'offre gratuite n'affiche pas les constats : leur ingestion n'a pas pu y être observée. `--format gitlab-sast` écrit le rapport SAST propre à GitLab (schéma 15.2.5), avec tous les constats, dépendances vulnérables comprises ; le SBOM part vers GitLab comme rapport `cyclonedx`. L'envoi du rapport fonctionne dans toutes les offres de GitLab ; le widget de merge request, le rapport des vulnérabilités et la liste des dépendances qui l'affichent sont réservés à l'offre Ultimate. GitLab n'ingère un rapport que d'un job qui réussit : le premier job ci-dessous garde le code de sortie du moteur et n'échoue que sur une erreur (2 ou 4), un second job échoue sur les constats bloquants.
 
 ```yaml
 stages: [test, gate]
