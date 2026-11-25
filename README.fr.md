@@ -72,7 +72,7 @@ flowchart TD
 
 | Limite | Ce que cela signifie pour vous |
 |---|---|
-| **Testé sur macOS et Linux** | Linux a été vérifié sur Ubuntu 24.04. Les commandes Windows sont données mais n'ont pas encore été exécutées : merci de signaler tout problème. |
+| **Testé sur macOS et Linux** | Linux a été vérifié sur Ubuntu 24.04. Sous Windows, la compilation et des analyses lancées depuis PowerShell ont été vérifiées sur un runner Windows hébergé par GitHub (le 2026-11-25) ; les commandes d'installation n'ont pas encore été exécutées : merci de signaler tout problème. |
 | **La première analyse demande deux lancements** | Le premier lancement pose 2 ou 3 questions (appuyez sur Entrée pour garder les valeurs par défaut), écrit `audit.config.json`, puis s'arrête. Le second lancement produit le rapport. |
 | **Les règles de démonstration donnent un rapport maigre** | 38 règles représentent une petite partie du catalogue. La plupart des constats peuvent venir de quelques règles, comme le JavaScript écrit dans les attributs HTML. |
 | **Les règles de démonstration connaissent peu de vulnérabilités publiées** | Vos dépendances sont comparées à 21 vulnérabilités bien connues (Log4Shell, Spring4Shell, lodash, lxml…). Une dépendance non signalée peut quand même être touchée par une autre. |

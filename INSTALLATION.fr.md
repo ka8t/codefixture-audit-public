@@ -37,7 +37,7 @@ flowchart TD
 | [10](#étape-10--corriger-et-analyser-de-nouveau) | Corriger et analyser de nouveau | — |
 | [11](#étape-11--mettre-à-jour-le-moteur) | Mettre à jour le moteur | 2 min |
 
-Lisez d'abord les [Limites connues](#limites-connues) : le moteur est testé sur macOS et Linux, pas encore sur Windows, et la première analyse d'un projet demande deux lancements.
+Lisez d'abord les [Limites connues](#limites-connues) : le moteur est testé sur macOS et Linux, et sous Windows seulement sa compilation et ses analyses, et la première analyse d'un projet demande deux lancements.
 
 Les commandes sont données pour macOS et Linux (Terminal) et pour Windows (PowerShell). Remplacez `/path/to/your/project` (ou `C:\path\to\your\project`) par le dossier du code que vous voulez analyser.
 
@@ -45,7 +45,7 @@ Les commandes sont données pour macOS et Linux (Terminal) et pour Windows (Powe
 
 Voici les cas où le moteur peut ne pas se comporter comme vous l'attendez, avec ce qu'il faut faire.
 
-- **Pas encore testé sous Windows.** Chaque étape de ce guide a été exécutée sur macOS et sur Linux (Ubuntu 24.04). Les commandes Windows sont données, mais vous serez peut-être le premier à les exécuter. Si une étape échoue, notez la commande et le message complet qu'elle a affiché, et envoyez-les à CodeFixture.
+- **Testé en partie sous Windows.** Chaque étape de ce guide a été exécutée sur macOS et sur Linux (Ubuntu 24.04). Sous Windows, la compilation (étape 4) et des analyses lancées depuis PowerShell, contrôle de la mémoire compris, ont été vérifiées le 2026-11-25 sur un runner Windows hébergé par GitHub, où Rust et les outils de compilation étaient déjà installés : l'installation par `winget` (étape 2) n'a pas été exécutée, et vous serez peut-être le premier à la faire. Si une étape échoue, notez la commande et le message complet qu'elle a affiché, et envoyez-les à CodeFixture.
 - **La première analyse demande deux lancements.** La première fois que vous analysez un projet, le moteur demande quoi analyser (étape 7), écrit `audit.config.json` et s'arrête sans rapport. C'est normal : relancez la même commande. Dans un script ou une tâche de CI, aucune question n'est posée et le premier lancement produit le rapport.
 - **Les règles de démonstration donnent un rapport maigre.** Les 38 règles de démonstration de ce dépôt couvrent une petite partie de ce que le moteur détecte. Sur un vrai projet, leurs constats peuvent venir surtout de quelques règles, comme le JavaScript écrit dans les attributs HTML (`onclick=…`). Le catalogue complet (étape 6) donne le rapport complet.
 - **Le pack de démonstration connaît peu de vulnérabilités publiées.** Vos dépendances sont comparées aux vulnérabilités publiées que porte le pack de règles : 21 vulnérabilités bien connues dans le pack de ce dépôt (Log4Shell, Spring4Shell, lodash, lxml…). Une dépendance que le rapport ne nomme pas peut quand même être touchée par une autre. Le catalogue complet (étape 6) les compare à toutes les vulnérabilités publiées des cinq écosystèmes, à la date du dernier téléchargement de ses données.
@@ -521,7 +521,7 @@ codefixture-audit scan . --quiet --format sarif --output result.sarif \
 - **Chiffres et journaux.** `--metrics-output <fichier>` écrit les chiffres de l'analyse et son code de sortie en JSON ; `--log-format json` écrit chaque ligne de la console comme un objet JSON.
 - **SBOM.** `--sbom-output <fichier>` écrit le SBOM CycloneDX sous un nom fixe, pour les artefacts du job ou un outil comme Dependency-Track.
 - **Copiez aussi** `brand.json` à côté du moteur si vous personnalisez le rapport. **Gardez le cache** de `audit-reports/audit-datas/cache/` avec le cache de votre CI (`actions/cache`, `cache:` dans GitLab) pour accélérer les analyses suivantes ; sans lui, chaque analyse est complète.
-- **Windows** n'a pas encore été testé comme serveur de CI.
+- **Windows** n'a pas encore été testé comme serveur de CI avec les jobs ci-dessous ; un runner Windows hébergé par GitHub a compilé le moteur et lancé des analyses le 2026-11-25.
 
 #### GitHub Actions sur votre propre runner
 

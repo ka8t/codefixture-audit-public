@@ -37,7 +37,7 @@ flowchart TD
 | [10](#step-10-fix-and-analyse-again) | Fix and analyse again | — |
 | [11](#step-11-update-the-engine) | Update the engine | 2 min |
 
-Read [Known limits](#known-limits) first: the engine is tested on macOS and Linux, not yet on Windows, and the first analysis of a project takes two runs.
+Read [Known limits](#known-limits) first: the engine is tested on macOS and Linux, and on Windows only its build and its analyses, and the first analysis of a project takes two runs.
 
 Commands are given for macOS and Linux (Terminal) and Windows (PowerShell). Replace `/path/to/your/project` (or `C:\path\to\your\project`) with the folder of the code you want to analyse.
 
@@ -45,7 +45,7 @@ Commands are given for macOS and Linux (Terminal) and Windows (PowerShell). Repl
 
 These are the cases where the engine may not behave as you expect, with what to do.
 
-- **Not yet tested on Windows.** Every step of this guide was run on macOS, and on Linux (Ubuntu 24.04). The Windows commands are given, but you may be the first to run them. If a step fails, note the command and the full message it printed, and send them to CodeFixture.
+- **Partly tested on Windows.** Every step of this guide was run on macOS, and on Linux (Ubuntu 24.04). On Windows, the build (step 4) and analyses run from PowerShell, memory check included, were checked on 2026-11-25 on a Windows runner hosted by GitHub, where Rust and the build tools were already installed: the installation with `winget` (step 2) has not been run, and you may be the first to run it. If a step fails, note the command and the full message it printed, and send them to CodeFixture.
 - **The first analysis takes two runs.** The first time you analyse a project, the engine asks what to analyse (step 7), writes `audit.config.json`, and stops without a report. This is expected: run the same command again. In a script or a CI job there are no questions and the first run produces the report.
 - **The demo rules give a thin report.** The 38 demonstration rules of this repository cover a small part of what the engine detects. On a real project their findings may come mostly from a few rules, such as JavaScript written in HTML attributes (`onclick=…`). The full catalog (step 6) gives the complete report.
 - **The demo pack knows few published vulnerabilities.** Your dependencies are compared with the published vulnerabilities the rule pack carries: 21 well-known ones in this repository's pack (Log4Shell, Spring4Shell, lodash, lxml…). A dependency the report does not name may still be affected by another one. The full catalog (step 6) checks them against every published vulnerability of the five ecosystems, as of the day its data was last downloaded.
@@ -521,7 +521,7 @@ codefixture-audit scan . --quiet --format sarif --output result.sarif \
 - **Numbers and logs.** `--metrics-output <file>` writes the analysis's numbers and its exit code as JSON; `--log-format json` writes each console line as a JSON object.
 - **SBOM.** `--sbom-output <file>` writes the CycloneDX SBOM under a fixed name, for the job's artifacts or a tool such as Dependency-Track.
 - **Also copy** `brand.json` next to the engine if you customise the report. **Keep the cache** of `audit-reports/audit-datas/cache/` with your CI's cache (`actions/cache`, `cache:` in GitLab) to speed up the next analyses; without it, each analysis is a full one.
-- **Windows** has not been tested yet as a CI server.
+- **Windows** has not been tested yet as a CI server with the jobs below; a Windows runner hosted by GitHub built the engine and ran analyses on 2026-11-25.
 
 #### GitHub Actions on your own runner
 

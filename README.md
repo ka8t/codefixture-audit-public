@@ -72,7 +72,7 @@ flowchart TD
 
 | Limit | What it means for you |
 |---|---|
-| **Tested on macOS and Linux** | Linux was checked on Ubuntu 24.04. The Windows commands are given but have not been run yet: please report any problem. |
+| **Tested on macOS and Linux** | Linux was checked on Ubuntu 24.04. On Windows, the build and analyses run from PowerShell were checked on a Windows runner hosted by GitHub (2026-11-25); the installation commands have not been run yet: please report any problem. |
 | **The first analysis takes two runs** | The first run asks 2 or 3 questions (press Enter to keep the defaults), writes `audit.config.json`, then stops. The second run produces the report. |
 | **The demo rules give a thin report** | 38 rules are a small part of the catalog. Most findings may come from a few rules, such as JavaScript written in HTML attributes. |
 | **The demo rules know few published vulnerabilities** | Your dependencies are compared with 21 well-known vulnerabilities (Log4Shell, Spring4Shell, lodash, lxml…). A dependency not reported may still be affected by another one. |
