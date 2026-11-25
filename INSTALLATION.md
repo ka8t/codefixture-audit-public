@@ -249,7 +249,10 @@ The terminal shows the progress, what was loaded and a summary. Here, the analys
 [codefixture-audit] Report generated: /path/to/your/project/audit-reports/SCA-REPORT-2026-11-20-13-17.html
 [codefixture-audit] Scan data: /path/to/your/project/audit-reports/audit-datas/SCA-DATA-2026-11-20-13-17.json
 [codefixture-audit] 871 file(s) scanned, 91,999 line(s) of code, 31 finding(s)
+[codefixture-audit] Total duration: 2.1 s
 ```
+
+The analysis ends with exit code 1 here: some findings are HIGH or CRITICAL, which block by default; without a blocking finding it ends with 0 (all the exit codes: [In a CI/CD pipeline](#in-a-cicd-pipeline)).
 
 Options are added to the same command, for example `./target/release/codefixture-audit scan /path/to/your/project --lang en --no-cache`:
 
@@ -326,9 +329,9 @@ flowchart TD
     PART --> NEW["New report, compared<br/>with the previous one"]
 ```
 
-The next analysis is much faster: it only redoes the files you changed and those that depend on them, and reuses the rest from `audit-reports/audit-datas/cache/`. Two lines of the output say how much was redone, for example `Cache (python): 1/460 file(s) changed since the last scan, 34/10580 taint analyses redone.` The report is the same as with a full analysis. Each version of the engine keeps its own cache in a sub-folder named after it, so two versions used on the same project do not overwrite each other; the three most recently used are kept. To force a full analysis, add `--no-cache`; deleting the `cache/` folder does the same.
+The next analysis is much faster: it only redoes the files you changed and those that depend on them, and reuses the rest from `audit-reports/audit-datas/cache/`. Two lines of the output say how much was redone, for example `Cache (javascript): 1/678 file(s) changed since the last scan, 5/3,390 taint analyses redone.` The report is the same as with a full analysis. Each version of the engine keeps its own cache in a sub-folder named after it, so two versions used on the same project do not overwrite each other; the three most recently used are kept. To force a full analysis, add `--no-cache`; deleting the `cache/` folder does the same.
 
-If no file has changed since the last analysis, nothing is analysed and no new report is written. The output says so and gives the path of the last report, for example `No file has changed since the scan of 18/11/2026 13:36: nothing was analysed again.` A changed file, rule pack, `.sca-suppress.json` or option runs the analysis again. `--format sarif` and `--format text` still print their result, taken from the last analysis, and `--sbom` gives the path of the SBOM already written instead of writing a new one.
+If no file has changed since the last analysis, nothing is analysed and no new report is written. The output says so and gives the path of the last report, for example `No file has changed since the scan of November 25, 2026 at 1:25 PM: nothing was analysed again.` A changed file, rule pack, `.sca-suppress.json` or option runs the analysis again. `--format sarif` and `--format gitlab-sast` still print their result, taken from the last analysis, and `--sbom` gives the path of the SBOM already written instead of writing a new one.
 
 To silence a finding you have reviewed:
 
@@ -669,6 +672,10 @@ flowchart TD
 | a language of your project is never checked | add it to `languages` in `audit.config.json` (step 7) |
 | `git pull` refuses | see the end of step 11 |
 | `Stopped before reading the files` | the project needs more memory than the machine has available: see [Memory of a large project](#memory-of-a-large-project) |
+| `--fail-on-new compares with the scan you name` | give `--baseline <file>`: the analysis data of the main branch, see [In a CI/CD pipeline](#in-a-cicd-pipeline) |
+| `the folder of your rules … does not exist` | the folder given with `--custom-rules-dir` or `CODEFIXTURE_AUDIT_CUSTOM_RULES` is missing: correct the path, or unset the variable |
+| `thresholds.max_high of … must be a whole number of 0 or more` | write a number without quotes in `audit.config.json`, for example `"max_high": 3` |
+| `GitHub code scanning would reject this SARIF file` or `keeps only part of this SARIF file` | the warning names the limit; the file is still written, for the other tools |
 | the analysis crashes, stops without a word, hangs or freezes the machine | run it again with `--debug-log` and attach the log: see [If the analysis crashes or freezes the machine](#if-the-analysis-crashes-or-freezes-the-machine) |
 
 Versions before November 2026 wrote their reports to `docs/audit-reports/`. The first analysis after the upgrade still compares with the last results found there, then writes only to `audit-reports/`; you can delete the old folder afterwards.

@@ -249,7 +249,10 @@ Le terminal affiche l'avancement, ce qui a été chargé et un résumé. Voici l
 [codefixture-audit] Report generated: /path/to/your/project/audit-reports/SCA-REPORT-2026-11-20-13-17.html
 [codefixture-audit] Scan data: /path/to/your/project/audit-reports/audit-datas/SCA-DATA-2026-11-20-13-17.json
 [codefixture-audit] 871 file(s) scanned, 91,999 line(s) of code, 31 finding(s)
+[codefixture-audit] Total duration: 2.1 s
 ```
+
+L'analyse se termine ici avec le code de sortie 1 : des constats sont HIGH ou CRITICAL, ce qui bloque par défaut ; sans constat bloquant, elle se termine avec 0 (tous les codes de sortie : [Dans une chaîne CI/CD](#dans-une-chaîne-cicd)).
 
 Les options s'ajoutent à la même commande, par exemple `./target/release/codefixture-audit scan /path/to/your/project --lang en --no-cache` :
 
@@ -326,9 +329,9 @@ flowchart TD
     PART --> NEW["Nouveau rapport, comparé<br/>au précédent"]
 ```
 
-L'analyse suivante est bien plus rapide : elle ne refait que les fichiers que vous avez modifiés et ceux qui en dépendent, et reprend le reste depuis `audit-reports/audit-datas/cache/`. Deux lignes de la sortie indiquent la part refaite, par exemple `Cache (python): 1/460 file(s) changed since the last scan, 34/10580 taint analyses redone.` Le rapport est identique à celui d'une analyse complète. Chaque version du moteur garde son propre cache dans un sous-dossier qui porte son nom, pour que deux versions utilisées sur le même projet ne s'écrasent pas ; les trois plus récemment utilisées sont gardées. Pour forcer une analyse complète, ajoutez `--no-cache` ; supprimer le dossier `cache/` a le même effet.
+L'analyse suivante est bien plus rapide : elle ne refait que les fichiers que vous avez modifiés et ceux qui en dépendent, et reprend le reste depuis `audit-reports/audit-datas/cache/`. Deux lignes de la sortie indiquent la part refaite, par exemple `Cache (javascript): 1/678 file(s) changed since the last scan, 5/3,390 taint analyses redone.` Le rapport est identique à celui d'une analyse complète. Chaque version du moteur garde son propre cache dans un sous-dossier qui porte son nom, pour que deux versions utilisées sur le même projet ne s'écrasent pas ; les trois plus récemment utilisées sont gardées. Pour forcer une analyse complète, ajoutez `--no-cache` ; supprimer le dossier `cache/` a le même effet.
 
-Si aucun fichier n'a changé depuis la dernière analyse, rien n'est analysé et aucun nouveau rapport n'est écrit. La sortie le dit et donne le chemin du dernier rapport, par exemple `No file has changed since the scan of 18/11/2026 13:36: nothing was analysed again.` Un fichier, un pack de règles, un `.sca-suppress.json` ou une option modifiés relancent l'analyse. `--format sarif` et `--format text` affichent quand même leur résultat, tiré de la dernière analyse, et `--sbom` donne le chemin du SBOM déjà écrit au lieu d'en écrire un nouveau.
+Si aucun fichier n'a changé depuis la dernière analyse, rien n'est analysé et aucun nouveau rapport n'est écrit. La sortie le dit et donne le chemin du dernier rapport, par exemple `No file has changed since the scan of November 25, 2026 at 1:25 PM: nothing was analysed again.` Un fichier, un pack de règles, un `.sca-suppress.json` ou une option modifiés relancent l'analyse. `--format sarif` et `--format gitlab-sast` affichent quand même leur résultat, tiré de la dernière analyse, et `--sbom` donne le chemin du SBOM déjà écrit au lieu d'en écrire un nouveau.
 
 Pour faire taire un constat que vous avez examiné :
 
@@ -669,6 +672,10 @@ flowchart TD
 | un langage de votre projet n'est jamais vérifié | ajoutez-le à `languages` dans `audit.config.json` (étape 7) |
 | `git pull` refuse | voir la fin de l'étape 11 |
 | `Arrêt avant la lecture des fichiers` | le projet demande plus de mémoire que la machine n'en a de disponible : voir [Mémoire d'un gros projet](#mémoire-dun-gros-projet) |
+| `--fail-on-new compares with the scan you name` | donnez `--baseline <fichier>` : les données d'analyse de la branche principale, voir [Dans une chaîne CI/CD](#dans-une-chaîne-cicd) |
+| `the folder of your rules … does not exist` | le dossier donné avec `--custom-rules-dir` ou `CODEFIXTURE_AUDIT_CUSTOM_RULES` n'existe pas : corrigez le chemin, ou retirez la variable |
+| `thresholds.max_high of … must be a whole number of 0 or more` | écrivez un nombre sans guillemets dans `audit.config.json`, par exemple `"max_high": 3` |
+| `GitHub code scanning would reject this SARIF file` ou `keeps only part of this SARIF file` | l'avertissement nomme la limite ; le fichier est quand même écrit, pour les autres outils |
 | l'analyse plante, s'arrête sans rien dire, se bloque ou fige la machine | relancez-la avec `--debug-log` et joignez le journal : voir [Si l'analyse plante ou fige la machine](#si-lanalyse-plante-ou-fige-la-machine) |
 
 Les versions antérieures à novembre 2026 écrivaient leurs rapports dans `docs/audit-reports/`. La première analyse après la mise à jour compare encore avec les derniers résultats trouvés là, puis n'écrit plus que dans `audit-reports/` ; vous pouvez ensuite supprimer l'ancien dossier.
