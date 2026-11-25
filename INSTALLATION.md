@@ -206,6 +206,7 @@ The file looks like this; you can edit it by hand at any time:
 
 - `languages`: the languages checked. Accepted values: `python`, `java`, `javascript`, `typescript` (same rules as `javascript`), `php`, `csharp`, `html`, `yaml`, `dockerfile`; the Dockerfile rules are always added. If you later add code in another language, add it here: until then, every analysis warns that those files are checked by no rule.
 - `paths.include` and `paths.exclude`: the folders analysed and skipped.
+- `thresholds.max_high` (optional): how many blocking findings an analysis tolerates before it fails with exit code 1; 0 by default. Blocking means HIGH and CRITICAL, unless `--fail-on` says otherwise; `--max-blocking` overrides this value. A value that is not a whole number of 0 or more (`"3"` in quotes, `-1`) stops the analysis and is named.
 
 The questions are asked only in an interactive terminal. In a script or a CI job, the engine analyses the whole folder without asking.
 
@@ -242,9 +243,11 @@ The terminal shows the progress, what was loaded and a summary. Here, the analys
 …
 [codefixture-audit] Rules: 23/38 rule file(s) kept for the project's languages, from the pack /…/target/release/rules.cfpack
 [codefixture-audit] 23 rule(s) loaded for languages: dockerfile, html, javascript, python, yaml
+[codefixture-audit] Your rules: none, the folder /…/.codefixture-audit/custom-rules does not exist (default folder; another one: --custom-rules-dir or CODEFIXTURE_AUDIT_CUSTOM_RULES)
 …
 [codefixture-audit] Version rules: 26 advisory records for 21 published vulnerabilities (21 with a CVE), from the rule pack /…/target/release/rules.cfpack, OSV data up to November 18, 2026: Maven 5, NuGet 3, Packagist 3, PyPI 10, npm 5.
 [codefixture-audit] Report generated: /path/to/your/project/audit-reports/SCA-REPORT-2026-11-20-13-17.html
+[codefixture-audit] Scan data: /path/to/your/project/audit-reports/audit-datas/SCA-DATA-2026-11-20-13-17.json
 [codefixture-audit] 871 file(s) scanned, 91,999 line(s) of code, 31 finding(s)
 ```
 
@@ -254,7 +257,15 @@ Options are added to the same command, for example `./target/release/codefixture
 |---|---|
 | `--lang en\|fr\|es\|de` | language of the report |
 | `--no-cache` | analyses everything again (see step 10) |
-| `--format sarif` | writes a SARIF file instead of the HTML report, for an IDE or a code platform; it is printed to the terminal, redirect it with `> result.sarif` |
+| `--format sarif` | writes a SARIF file instead of the HTML report, for an IDE or a code platform; it is printed to the terminal, redirect it with `> result.sarif`, or give `--output result.sarif`. Each finding carries a fingerprint, so a code platform does not reopen it when its line moves |
+| `--output <file>` | writes the report, or the SARIF file, to this file |
+| `--quiet` | for a CI job: no progress lines; the version, the paths of the files written, the summary, warnings and errors stay |
+| `--metrics-output <file>` | for a CI job: a JSON file of the scan's numbers (files, lines, findings by severity, phase durations, your rules read, exit code) |
+| `--log-format json` | for a CI job: one JSON object per console line, for a log collector |
+| `--fail-on-new --baseline <file>` | for a CI job: the exit code counts only the findings absent from the `--baseline` scan (the main branch's scan data), which it requires; a finding whose line moved is not new |
+| `--fail-on <severity>` | for a CI job: the lowest severity that blocks (`critical`, `high`, `medium`, `low`, `info`); default `high`, i.e. HIGH and CRITICAL |
+| `--max-blocking <N>` | for a CI job: how many blocking findings are tolerated before exit code 1; overrides `thresholds.max_high` |
+| `--sbom-output <file>` | for a CI job: writes the SBOM to this file, under a name of your choice; implies `--sbom` |
 | `--exclude 'tests/'` | skips more files (repeatable) |
 | `--only-category security` | analyses one category only (the list: `./target/release/codefixture-audit list-rules`) |
 | `--quick` | skips the dependency check, for a faster run |
@@ -375,18 +386,19 @@ An SBOM (software bill of materials) lists the third-party packages a project us
 ./target/release/codefixture-audit scan /path/to/your/project --lang en --sbom
 ```
 
-Besides the report, the engine writes `SCA-SBOM-<date>.json` into `audit-reports/audit-datas/` of your project and prints its path on the `SBOM :` line. The file follows CycloneDX 1.6, the OWASP format:
+Besides the report, the engine writes `SCA-SBOM-<date>.json` into `audit-reports/audit-datas/` of your project and prints its path on the `SBOM:` line, even with `--quiet`; `--sbom-output <file>` writes it to that file instead, and implies `--sbom`. The file follows CycloneDX 1.6, the OWASP format, and validates against its official schema:
 
 - one component per dependency declared in `requirements.txt`, `pyproject.toml`, `Pipfile`, `package.json`, `pom.xml`, `build.gradle`, `.csproj` or `composer.json`, with its package URL (`pkg:pypi/requests@2.31.0`);
 - one component per package a lockfile installs besides the declared ones (a transitive dependency), with its version;
 - a version only when the installed one is known: the version the lockfile gives, else the one the manifest pins exactly. A dependency declared with a range (`flask>=2.0`, `"lodash": "^4.17.0"`) and absent from any lockfile, or without a version, is listed without one;
-- no vulnerabilities, hashes or licenses: the vulnerabilities are in the HTML report.
+- a serial number (`serialNumber`), new for each SBOM, and the engine as the tool that wrote it;
+- no vulnerabilities, hashes or licenses. The vulnerabilities are in the HTML report and the SARIF output: they change faster than the list of packages, and the tools that read an SBOM, such as Dependency-Track, find them from the package URLs.
 
 The file prefix `SCA` follows `brand.json` when you customise it.
 
 ### Your own rules
 
-You can add rules of your own, for an in-house API or a convention of your code: plain `.sca` files in `~/.codefixture-audit/custom-rules/` (`%USERPROFILE%\.codefixture-audit\custom-rules\` on Windows), laid out by language (`python/security/my_rule.sca`). Every analysis loads them besides the delivered rules, for the languages it analyses; `--custom-rules-dir <FOLDER>` reads another folder instead. No build or update touches that folder. The guide to writing rules, [`RULE-LANGUAGE.md`](RULE-LANGUAGE.md), describes the rule language, the test cases and how your rules show in the report.
+You can add rules of your own, for an in-house API or a convention of your code: plain `.sca` files in `~/.codefixture-audit/custom-rules/` (`%USERPROFILE%\.codefixture-audit\custom-rules\` on Windows), laid out by language (`python/security/my_rule.sca`). Every analysis loads them besides the delivered rules, for the languages it analyses; `--custom-rules-dir <FOLDER>`, or the environment variable `CODEFIXTURE_AUDIT_CUSTOM_RULES` for every analysis of a machine (a CI server whose account is not yours, for instance), reads another folder instead. A folder given that way must exist, or the analysis stops and names it. Every analysis names, in a line that starts with `Your rules:`, how many of your rule files it read and from which folder, or that the folder does not exist. No build or update touches that folder. The guide to writing rules, [`RULE-LANGUAGE.md`](RULE-LANGUAGE.md), describes the rule language, the test cases and how your rules show in the report.
 
 - The report lists them in its "Custom Rules" section, each with its number of findings, and labels their findings as yours.
 - A rule of yours with the language and name of a delivered rule replaces it, and the analysis says so.
@@ -481,6 +493,29 @@ The log costs a little time: on OWASP DVWA (187 files), about 5% more processor 
 ### Moving the engine
 
 The engine and `rules.cfpack` are all an analysis needs: copy them together to another folder and run the engine from anywhere. Without the pack beside it, the engine stops and names the file it looked for.
+
+### In a CI/CD pipeline
+
+Build the engine once, on a machine with the same processor and system as the server that runs your CI (on Linux, with a C library, glibc, no newer than the server's), then copy `codefixture-audit` and `rules.cfpack` together onto that server. Copy your own rules too, and name their folder for every analysis of the server with `CODEFIXTURE_AUDIT_CUSTOM_RULES`: each analysis says on its `Your rules:` line which of them it read. Keep `audit.config.json` in the analysed repository; without a terminal, nothing is asked.
+
+A job then runs, for example:
+
+```bash
+codefixture-audit scan . --quiet --format sarif --output result.sarif \
+  --fail-on-new --baseline main-branch/SCA-DATA-<date>.json
+```
+
+| Exit code | Meaning |
+|---|---|
+| 0 | no blocking finding |
+| 1 | more blocking findings than tolerated: HIGH and CRITICAL by default (`--fail-on` lowers or raises the bar), 0 tolerated by default (`--max-blocking`, or `thresholds.max_high` of `audit.config.json`); with `--fail-on-new`, new ones only |
+| 2 | a usage or configuration error, named on the console: an option, a path, the baseline, the folder of your rules |
+| 4 | an internal error |
+
+- **Block only what a change adds.** `--fail-on-new --baseline <file>` counts only the findings absent from that earlier analysis. Keep the analysis data of the main branch (`audit-reports/audit-datas/SCA-DATA-<date>.json`, whose path each analysis prints) as an artifact of its pipeline, and give it to the jobs of the other branches. A finding whose line moved is not new.
+- **SARIF for a code platform.** Each finding carries a fingerprint, so that a platform does not reopen a finding whose line moved, and each vulnerable dependency shows with its own severity. When the file goes beyond a limit of GitHub code scanning (10 MB compressed, 25,000 results of which GitHub keeps 5,000, 20 tags per rule…), the analysis says so in a warning, and whether GitHub would reject the file or keep part of it.
+- **Numbers and logs.** `--metrics-output <file>` writes the analysis's numbers and its exit code as JSON; `--log-format json` writes each console line as a JSON object.
+- **SBOM.** `--sbom-output <file>` writes the CycloneDX SBOM under a fixed name, for the job's artifacts or a tool such as Dependency-Track.
 
 ### When something goes wrong
 

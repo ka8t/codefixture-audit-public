@@ -27,6 +27,13 @@ use crate::report::exports::sarif::ReportFinding;
 /// `rule_key` too, so both sides are compared by key from the first scan
 /// on: no finding shows as new or resolved because of the change (checked
 /// on a 2 708-finding project, 2026-11-19).
+///
+/// Also the identity `scan --fail-on-new` blocks on (ADR-0067). A baseline
+/// stores findings, not keys: the key is computed again on both sides at
+/// every comparison, so a change of this function breaks no baseline as
+/// long as it reads only fields that older exports carry. A key stored
+/// outside the engine (SARIF `partialFingerprints`, ticket #291) carries a
+/// version in its name instead.
 fn finding_key(f: &ReportFinding) -> String {
     let hash = if f.code.is_empty() {
         0
@@ -36,25 +43,36 @@ fn finding_key(f: &ReportFinding) -> String {
     format!("{}:{}:{hash}", f.file, f.rule_key)
 }
 
-/// Indexes a list of findings by unique key — port of
-/// `_index_findings`. Several findings can share the same base
-/// key (same file, same rule, same code fingerprint) when an
-/// identical pattern appears multiple times in a file; disambiguation
-/// uses an index suffix assigned in line order within each group
-/// sharing the same base key.
-fn index_findings(findings: &[ReportFinding]) -> BTreeMap<String, &ReportFinding> {
-    let mut grouped: BTreeMap<String, Vec<&ReportFinding>> = BTreeMap::new();
-    for f in findings {
-        grouped.entry(finding_key(f)).or_default().push(f);
+/// The full identity of each finding of `findings`, in their order: the
+/// base key of [`finding_key`] plus the finding's rank among those sharing
+/// it, in line order (`:0`, `:1`…) — the disambiguation of Audit's
+/// `_index_findings`. Several findings share a base key when an identical
+/// pattern appears several times in one file. This is the identity the
+/// report's comparison, `scan --fail-on-new` and the SARIF
+/// `partialFingerprints` use (ADR-0067). Findings of a group that share a
+/// line keep their order in `findings` (stable sort).
+pub fn finding_identities(findings: &[ReportFinding]) -> Vec<String> {
+    let mut grouped: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    for (index, f) in findings.iter().enumerate() {
+        grouped.entry(finding_key(f)).or_default().push(index);
     }
-    let mut indexed = BTreeMap::new();
+    let mut identities = vec![String::new(); findings.len()];
     for (base_key, mut group) in grouped {
-        group.sort_by_key(|f| f.line);
-        for (i, f) in group.into_iter().enumerate() {
-            indexed.insert(format!("{base_key}:{i}"), f);
+        group.sort_by_key(|&index| findings[index].line);
+        for (rank, index) in group.into_iter().enumerate() {
+            identities[index] = format!("{base_key}:{rank}");
         }
     }
-    indexed
+    identities
+}
+
+/// Indexes a list of findings by unique key — port of
+/// `_index_findings`, through [`finding_identities`].
+fn index_findings(findings: &[ReportFinding]) -> BTreeMap<String, &ReportFinding> {
+    finding_identities(findings)
+        .into_iter()
+        .zip(findings)
+        .collect()
 }
 
 #[derive(Debug, Clone, Default)]

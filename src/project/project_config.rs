@@ -372,11 +372,15 @@ pub fn read_category_overrides_config(root: &Path) -> BTreeMap<String, bool> {
 }
 
 /// Reads `thresholds.max_high` from an existing `audit.config.json` at
-/// the project root — ticket #42/spec #27. `0` (current behavior:
-/// failure as soon as at least one HIGH/CRITICAL finding exists) if the
-/// file is absent, unreadable, invalid, or does not contain this
-/// key — same default as on the Python side
-/// (`Audit/sca/cli.py::thresholds.get("max_high", 0)`).
+/// the project root — ticket #42/spec #27: how many blocking findings a
+/// scan tolerates before it fails. `Ok(None)` when the file is absent,
+/// unreadable or invalid (reported once by the caller of
+/// [`load_config_json`]), or has no such key: the caller then takes 0,
+/// the same default as on the Python side
+/// (`Audit/sca/cli.py::thresholds.get("max_high", 0)`). `Err` with the
+/// value as written when it is not a whole number of 0 or more (`"3"`,
+/// `-1`, `2.5`): until 2026-11-25 such a value counted as 0 without a
+/// word, and the project failed on its first HIGH finding (ticket #290).
 ///
 /// **Accepted deviation from Python, confirmed with the maintainer (2026-09-01)**:
 /// `thresholds.max_medium`/`thresholds.min_health` (also defined
@@ -393,14 +397,14 @@ pub fn read_category_overrides_config(root: &Path) -> BTreeMap<String, bool> {
 /// limited benefit. The Rust gate remains unconditional and counts HIGH+CRITICAL
 /// without a confidence filter (already existing behavior, unchanged),
 /// only the threshold becomes configurable.
-pub fn read_max_high_threshold_config(root: &Path) -> i64 {
+pub fn read_max_high_threshold(root: &Path) -> Result<Option<u64>, String> {
     let Some(json) = config_json(root) else {
-        return 0;
+        return Ok(None);
     };
-    json.get("thresholds")
-        .and_then(|t| t.get("max_high"))
-        .and_then(|v| v.as_i64())
-        .unwrap_or(0)
+    match json.get("thresholds").and_then(|t| t.get("max_high")) {
+        None => Ok(None),
+        Some(value) => value.as_u64().map(Some).ok_or_else(|| value.to_string()),
+    }
 }
 
 /// The `languages` key of `audit.config.json`, as rule languages
@@ -514,7 +518,24 @@ pub fn unsupported_config_sections(root: &Path) -> Vec<String> {
 /// by a made-up name. A name that is not valid UTF-8 is shown with its
 /// invalid bytes replaced (`to_string_lossy`).
 pub fn project_name_of(path: &Path) -> String {
-    let resolved = std::fs::canonicalize(path).unwrap_or_else(|_| {
+    let resolved = project_dir_of(path);
+    match resolved.file_name() {
+        Some(name) => name.to_string_lossy().into_owned(),
+        None => project_dir_text(&resolved),
+    }
+}
+
+/// The full path of the project folder that `path` designates, resolved
+/// as [`project_name_of`] does: made absolute and resolved on disk
+/// (`canonicalize`, which also follows symbolic links, so macOS's
+/// `/tmp/x` reads `/private/tmp/x`), else made absolute and `..` removed
+/// without touching the file system.
+///
+/// Shown in the HTML report next to the project name (2026-11-25, the maintainer's
+/// request: the report named only the folder, and the path of the
+/// parameters section was the one typed, `.` for `scan .`).
+pub fn project_dir_of(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| {
         let absolute = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
         let mut normalized = PathBuf::new();
         for component in absolute.components() {
@@ -527,10 +548,21 @@ pub fn project_name_of(path: &Path) -> String {
             }
         }
         normalized
-    });
-    match resolved.file_name() {
-        Some(name) => name.to_string_lossy().into_owned(),
-        None => resolved.display().to_string(),
+    })
+}
+
+/// The text of a path from [`project_dir_of`], as a reader writes it.
+/// On Windows, `canonicalize` returns an extended-length path
+/// (`\\?\C:\Users\me\shop`), whose `\\?\` prefix no user ever types: it
+/// is removed before a drive letter (`C:\Users\me\shop`). A network share
+/// (`\\?\UNC\server\share`) keeps its prefix, which says it is one. Other
+/// systems never write that prefix, so the text is the path's own. A
+/// name that is not valid UTF-8 is shown with its invalid bytes replaced.
+pub fn project_dir_text(path: &Path) -> String {
+    let text = path.display().to_string();
+    match text.strip_prefix(r"\\?\") {
+        Some(rest) if rest.as_bytes().get(1) == Some(&b':') => rest.to_string(),
+        _ => text,
     }
 }
 
@@ -599,6 +631,41 @@ mod tests {
     /// `.`, `./`, `sub/..` and a path that does not exist name the folder
     /// they stand for, never "project"; the root is named by its path
     /// (ticket #219).
+    #[test]
+    fn test_project_dir_of_gives_the_full_path_of_dot() {
+        let dir = std::env::temp_dir().join(format!("sast-pc-dir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("shop/sub")).unwrap();
+        let shop = std::fs::canonicalize(dir.join("shop")).unwrap();
+
+        assert_eq!(project_dir_of(&dir.join("shop/.")), shop);
+        assert_eq!(project_dir_of(&dir.join("shop/sub/..")), shop);
+        assert!(project_dir_of(Path::new(".")).is_absolute());
+        // Not on disk: made absolute, `..` removed lexically.
+        // Lexical only: macOS's `/var` is not resolved to `/private/var`.
+        assert_eq!(
+            project_dir_of(&dir.join("missing/../absent")),
+            dir.join("absent")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_project_dir_text_drops_the_windows_extended_prefix_before_a_drive() {
+        assert_eq!(
+            project_dir_text(Path::new(r"\\?\C:\Users\me\shop")),
+            r"C:\Users\me\shop"
+        );
+        assert_eq!(
+            project_dir_text(Path::new(r"\\?\UNC\server\share")),
+            r"\\?\UNC\server\share"
+        );
+        assert_eq!(
+            project_dir_text(Path::new("/home/me/shop")),
+            "/home/me/shop"
+        );
+    }
+
     #[test]
     fn test_project_name_of_resolves_dot_and_parent() {
         let dir = std::env::temp_dir().join(format!("sast-pc-name-{}", std::process::id()));
@@ -844,7 +911,7 @@ mod tests {
             read_paths_config(&dir),
             Some((vec!["app/".to_string()], Vec::new()))
         );
-        assert_eq!(read_max_high_threshold_config(&dir), 3);
+        assert_eq!(read_max_high_threshold(&dir), Ok(Some(3)));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -1010,12 +1077,11 @@ mod tests {
     }
 
     #[test]
-    fn test_read_max_high_threshold_config_absent_file_returns_zero() {
+    fn test_read_max_high_threshold_absent_file_gives_none() {
         let dir = std::env::temp_dir().join(format!("sast-pc-test13-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let threshold = read_max_high_threshold_config(&dir);
-        assert_eq!(threshold, 0);
+        assert_eq!(read_max_high_threshold(&dir), Ok(None));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -1056,7 +1122,7 @@ mod tests {
     }
 
     #[test]
-    fn test_read_max_high_threshold_config_absent_section_returns_zero() {
+    fn test_read_max_high_threshold_absent_section_gives_none() {
         let dir = std::env::temp_dir().join(format!("sast-pc-test14-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         write_file(
@@ -1064,12 +1130,12 @@ mod tests {
             "audit.config.json",
             r#"{"paths": {"include": ["sca/"]}}"#,
         );
-        assert_eq!(read_max_high_threshold_config(&dir), 0);
+        assert_eq!(read_max_high_threshold(&dir), Ok(None));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
-    fn test_read_max_high_threshold_config_reads_custom_value() {
+    fn test_read_max_high_threshold_reads_custom_value() {
         let dir = std::env::temp_dir().join(format!("sast-pc-test15-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         write_file(
@@ -1077,7 +1143,33 @@ mod tests {
             "audit.config.json",
             r#"{"thresholds": {"max_high": 3}}"#,
         );
-        assert_eq!(read_max_high_threshold_config(&dir), 3);
+        assert_eq!(read_max_high_threshold(&dir), Ok(Some(3)));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Ticket #290: a value that is not a whole number of 0 or more is
+    /// named, as written, instead of counting as 0.
+    #[test]
+    fn test_read_max_high_threshold_names_an_invalid_value() {
+        let dir = std::env::temp_dir().join(format!("sast-pc-test-maxhigh-{}", std::process::id()));
+        for (written, expected) in [
+            (r#""3""#, r#""3""#),
+            ("-1", "-1"),
+            ("2.5", "2.5"),
+            ("null", "null"),
+        ] {
+            let _ = std::fs::remove_dir_all(&dir);
+            write_file(
+                &dir,
+                "audit.config.json",
+                &format!(r#"{{"thresholds": {{"max_high": {written}}}}}"#),
+            );
+            assert_eq!(
+                read_max_high_threshold(&dir),
+                Err(expected.to_string()),
+                "{written}"
+            );
+        }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

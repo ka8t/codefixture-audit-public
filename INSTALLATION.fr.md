@@ -206,6 +206,7 @@ Le fichier ressemble à ceci ; vous pouvez le modifier à la main à tout moment
 
 - `languages` : les langages vérifiés. Valeurs acceptées : `python`, `java`, `javascript`, `typescript` (mêmes règles que `javascript`), `php`, `csharp`, `html`, `yaml`, `dockerfile` ; les règles Dockerfile sont toujours ajoutées. Si vous ajoutez plus tard du code dans un autre langage, ajoutez-le ici : d'ici là, chaque analyse avertit qu'aucune règle ne vérifie ces fichiers.
 - `paths.include` et `paths.exclude` : les dossiers analysés et ignorés.
+- `thresholds.max_high` (facultatif) : combien de constats bloquants une analyse tolère avant d'échouer avec le code de sortie 1 ; 0 par défaut. Sont bloquants les constats HIGH et CRITICAL, sauf si `--fail-on` en décide autrement ; `--max-blocking` remplace cette valeur. Une valeur qui n'est pas un nombre entier positif ou nul (`"3"` entre guillemets, `-1`) arrête l'analyse, qui la nomme.
 
 Les questions ne sont posées que dans un terminal interactif. Dans un script ou une tâche de CI, le moteur analyse tout le dossier sans rien demander.
 
@@ -242,9 +243,11 @@ Le terminal affiche l'avancement, ce qui a été chargé et un résumé. Voici l
 …
 [codefixture-audit] Rules: 23/38 rule file(s) kept for the project's languages, from the pack /…/target/release/rules.cfpack
 [codefixture-audit] 23 rule(s) loaded for languages: dockerfile, html, javascript, python, yaml
+[codefixture-audit] Your rules: none, the folder /…/.codefixture-audit/custom-rules does not exist (default folder; another one: --custom-rules-dir or CODEFIXTURE_AUDIT_CUSTOM_RULES)
 …
 [codefixture-audit] Version rules: 26 advisory records for 21 published vulnerabilities (21 with a CVE), from the rule pack /…/target/release/rules.cfpack, OSV data up to November 18, 2026: Maven 5, NuGet 3, Packagist 3, PyPI 10, npm 5.
 [codefixture-audit] Report generated: /path/to/your/project/audit-reports/SCA-REPORT-2026-11-20-13-17.html
+[codefixture-audit] Scan data: /path/to/your/project/audit-reports/audit-datas/SCA-DATA-2026-11-20-13-17.json
 [codefixture-audit] 871 file(s) scanned, 91,999 line(s) of code, 31 finding(s)
 ```
 
@@ -254,7 +257,15 @@ Les options s'ajoutent à la même commande, par exemple `./target/release/codef
 |---|---|
 | `--lang en\|fr\|es\|de` | langue du rapport |
 | `--no-cache` | analyse de nouveau tout le projet (voir l'étape 10) |
-| `--format sarif` | écrit un fichier SARIF au lieu du rapport HTML, pour un IDE ou une plateforme de code ; il est affiché dans le terminal, redirigez-le avec `> result.sarif` |
+| `--format sarif` | écrit un fichier SARIF au lieu du rapport HTML, pour un IDE ou une plateforme de code ; il est affiché dans le terminal, redirigez-le avec `> result.sarif`, ou donnez `--output result.sarif`. Chaque constat porte une empreinte, pour qu'une plateforme de code ne le rouvre pas quand sa ligne bouge |
+| `--output <fichier>` | écrit le rapport, ou le fichier SARIF, dans ce fichier |
+| `--quiet` | pour un job de CI : plus de lignes de progression ; la version, les chemins des fichiers écrits, le résumé, les avertissements et les erreurs restent |
+| `--metrics-output <fichier>` | pour un job de CI : un fichier JSON des chiffres de l'analyse (fichiers, lignes, constats par sévérité, durées des phases, vos règles lues, code de sortie) |
+| `--log-format json` | pour un job de CI : un objet JSON par ligne de la console, pour un collecteur de journaux |
+| `--fail-on-new --baseline <fichier>` | pour un job de CI : le code de sortie ne compte que les constats absents de l'analyse `--baseline` (les données d'analyse de la branche principale), qu'il exige ; un constat dont la ligne a bougé n'est pas nouveau |
+| `--fail-on <gravité>` | pour un job de CI : la gravité la plus basse qui bloque (`critical`, `high`, `medium`, `low`, `info`) ; par défaut `high`, soit HIGH et CRITICAL |
+| `--max-blocking <N>` | pour un job de CI : combien de constats bloquants sont tolérés avant le code de sortie 1 ; remplace `thresholds.max_high` |
+| `--sbom-output <fichier>` | pour un job de CI : écrit le SBOM dans ce fichier, sous le nom de votre choix ; active `--sbom` |
 | `--exclude 'tests/'` | ignore d'autres fichiers (option répétable) |
 | `--only-category security` | n'analyse qu'une catégorie (la liste : `./target/release/codefixture-audit list-rules`) |
 | `--quick` | saute la vérification des dépendances, pour une analyse plus rapide |
@@ -375,18 +386,19 @@ Un SBOM (nomenclature logicielle, *software bill of materials*) liste les paquet
 ./target/release/codefixture-audit scan /path/to/your/project --lang en --sbom
 ```
 
-En plus du rapport, le moteur écrit `SCA-SBOM-<date>.json` dans le dossier `audit-reports/audit-datas/` de votre projet et affiche son chemin sur la ligne `SBOM :`. Le fichier suit CycloneDX 1.6, le format de l'OWASP :
+En plus du rapport, le moteur écrit `SCA-SBOM-<date>.json` dans le dossier `audit-reports/audit-datas/` de votre projet et affiche son chemin sur la ligne qui commence par `SBOM`, même avec `--quiet` ; `--sbom-output <fichier>` l'écrit dans ce fichier à la place, et active `--sbom`. Le fichier suit CycloneDX 1.6, le format de l'OWASP, et se valide contre son schéma officiel :
 
 - un composant par dépendance déclarée dans `requirements.txt`, `pyproject.toml`, `Pipfile`, `package.json`, `pom.xml`, `build.gradle`, `.csproj` ou `composer.json`, avec son URL de paquet (`pkg:pypi/requests@2.31.0`) ;
 - un composant par paquet qu'un fichier de verrouillage installe en plus des dépendances déclarées (une dépendance transitive), avec sa version ;
 - une version seulement quand la version installée est connue : celle que donne le fichier de verrouillage, sinon celle que le manifeste fixe exactement. Une dépendance déclarée avec un intervalle (`flask>=2.0`, `"lodash": "^4.17.0"`) et absente de tout fichier de verrouillage, ou sans version, est listée sans version ;
-- ni vulnérabilités, ni empreintes, ni licences : les vulnérabilités figurent dans le rapport HTML.
+- un numéro de série (`serialNumber`), nouveau pour chaque SBOM, et le moteur comme outil qui l'a écrit ;
+- ni vulnérabilités, ni empreintes, ni licences. Les vulnérabilités figurent dans le rapport HTML et la sortie SARIF : elles changent plus vite que la liste des paquets, et les outils qui lisent un SBOM, comme Dependency-Track, les retrouvent à partir des URL de paquets.
 
 Le préfixe de fichier `SCA` suit `brand.json` quand vous le personnalisez.
 
 ### Vos propres règles
 
-Vous pouvez ajouter vos propres règles, pour une API interne ou une convention de votre code : de simples fichiers `.sca` dans `~/.codefixture-audit/custom-rules/` (`%USERPROFILE%\.codefixture-audit\custom-rules\` sous Windows), rangés par langage (`python/security/ma_regle.sca`). Chaque analyse les charge en plus des règles livrées, pour les langages qu'elle analyse ; `--custom-rules-dir <DOSSIER>` lit un autre dossier à la place. Aucune compilation ni mise à jour ne touche ce dossier. Le guide d'écriture des règles, [`RULE-LANGUAGE.fr.md`](RULE-LANGUAGE.fr.md), décrit le langage des règles, les cas de test et la façon dont vos règles apparaissent dans le rapport.
+Vous pouvez ajouter vos propres règles, pour une API interne ou une convention de votre code : de simples fichiers `.sca` dans `~/.codefixture-audit/custom-rules/` (`%USERPROFILE%\.codefixture-audit\custom-rules\` sous Windows), rangés par langage (`python/security/ma_regle.sca`). Chaque analyse les charge en plus des règles livrées, pour les langages qu'elle analyse ; `--custom-rules-dir <DOSSIER>`, ou la variable d'environnement `CODEFIXTURE_AUDIT_CUSTOM_RULES` pour toutes les analyses d'une machine (un serveur de CI dont le compte n'est pas le vôtre, par exemple), lit un autre dossier à la place. Un dossier donné ainsi doit exister, sinon l'analyse s'arrête et le nomme. Chaque analyse dit, sur une ligne qui commence par `Vos règles :`, combien de vos fichiers de règles elle a lus et depuis quel dossier, ou que le dossier n'existe pas. Aucune compilation ni mise à jour ne touche ce dossier. Le guide d'écriture des règles, [`RULE-LANGUAGE.fr.md`](RULE-LANGUAGE.fr.md), décrit le langage des règles, les cas de test et la façon dont vos règles apparaissent dans le rapport.
 
 - Le rapport les liste dans sa section « Règles personnalisées », chacune avec son nombre de constats, et étiquette leurs constats comme les vôtres.
 - Une de vos règles qui porte le langage et le nom d'une règle livrée la remplace, et l'analyse le dit.
@@ -481,6 +493,29 @@ Le journal coûte un peu de temps : sur OWASP DVWA (187 fichiers), environ 5 % d
 ### Déplacer le moteur
 
 Le moteur et `rules.cfpack` sont tout ce dont une analyse a besoin : copiez-les ensemble dans un autre dossier et lancez le moteur depuis n'importe où. Sans le pack à côté de lui, le moteur s'arrête et nomme le fichier qu'il a cherché.
+
+### Dans une chaîne CI/CD
+
+Compilez le moteur une fois, sur une machine qui a le même processeur et le même système que le serveur qui exécute votre CI (sous Linux, avec une bibliothèque C, la glibc, pas plus récente que celle du serveur), puis copiez ensemble `codefixture-audit` et `rules.cfpack` sur ce serveur. Copiez aussi vos propres règles, et désignez leur dossier pour toutes les analyses du serveur avec `CODEFIXTURE_AUDIT_CUSTOM_RULES` : chaque analyse dit, sur sa ligne `Your rules:`, lesquelles elle a lues. Gardez `audit.config.json` dans le dépôt analysé ; sans terminal, rien n'est demandé.
+
+Un job lance alors, par exemple :
+
+```bash
+codefixture-audit scan . --quiet --format sarif --output result.sarif \
+  --fail-on-new --baseline main-branch/SCA-DATA-<date>.json
+```
+
+| Code de sortie | Signification |
+|---|---|
+| 0 | aucun constat bloquant |
+| 1 | plus de constats bloquants que tolérés : HIGH et CRITICAL par défaut (`--fail-on` abaisse ou relève la barre), aucun toléré par défaut (`--max-blocking`, ou `thresholds.max_high` d'`audit.config.json`) ; avec `--fail-on-new`, les nouveaux seulement |
+| 2 | une erreur d'utilisation ou de configuration, nommée dans la console : une option, un chemin, la référence, le dossier de vos règles |
+| 4 | une erreur interne |
+
+- **Ne bloquer que ce qu'un changement ajoute.** `--fail-on-new --baseline <fichier>` ne compte que les constats absents de cette analyse antérieure. Gardez les données d'analyse de la branche principale (`audit-reports/audit-datas/SCA-DATA-<date>.json`, dont chaque analyse affiche le chemin) comme artefact de son pipeline, et donnez-les aux jobs des autres branches. Un constat dont la ligne a bougé n'est pas nouveau.
+- **Le SARIF pour une plateforme de code.** Chaque constat porte une empreinte, pour qu'une plateforme ne rouvre pas un constat dont la ligne a bougé, et chaque dépendance vulnérable s'affiche avec sa propre gravité. Quand le fichier dépasse une limite de GitHub code scanning (10 Mo compressés, 25 000 résultats dont GitHub garde 5 000, 20 étiquettes par règle…), l'analyse le dit dans un avertissement, et précise si GitHub refuserait le fichier ou n'en garderait qu'une partie.
+- **Chiffres et journaux.** `--metrics-output <fichier>` écrit les chiffres de l'analyse et son code de sortie en JSON ; `--log-format json` écrit chaque ligne de la console comme un objet JSON.
+- **SBOM.** `--sbom-output <fichier>` écrit le SBOM CycloneDX sous un nom fixe, pour les artefacts du job ou un outil comme Dependency-Track.
 
 ### En cas de problème
 

@@ -124,6 +124,9 @@ pub struct LoadedRules {
     pub path: PathBuf,
     /// Pack or folder.
     pub kind: RuleSourceKind,
+    /// The catalog or the client's own folder: the console names the
+    /// client's rules on a line of their own (ticket #292).
+    pub origin: RuleOrigin,
     /// Rule files kept for the target languages, sorted by path.
     pub files: Vec<LoadedRuleFile>,
     /// Rule files the source holds, every language.
@@ -141,6 +144,8 @@ pub struct RuleSourceSummary {
     pub path: PathBuf,
     /// Pack or folder.
     pub kind: RuleSourceKind,
+    /// The catalog or the client's own folder.
+    pub origin: RuleOrigin,
     /// Rule files the source holds, every language.
     pub files_available: usize,
     /// Rule files kept for the target languages.
@@ -153,6 +158,7 @@ impl LoadedRules {
         RuleSourceSummary {
             path: self.path.clone(),
             kind: self.kind,
+            origin: self.origin,
             files_available: self.files_available,
             files_read: self.files.len(),
         }
@@ -260,6 +266,7 @@ fn load_rule_pack(path: &Path, languages: &[String], origin: RuleOrigin) -> Load
     let mut loaded = LoadedRules {
         path: path.to_path_buf(),
         kind: RuleSourceKind::Pack,
+        origin,
         files: Vec::new(),
         files_available: 0,
         errors: Vec::new(),
@@ -296,6 +303,7 @@ fn load_rule_folder(dir: &Path, languages: &[String], origin: RuleOrigin) -> Loa
     let mut loaded = LoadedRules {
         path: dir.to_path_buf(),
         kind: RuleSourceKind::Folder,
+        origin,
         files: Vec::new(),
         files_available: 0,
         errors: Vec::new(),
@@ -615,6 +623,7 @@ mod tests {
         LoadedRules {
             path: PathBuf::new(),
             kind: RuleSourceKind::Folder,
+            origin,
             files: files
                 .iter()
                 .map(|(path, content)| LoadedRuleFile {

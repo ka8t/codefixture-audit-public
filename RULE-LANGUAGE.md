@@ -26,7 +26,7 @@ Your rules are plain text files in `~/.codefixture-audit/custom-rules/` (`%USERP
 - The file name is the rule's id: `my_rule.sca` holds `rule my_rule`.
 - `cases/` holds the rule's test cases (see [Testing a rule](#testing-a-rule)). A scan reads `.sca` files only, never the cases.
 
-Every scan loads these rules besides the delivered ones; `--custom-rules-dir <FOLDER>` reads another folder instead. No build, update or reinstall of the engine touches this folder. A rule of yours with the language and the id of a delivered rule replaces that rule in every scan, and the scan says so: that is how you adjust a delivered rule to your code. A rule that does not compile is named in a warning, with the error, and left out; the others run.
+Every scan loads these rules besides the delivered ones; `--custom-rules-dir <FOLDER>`, or the environment variable `CODEFIXTURE_AUDIT_CUSTOM_RULES` for every scan of a machine (a CI server whose account is not yours, for instance), reads another folder instead. A folder given that way must exist, or the scan stops and names it. Every scan says which of your rules it read, and from which folder, even with `--quiet`: `Your rules: 3/3 rule file(s) kept for the project's languages, from the folder …`, or `Your rules: none, the folder … does not exist`. No build, update or reinstall of the engine touches this folder. A rule of yours with the language and the id of a delivered rule replaces that rule in every scan, and the scan says so: that is how you adjust a delivered rule to your code. A rule that does not compile is named in a warning, with the error, and left out; the others run.
 
 ## Writing a rule with the wizard
 

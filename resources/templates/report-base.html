@@ -90,6 +90,7 @@
 
         <div class="header" id="nav-header" data-nav-section="{{i18n_health_score}}">
             <h1><img src="{{favicon_header_data}}" alt="" class="header-logo"> {{i18n_title}} - {{project_name}}</h1>
+            <div class="meta project-path">📁 {{i18n_header_project_path}}{{i18n_label_colon}}<code>{{header_project_path}}</code></div>
             <div class="meta">{{i18n_generated_on}} {{date_str}} {{project_version_meta}}{{project_uuid_badge}}<span class="lang-badge">{{lang_label}}</span></div>
             <div class="header-stats">📂 {{total_files_scanned}} {{i18n_files_scanned}} • 📝 {{total_lines_code}} {{i18n_lines_of_code}} • ⏱️ {{audit_total_time}}s</div>
             {{project_description_html}}

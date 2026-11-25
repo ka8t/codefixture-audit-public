@@ -339,6 +339,186 @@ fn declared_rule_languages(root: &Path, say: impl Fn(&str) -> String) -> Option<
     (!config.languages.is_empty()).then_some(config.languages)
 }
 
+/// The client's rules folder of a `custom-rules` command:
+/// `--custom-rules-dir`, else `CODEFIXTURE_AUDIT_CUSTOM_RULES`, else the
+/// default folder of the home (ticket #292: the commands follow the same
+/// variable as `scan`, so that `create` never writes where `scan` does not
+/// read). It need not exist: `create` makes it. An empty variable or no
+/// home folder stops the command (exit 2) with a message that says what
+/// to give.
+fn custom_rules_tool_dir(
+    option: Option<PathBuf>,
+    script_locale: &serde_json::Value,
+) -> Result<PathBuf, ExitCode> {
+    use codefixture_audit::rules::custom::{
+        CustomRulesLocationError, locate_custom_rules_dir_here,
+    };
+    match locate_custom_rules_dir_here(option) {
+        Ok(dir) => Ok(dir.path),
+        Err(error) => {
+            let key = match error {
+                CustomRulesLocationError::EmptyVariable => "custom_rules_empty_variable",
+                CustomRulesLocationError::NoHome => "custom_rules_no_home",
+            };
+            emit_error(&codefixture_audit::i18n::t(script_locale, key));
+            Err(ExitCode::from(2))
+        }
+    }
+}
+
+/// How the console names where the client's rules folder was given.
+fn custom_rules_origin_text(
+    origin: codefixture_audit::rules::custom::CustomRulesOrigin,
+    script_locale: &serde_json::Value,
+) -> String {
+    use codefixture_audit::rules::custom::CustomRulesOrigin;
+    let key = match origin {
+        CustomRulesOrigin::Option => "custom_rules_origin_option",
+        CustomRulesOrigin::Environment => "custom_rules_origin_environment",
+        CustomRulesOrigin::Default => "custom_rules_origin_default",
+    };
+    codefixture_audit::i18n::t(script_locale, key)
+}
+
+/// The scan's choice for the client's rules, or the error that stops it
+/// (exit 2, ticket #292): an empty `CODEFIXTURE_AUDIT_CUSTOM_RULES`, a
+/// folder given with `--custom-rules-dir` or the variable that does not
+/// exist, or a path that is not a folder. Before 2026-11-25 such a folder
+/// was skipped without a word, and the scan ran without the client's rules.
+fn scan_custom_rules_or_exit(
+    explicit_rules: bool,
+    option: Option<PathBuf>,
+    script_locale: &serde_json::Value,
+) -> Result<codefixture_audit::rules::custom::ScanCustomRules, ExitCode> {
+    use codefixture_audit::rules::custom::{
+        ScanCustomRulesError, locate_custom_rules_dir_here, scan_custom_rules,
+    };
+    let say = |key: &str| codefixture_audit::i18n::t(script_locale, key);
+    let error = match scan_custom_rules(explicit_rules, locate_custom_rules_dir_here(option)) {
+        Ok(choice) => return Ok(choice),
+        Err(error) => error,
+    };
+    let message = match error {
+        ScanCustomRulesError::EmptyVariable => say("custom_rules_empty_variable"),
+        ScanCustomRulesError::Missing(dir) => say("scan_custom_rules_missing")
+            .replace("{path}", &dir.path.display().to_string())
+            .replace(
+                "{origin}",
+                &custom_rules_origin_text(dir.origin, script_locale),
+            ),
+        ScanCustomRulesError::NotAFolder(dir) => say("scan_custom_rules_not_a_folder")
+            .replace("{path}", &dir.path.display().to_string())
+            .replace(
+                "{origin}",
+                &custom_rules_origin_text(dir.origin, script_locale),
+            ),
+    };
+    emit_error(&message);
+    Err(ExitCode::from(2))
+}
+
+/// The counts of the client's rules that a scan read: rule files kept for
+/// the project's languages, then rule files the folder holds.
+type ClientRuleCounts = (usize, usize);
+
+/// The client's rules source of a finished scan, as counts: `None` when
+/// the scan read no client folder.
+fn client_rule_counts(report: &ScanReport) -> Option<ClientRuleCounts> {
+    report
+        .rule_sources
+        .iter()
+        .find(|source| source.origin == codefixture_audit::rules::catalog::RuleOrigin::Client)
+        .map(|source| (source.files_read, source.files_available))
+}
+
+/// The console line naming what the scan did with the client's rules
+/// (ticket #292), shown even with `--quiet`: read (counts, folder, where
+/// it was named), default folder absent, not read because of `--rules`,
+/// or no folder known. `counts` are those of the folder read, `(0, 0)` when
+/// it holds no rule file.
+fn custom_rules_line(
+    choice: &codefixture_audit::rules::custom::ScanCustomRules,
+    counts: ClientRuleCounts,
+    script_locale: &serde_json::Value,
+) -> String {
+    use codefixture_audit::rules::custom::ScanCustomRules;
+    let say = |key: &str| codefixture_audit::i18n::t(script_locale, key);
+    let numbers = LocaleFormat::of_console(script_locale);
+    match choice {
+        ScanCustomRules::Read(dir) => say("scan_custom_rules_read")
+            .replace("{read}", &numbers.count(counts.0))
+            .replace("{available}", &numbers.count(counts.1))
+            .replace("{path}", &dir.path.display().to_string())
+            .replace(
+                "{origin}",
+                &custom_rules_origin_text(dir.origin, script_locale),
+            ),
+        ScanCustomRules::DefaultMissing(path) => {
+            say("scan_custom_rules_default_missing").replace("{path}", &path.display().to_string())
+        }
+        ScanCustomRules::NotRead => say("scan_custom_rules_not_read"),
+        ScanCustomRules::NoHome => say("scan_custom_rules_no_home"),
+    }
+}
+
+/// Prints [`custom_rules_line`] as a result, shown even with `--quiet`;
+/// with `--log-format json`, the event also carries the `custom_rules`
+/// block of the metrics file, for a machine (ticket #292).
+fn emit_custom_rules_line(
+    choice: &codefixture_audit::rules::custom::ScanCustomRules,
+    counts: ClientRuleCounts,
+    script_locale: &serde_json::Value,
+) {
+    log_line_with(
+        LogLevel::Info,
+        &format!(
+            "[codefixture-audit] {}",
+            custom_rules_line(choice, counts, script_locale)
+        ),
+        &[(
+            "custom_rules",
+            custom_rules_metrics(choice, counts).to_json(),
+        )],
+    );
+}
+
+/// The `custom_rules` block of `--metrics-output` (ticket #292).
+fn custom_rules_metrics(
+    choice: &codefixture_audit::rules::custom::ScanCustomRules,
+    counts: ClientRuleCounts,
+) -> codefixture_audit::report::exports::metrics::CustomRulesMetrics {
+    use codefixture_audit::report::exports::metrics::CustomRulesMetrics;
+    use codefixture_audit::rules::custom::{CustomRulesOrigin, ScanCustomRules};
+    let origin = |origin: CustomRulesOrigin| match origin {
+        CustomRulesOrigin::Option => "option",
+        CustomRulesOrigin::Environment => "environment",
+        CustomRulesOrigin::Default => "default",
+    };
+    let (status, path, origin, counts) = match choice {
+        ScanCustomRules::Read(dir) => (
+            "read",
+            Some(dir.path.display().to_string()),
+            Some(origin(dir.origin)),
+            counts,
+        ),
+        ScanCustomRules::DefaultMissing(path) => (
+            "default_missing",
+            Some(path.display().to_string()),
+            Some("default"),
+            (0, 0),
+        ),
+        ScanCustomRules::NotRead => ("not_read", None, None, (0, 0)),
+        ScanCustomRules::NoHome => ("no_home", None, None, (0, 0)),
+    };
+    CustomRulesMetrics {
+        status,
+        path,
+        origin,
+        files_read: counts.0,
+        files_available: counts.1,
+    }
+}
+
 /// Console lines saying what the rule sources gave a scan (ADR-0040,
 /// feedback of 2026-11-10: a tester could not tell which rules were
 /// loaded). Per source: rule files kept over files available and the
@@ -348,9 +528,12 @@ fn rule_source_lines(report: &ScanReport, script_locale: &serde_json::Value) -> 
     use codefixture_audit::rules::catalog::RuleSourceKind;
     let say = |key: &str| codefixture_audit::i18n::t(script_locale, key);
     let numbers = LocaleFormat::of_console(script_locale);
+    // The client's folder has a line of its own, shown even with `--quiet`
+    // (`custom_rules_line`, ticket #292).
     let mut lines: Vec<String> = report
         .rule_sources
         .iter()
+        .filter(|source| source.origin != codefixture_audit::rules::catalog::RuleOrigin::Client)
         .map(|source| {
             let key = match source.kind {
                 RuleSourceKind::Pack => "scan_rules_source_pack",
@@ -583,7 +766,7 @@ fn print_phase_progress(label: &str, elapsed: std::time::Duration) {
         emit_json_line(
             LogLevel::Info,
             label,
-            Some(serde_json::json!(elapsed.as_millis())),
+            &[("duration_ms", serde_json::json!(elapsed.as_millis()))],
         );
     } else {
         eprintln!("{}", phase_progress_line(label, elapsed));
@@ -663,9 +846,12 @@ enum LogLevel {
 
 /// Writes one single-line JSON log event to stderr: `timestamp` (UTC,
 /// RFC 3339, milliseconds), `level`, `message` (without the
-/// `[codefixture-audit]` text prefix), plus `duration_ms` for a finished
-/// phase. Built with `serde_json`, so any message text is escaped.
-fn emit_json_line(level: LogLevel, message: &str, duration_ms: Option<serde_json::Value>) {
+/// `[codefixture-audit]` text prefix), plus the fields of `extra`:
+/// `duration_ms` for a finished phase, `custom_rules` for the line of the
+/// client's rules (ticket #292), so that a machine reads a value rather
+/// than a sentence that follows `--lang`. Built with `serde_json`, so any
+/// message text is escaped.
+fn emit_json_line(level: LogLevel, message: &str, extra: &[(&str, serde_json::Value)]) {
     let level = match level {
         LogLevel::Info => "info",
         LogLevel::Warn => "warn",
@@ -681,8 +867,8 @@ fn emit_json_line(level: LogLevel, message: &str, duration_ms: Option<serde_json
         "level": level,
         "message": message,
     });
-    if let Some(duration_ms) = duration_ms {
-        event["duration_ms"] = duration_ms;
+    for (key, value) in extra {
+        event[*key] = value.clone();
     }
     eprintln!("{event}");
 }
@@ -691,6 +877,12 @@ fn emit_json_line(level: LogLevel, message: &str, duration_ms: Option<serde_json
 /// kept for ticket #92): plain text by default, a JSON event with
 /// `--log-format json`.
 fn log_line(level: LogLevel, msg: &str) {
+    log_line_with(level, msg, &[]);
+}
+
+/// [`log_line`] with fields that a JSON log event carries beside its
+/// message (`emit_json_line`); plain text shows the message alone.
+fn log_line_with(level: LogLevel, msg: &str, extra: &[(&str, serde_json::Value)]) {
     // Ticket #282: every console line is in the debug log too, at its
     // place among the steps.
     codefixture_audit::debug_log!(
@@ -703,7 +895,7 @@ fn log_line(level: LogLevel, msg: &str) {
         }
     );
     if JSON_LOGS.load(std::sync::atomic::Ordering::Relaxed) {
-        emit_json_line(level, msg, None);
+        emit_json_line(level, msg, extra);
     } else {
         eprintln!("{msg}");
     }
@@ -746,6 +938,24 @@ fn emit_error(msg: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Held by every test that sets [`CONSOLE_LOCALE`], directly or through
+    /// `run_scan_command`: the console language is one value for the whole
+    /// test process, and tests run in parallel. Without it, a scan run by
+    /// `test_run_scan_command_scans_file_include_only` set it back to
+    /// English in the middle of the French checks of
+    /// `test_phase_progress_line_and_print`, which then failed now and then
+    /// (seen on 2026-11-25).
+    static CONSOLE_LOCALE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Takes [`CONSOLE_LOCALE_LOCK`], even after a test that held it
+    /// panicked: the lock only orders the tests, it guards no data that a
+    /// panic could leave half-written.
+    fn lock_console_locale() -> std::sync::MutexGuard<'static, ()> {
+        CONSOLE_LOCALE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 
     /// Ticket #214: the `text` format writes `file:line:` for a line
     /// finding and `file:` for a whole-file finding, never `file:1:`.
@@ -1064,8 +1274,98 @@ mod tests {
         assert_eq!(missing.err(), Some(ExitCode::from(2)));
     }
 
+    /// Ticket #294: the console line of a GitHub limit, rejected or cut,
+    /// with the rule it is about, in the console language.
+    #[test]
+    fn test_github_limit_line_names_the_limit() {
+        use codefixture_audit::report::exports::sarif::{GithubLimit, GithubLimitSubject};
+        let en = codefixture_audit::i18n::load_script_locale("en");
+        let tags = GithubLimit {
+            subject: GithubLimitSubject::RuleTags("python/xss".to_string()),
+            actual: 21,
+            limit: 20,
+            rejected: true,
+        };
+        assert_eq!(
+            github_limit_line(&tags, &en),
+            "GitHub code scanning would reject this SARIF file: the number of tags of rule python/xss is 21, at most 20."
+        );
+        let results = GithubLimit {
+            subject: GithubLimitSubject::Results,
+            actual: 7_500,
+            limit: 5_000,
+            rejected: false,
+        };
+        let fr = codefixture_audit::i18n::load_script_locale("fr");
+        assert_eq!(
+            github_limit_line(&results, &fr),
+            "GitHub code scanning ne garde qu'une partie de ce fichier SARIF : le nombre de résultats vaut 7\u{202f}500, il en garde 5\u{202f}000."
+        );
+        assert!(gzip_size(&"a".repeat(10_000)) < 1_000, "gzip compresses");
+    }
+
+    /// Ticket #292: the console line and the metrics block of each choice
+    /// for the client's rules.
+    #[test]
+    fn test_custom_rules_line_and_metrics_name_every_choice() {
+        use codefixture_audit::rules::custom::{
+            CustomRulesDir, CustomRulesOrigin, ScanCustomRules,
+        };
+        let en = codefixture_audit::i18n::load_script_locale("en");
+        let read = ScanCustomRules::Read(CustomRulesDir {
+            path: PathBuf::from("/srv/rules"),
+            origin: CustomRulesOrigin::Option,
+        });
+        assert_eq!(
+            custom_rules_line(&read, (3, 5), &en),
+            "Your rules: 3/5 rule file(s) kept for the project's languages, from the folder /srv/rules (--custom-rules-dir)"
+        );
+        let missing = ScanCustomRules::DefaultMissing(PathBuf::from(
+            "/home/ci/.codefixture-audit/custom-rules",
+        ));
+        assert!(custom_rules_line(&missing, (0, 0), &en).starts_with(
+            "Your rules: none, the folder /home/ci/.codefixture-audit/custom-rules does not exist"
+        ),);
+        assert_eq!(
+            custom_rules_line(&ScanCustomRules::NotRead, (0, 0), &en),
+            "Your rules: not read, --rules names the whole catalog"
+        );
+        assert!(
+            custom_rules_line(&ScanCustomRules::NoHome, (0, 0), &en)
+                .contains("CODEFIXTURE_AUDIT_CUSTOM_RULES")
+        );
+        let fr = codefixture_audit::i18n::load_script_locale("fr");
+        assert!(custom_rules_line(&read, (3, 5), &fr).starts_with("Vos règles : 3/5"));
+
+        let metrics = custom_rules_metrics(&read, (3, 5));
+        assert_eq!(
+            (
+                metrics.status,
+                metrics.path.as_deref(),
+                metrics.origin,
+                metrics.files_read,
+                metrics.files_available
+            ),
+            ("read", Some("/srv/rules"), Some("option"), 3, 5)
+        );
+        let metrics = custom_rules_metrics(&missing, (7, 7));
+        assert_eq!(
+            (metrics.status, metrics.origin, metrics.files_read),
+            ("default_missing", Some("default"), 0)
+        );
+        assert_eq!(
+            custom_rules_metrics(&ScanCustomRules::NotRead, (0, 0)).status,
+            "not_read"
+        );
+        assert_eq!(
+            custom_rules_metrics(&ScanCustomRules::NoHome, (0, 0)).path,
+            None
+        );
+    }
+
     #[test]
     fn test_phase_progress_line_and_print() {
+        let _console = lock_console_locale();
         let elapsed = std::time::Duration::from_millis(1_250);
         // The console language's colon and decimal separator (2026-11-24):
         // none before `:` in English, a space in French; `1,2 s` in
@@ -1140,6 +1440,7 @@ mod tests {
             rule_sources: vec![RuleSourceSummary {
                 path: PathBuf::from("/opt/cfa-3.0.0/rules.cfpack"),
                 kind: RuleSourceKind::Pack,
+                origin: codefixture_audit::rules::catalog::RuleOrigin::Builtin,
                 files_available: 7_110,
                 files_read: 4_510,
             }],
@@ -1178,6 +1479,16 @@ mod tests {
             let mut lines = memory_lines(&memory, &resources, false, &locale);
             lines.extend(memory_lines(&memory, &resources, true, &locale));
             lines.extend(rule_source_lines(&report, &locale));
+            lines.push(custom_rules_line(
+                &codefixture_audit::rules::custom::ScanCustomRules::Read(
+                    codefixture_audit::rules::custom::CustomRulesDir {
+                        path: PathBuf::from("/srv/rules"),
+                        origin: codefixture_audit::rules::custom::CustomRulesOrigin::Environment,
+                    },
+                ),
+                (1_250, 2_480),
+                &locale,
+            ));
             lines.push(cache_stat_line(&cache, say));
             lines.push(version_rules_line(&version_rules, &locale).1);
             lines.extend(custom_duplicate_lines(&duplicates, &locale));
@@ -1239,6 +1550,7 @@ mod tests {
             "75%",
             "1,023 of 1,024 cores",
             "4,510/7,110",
+            "1,250/2,480",
             "1,001/1,690",
             "30,420/30,420",
             "Maven 12,345, npm 2,600",
@@ -1261,6 +1573,7 @@ mod tests {
             "1\u{202f}234 Mo",
             "75\u{202f}%",
             "4\u{202f}510/7\u{202f}110",
+            "1\u{202f}250/2\u{202f}480",
             "Maven 12\u{202f}345, npm 2\u{202f}600",
             "11/11/2026",
             "59,9 s",
@@ -1448,7 +1761,13 @@ mod tests {
             timestamp: "2026-11-09-08-00".to_string(),
             ..ScanConfig::default()
         };
-        let written = write_sbom(&config, "demo", &Brand::default(), &chrono::Local::now());
+        let written = write_sbom(
+            &config,
+            "demo",
+            &Brand::default(),
+            &chrono::Local::now(),
+            None,
+        );
         let path = written.expect("SBOM written");
         let json = std::fs::read_to_string(&path).unwrap_or_default();
         std::fs::remove_dir_all(&root).ok();
@@ -1508,12 +1827,17 @@ fn rerun_command(args: impl Iterator<Item = String>) -> String {
     .join(" ")
 }
 
-/// Options of `scan` kept for the private binary only (2026-11-14): the
-/// shared binary offers a short list, checks the dependencies whenever
-/// its rule pack carries version rules (ADR-0043) and reads the project's
-/// `.sca-suppress.json` by itself; these options then take their default.
+/// Options of `scan` for a CI/CD pipeline, in both builds (ADR-0066,
+/// ticket #300): they change how the scan talks to the machine running it,
+/// never which rules run, so holding them back protects nothing (the
+/// product is the rule catalog, ADR-0034). Private-only from 2026-11-14 to
+/// 2026-11-25, when a client compiling the shared repository for a CI had
+/// neither JSON logs, nor a quiet mode, nor a metrics file. Shown under
+/// their own heading in `scan --help`, so that the help of a manual scan
+/// stays short.
 #[derive(clap::Args, Debug)]
-struct ScanExtraArgs {
+#[command(next_help_heading = "CI/CD")]
+struct ScanCiArgs {
     /// Console log format: `text` (default, `[codefixture-audit] …` lines)
     /// or `json` (one JSON object per line: `timestamp`, `level`,
     /// `message`, `duration_ms` for phases — ticket #92).
@@ -1523,15 +1847,60 @@ struct ScanExtraArgs {
     /// `<PREFIX>-REPORT-<timestamp>.html` (`PREFIX` from
     /// `brand.json`, `SCA` by default) into `audit-reports/` of
     /// the scanned folder (Audit uses `docs/audit-reports/`). Absent with
-    /// `--format text`/`sarif`: stdout.
+    /// another format: stdout.
     #[arg(long)]
     output: Option<PathBuf>,
+    /// Hides the progress lines on stderr (scope, steps, phases, skipped
+    /// files, cache use). The version, the paths of the files written
+    /// (report, scan data, SBOM, metrics), the summary, the warnings and
+    /// the errors stay.
+    #[arg(long)]
+    quiet: bool,
+    /// Writes a JSON file of scan metrics (files/LOC scanned,
+    /// findings by severity, per-phase durations, the client's rules
+    /// read, exit code) to this path — opt-in, local file only (ticket #90).
+    #[arg(long)]
+    metrics_output: Option<PathBuf>,
+    /// The exit code counts only the findings new against the scan given
+    /// with `--baseline`, which it requires (in a CI job: the scan data of
+    /// the main branch), so that a project that already has findings can
+    /// block only what a change adds. A finding is the same when its file,
+    /// its rule and its code are, wherever its line moved.
+    #[arg(long)]
+    fail_on_new: bool,
+    /// The severity from which a finding blocks: `critical`, `high`
+    /// (default: HIGH and CRITICAL block), `medium`, `low` or `info`.
+    #[arg(
+        long,
+        value_name = "SEVERITY",
+        ignore_case = true,
+        value_parser = clap::builder::PossibleValuesParser::new(["critical", "high", "medium", "low", "info"])
+    )]
+    fail_on: Option<String>,
+    /// How many blocking findings the scan tolerates before it fails (exit
+    /// code 1): it overrides `thresholds.max_high` of `audit.config.json`
+    /// (default: 0, the first blocking finding fails).
+    #[arg(long, value_name = "N")]
+    max_blocking: Option<u64>,
+    /// Writes the CycloneDX SBOM to this file instead of
+    /// `audit-reports/audit-datas/<PREFIX>-SBOM-<timestamp>.json`, for a CI
+    /// job that keeps it under a fixed name; implies `--sbom`.
+    #[arg(long, value_name = "FILE")]
+    sbom_output: Option<PathBuf>,
+}
+
+/// Options of `scan` kept for the private binary only (2026-11-14): the
+/// editor's tools, and what carries a risk (`--with-tests` runs the
+/// project's code). The shared binary checks the dependencies whenever
+/// its rule pack carries version rules (ADR-0043) and reads the project's
+/// `.sca-suppress.json` by itself; these options then take their default.
+/// The CI/CD options left this list for [`ScanCiArgs`] (ADR-0066). The
+/// shared binary runs with [`Default`]: every option off or empty.
+#[derive(clap::Args, Debug, Default)]
+struct ScanExtraArgs {
     /// `.sca-suppress.json` file.
     #[arg(long)]
     suppress_file: Option<PathBuf>,
-    /// Only displays the report, not the summary on stderr.
-    #[arg(long)]
-    quiet: bool,
     /// Runs the audited project's test suite (opt-in, executes
     /// arbitrary project code).
     #[arg(long)]
@@ -1569,6 +1938,8 @@ struct ScanExtraArgs {
     disable_rule: Vec<String>,
     /// Severities to keep, comma-separated (e.g.
     /// "HIGH,CRITICAL"). Accepted values: CRITICAL/HIGH/MEDIUM/LOW/INFO.
+    /// The findings left out are not counted for the exit code either;
+    /// `--fail-on` chooses which findings block (ticket #290).
     #[arg(long)]
     severity: Option<String>,
     /// `brand.json` runtime customization file (ticket #87/spec
@@ -1577,36 +1948,6 @@ struct ScanExtraArgs {
     /// defaults).
     #[arg(long)]
     brand_file: Option<PathBuf>,
-    /// Writes a JSON file of scan metrics (files/LOC scanned,
-    /// findings by severity, per-phase durations, exit code) to this
-    /// path — opt-in, local file only (ticket #90).
-    #[arg(long)]
-    metrics_output: Option<PathBuf>,
-}
-
-impl Default for ScanExtraArgs {
-    fn default() -> Self {
-        Self {
-            log_format: "text".to_string(),
-            output: None,
-            suppress_file: None,
-            quiet: false,
-            with_tests: false,
-            test_command: None,
-            with_deps: false,
-            db_host: None,
-            db_port: None,
-            db_name: None,
-            db_user: None,
-            db_password_env_file: None,
-            db_password_env_var: None,
-            data_dir: None,
-            disable_rule: Vec::new(),
-            severity: None,
-            brand_file: None,
-            metrics_output: None,
-        }
-    }
 }
 
 #[derive(Subcommand)]
@@ -1674,8 +2015,10 @@ enum Command {
         // (ADR-0041). The `///` text below is the `--help` line.
         /// Folder of your own rules (`.sca` files), loaded IN ADDITION to
         /// the delivered rules and filtered on the same languages. Default:
+        /// the environment variable CODEFIXTURE_AUDIT_CUSTOM_RULES, else
         /// `~/.codefixture-audit/custom-rules`, which no build or update
-        /// touches. Ignored with `--rules`.
+        /// touches. A folder given here or by the variable must exist.
+        /// Ignored with `--rules`. The scan always says what it read.
         #[arg(long)]
         custom_rules_dir: Option<PathBuf>,
         // Ticket #281. The `///` text below is the `--help` line.
@@ -1723,6 +2066,10 @@ enum Command {
             default_missing_value = ""
         )]
         debug_log: Option<String>,
+        // Last: `ScanCiArgs` sets the "CI/CD" heading for the options that
+        // follow it in `scan --help`, so nothing may come after it.
+        #[command(flatten)]
+        ci: ScanCiArgs,
     },
     /// Lists the builtin rules by category (mirrors `--list-rules`).
     ListRules {
@@ -1755,7 +2102,9 @@ enum CustomRulesAction {
         /// Language of the questions (`en`/`fr`/`es`/`de`).
         #[arg(long, default_value = "en")]
         lang: String,
-        /// Folder of your rules — default: `~/.codefixture-audit/custom-rules`.
+        /// Folder of your rules — default: the environment variable
+        /// CODEFIXTURE_AUDIT_CUSTOM_RULES, else
+        /// `~/.codefixture-audit/custom-rules`.
         #[arg(long)]
         custom_rules_dir: Option<PathBuf>,
         /// Delivered rules your rule is compared with — default:
@@ -1771,7 +2120,9 @@ enum CustomRulesAction {
         /// Rules to test, as `<language>/<rule>` (repeatable) — default:
         /// every case of the registry.
         rules: Vec<String>,
-        /// Folder of your rules — default: `~/.codefixture-audit/custom-rules`.
+        /// Folder of your rules — default: the environment variable
+        /// CODEFIXTURE_AUDIT_CUSTOM_RULES, else
+        /// `~/.codefixture-audit/custom-rules`.
         #[arg(long)]
         custom_rules_dir: Option<PathBuf>,
         /// Machine-readable result on stdout.
@@ -1793,7 +2144,9 @@ enum CustomRulesAction {
         rule: String,
         /// The project to run it on (its `audit.config.json` paths apply).
         project: PathBuf,
-        /// Folder of your rules — default: `~/.codefixture-audit/custom-rules`.
+        /// Folder of your rules — default: the environment variable
+        /// CODEFIXTURE_AUDIT_CUSTOM_RULES, else
+        /// `~/.codefixture-audit/custom-rules`.
         #[arg(long)]
         custom_rules_dir: Option<PathBuf>,
         /// Delivered rules run beside it, to name the lines where your rule
@@ -1927,11 +2280,16 @@ fn dispatch(command: Command) -> ExitCode {
             max_memory,
             cpu,
             debug_log,
+            ci,
         } => {
             // Ticket #281: the limits are resolved and the thread pool
             // sized here, in the binary's entry point, before anything
             // uses the pool (the debug log header reads its size). The
             // console format must be known for an error.
+            JSON_LOGS.store(
+                ci.log_format == "json",
+                std::sync::atomic::Ordering::Relaxed,
+            );
             let resources = match start_scan_resources(cpu.as_deref(), max_memory.as_deref(), &lang)
             {
                 Ok(resources) => resources,
@@ -1952,6 +2310,7 @@ fn dispatch(command: Command) -> ExitCode {
                 skip_memory_check,
                 resources,
                 debug_log,
+                ci,
             })
         }
         Command::ListRules { lang, rules } => run_list_rules_command(&lang, rules),
@@ -2223,11 +2582,9 @@ fn run_custom_rules_create_command(
         emit_error(&say("wizard_needs_terminal"));
         return ExitCode::from(2);
     }
-    let Some(rules_dir) =
-        codefixture_audit::rules::custom::resolve_custom_rules_dir(false, custom_rules_dir)
-    else {
-        emit_error(&say("custom_rules_no_home"));
-        return ExitCode::from(2);
+    let rules_dir = match custom_rules_tool_dir(custom_rules_dir, &script_locale) {
+        Ok(dir) => dir,
+        Err(code) => return code,
     };
     let pack = match resolve_rules_path(rules, &script_locale) {
         Ok(path) => path,
@@ -2437,11 +2794,9 @@ fn run_custom_rules_test_command(
     use codefixture_audit::rules::custom::skeleton::registry_path;
     let script_locale = codefixture_audit::i18n::load_script_locale(lang);
     let say = |key: &str| codefixture_audit::i18n::t(&script_locale, key);
-    let Some(rules_dir) =
-        codefixture_audit::rules::custom::resolve_custom_rules_dir(false, custom_rules_dir)
-    else {
-        emit_error(&say("custom_rules_no_home"));
-        return ExitCode::from(2);
+    let rules_dir = match custom_rules_tool_dir(custom_rules_dir, &script_locale) {
+        Ok(dir) => dir,
+        Err(code) => return code,
     };
     let registry_file = registry_path(&rules_dir);
     if !registry_file.is_file() {
@@ -2516,11 +2871,9 @@ fn run_custom_rules_try_command(
     use codefixture_audit::rules::custom::try_rule::{RuleLookupError, find_client_rule, try_rule};
     let script_locale = codefixture_audit::i18n::load_script_locale(lang);
     let say = |key: &str| codefixture_audit::i18n::t(&script_locale, key);
-    let Some(rules_dir) =
-        codefixture_audit::rules::custom::resolve_custom_rules_dir(false, custom_rules_dir)
-    else {
-        emit_error(&say("custom_rules_no_home"));
-        return ExitCode::from(2);
+    let rules_dir = match custom_rules_tool_dir(custom_rules_dir, &script_locale) {
+        Ok(dir) => dir,
+        Err(code) => return code,
     };
     if !project.is_dir() {
         emit_error(&say("scan_invalid_path").replace("{path}", &project.display().to_string()));
@@ -2820,23 +3173,28 @@ fn run_list_rules_command(lang: &str, rules: Option<PathBuf>) -> ExitCode {
 }
 
 /// Writes the CycloneDX SBOM of the project's statically parsed
-/// dependencies to `<data dir>/<PREFIX>-SBOM-<timestamp>.json` — same
-/// location and name pattern as Python (`comparison.py::_export_sbom`,
+/// dependencies to `target` (`--sbom-output`, ticket #296), else to
+/// `<data dir>/<PREFIX>-SBOM-<timestamp>.json` — same location and name
+/// pattern as Python (`comparison.py::_export_sbom`,
 /// `{datas_dir}/{brand_prefix}-SBOM-{timestamp}.json`), same manifests as
-/// the `--with-deps` phase (`dependencies::collect_dependencies`).
-/// Returns the written path, or a description of the I/O/serialization
-/// failure.
+/// the `--with-deps` phase (`dependencies::collect_dependencies`). Each
+/// SBOM gets a new serial number. Returns the written path, or a
+/// description of the I/O, random source or serialization failure.
 fn write_sbom(
     config: &ScanConfig,
     project_name: &str,
     brand: &Brand,
     now: &chrono::DateTime<chrono::Local>,
+    target: Option<&Path>,
 ) -> Result<PathBuf, String> {
     let dir = config
         .datas_dir
         .clone()
         .unwrap_or_else(|| config.root.join(DATAS_DIR));
-    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    if target.is_none() {
+        std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    }
+    let serial_number = codefixture_audit::report::exports::sbom::random_serial_number()?;
     let deps = codefixture_audit::project::dependencies::collect_dependencies(
         &config.root,
         &config.include_paths,
@@ -2850,14 +3208,18 @@ fn write_sbom(
         // A deliverable: the release version, never the build identifier.
         codefixture_audit::RELEASE_VERSION,
         &now.to_rfc3339(),
+        &serial_number,
     );
     let json = sbom
         .to_json_string()
         .map_err(|e| format!("SBOM serialization: {e}"))?;
-    let path = dir.join(format!(
-        "{}-SBOM-{}.json",
-        config.brand_prefix, config.timestamp
-    ));
+    let path = match target {
+        Some(file) => file.to_path_buf(),
+        None => dir.join(format!(
+            "{}-SBOM-{}.json",
+            config.brand_prefix, config.timestamp
+        )),
+    };
     std::fs::write(&path, json).map_err(|e| format!("{}: {e}", path.display()))?;
     Ok(path)
 }
@@ -2958,6 +3320,8 @@ struct ScanArgs {
     resources: codefixture_audit::scan::resources::ScanResources,
     /// `--debug-log`: `Some("")` for the default file, `None` when off.
     debug_log: Option<String>,
+    /// The CI/CD options, in both builds (ADR-0066).
+    ci: ScanCiArgs,
 }
 
 fn run_scan_command(args: ScanArgs) -> ExitCode {
@@ -2976,14 +3340,24 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
         skip_memory_check,
         resources,
         debug_log,
+        ci,
     } = args;
+    let ScanCiArgs {
+        log_format,
+        output,
+        quiet,
+        metrics_output,
+        fail_on_new,
+        fail_on,
+        max_blocking,
+        sbom_output,
+    } = ci;
+    // Ticket #296: a path for the SBOM asks for an SBOM.
+    let sbom = sbom || sbom_output.is_some();
     // The shared binary has none of these options: their defaults.
     let extra = ScanExtraArgs::default();
     let ScanExtraArgs {
-        log_format,
-        output,
         suppress_file,
-        quiet,
         with_tests,
         test_command,
         with_deps,
@@ -2997,7 +3371,6 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
         disable_rule,
         severity,
         brand_file,
-        metrics_output,
     } = extra;
     let t_command_start = std::time::Instant::now();
     JSON_LOGS.store(log_format == "json", std::sync::atomic::Ordering::Relaxed);
@@ -3123,6 +3496,15 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
         );
         return ExitCode::from(2);
     }
+
+    // Ticket #290: which findings block and how many are tolerated, read
+    // before the scan, so that an invalid `thresholds.max_high` stops here
+    // rather than after a long analysis.
+    let blocking_rule = match blocking_rule(fail_on.as_deref(), max_blocking, &path, &script_locale)
+    {
+        Ok(rule) => rule,
+        Err(code) => return code,
+    };
 
     let project_name = codefixture_audit::project::project_config::project_name_of(&path);
 
@@ -3290,11 +3672,17 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
     let category_overrides =
         codefixture_audit::project::project_config::read_category_overrides_config(&path);
 
-    // The client's own rules, read by both builds since ADR-0057.
-    let custom_rules_dir = codefixture_audit::rules::custom::resolve_custom_rules_dir(
-        explicit_rules,
-        custom_rules_dir,
-    );
+    // The client's own rules, read by both builds since ADR-0057. The
+    // choice is named on the console after the rule lines (ticket #292).
+    let custom_rules =
+        match scan_custom_rules_or_exit(explicit_rules, custom_rules_dir, &script_locale) {
+            Ok(choice) => choice,
+            Err(code) => return code,
+        };
+    let custom_rules_dir = match &custom_rules {
+        codefixture_audit::rules::custom::ScanCustomRules::Read(dir) => Some(dir.path.clone()),
+        _ => None,
+    };
 
     // Default: next to the executable (ticket #87/spec #83).
     // `load_brand_file`
@@ -3309,6 +3697,20 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
     let brand: Brand = brand_file
         .and_then(|p| load_brand_file(&p))
         .unwrap_or_default();
+
+    // Ticket #289: `--fail-on-new` compares with the scan named by
+    // `--baseline` (already read above), never with the latest scan of the
+    // history folder: on a CI server whose workspace persists, that one is
+    // the previous pipeline's, maybe of another branch, and a new finding
+    // would pass from the second run on. Without `--baseline`, it stops
+    // (exit 2) and says what to give.
+    if fail_on_new && baseline.is_none() {
+        emit_error(
+            &codefixture_audit::i18n::t(&script_locale, "scan_fail_on_new_no_baseline")
+                .replace("{prefix}", &effective_prefix(&brand)),
+        );
+        return ExitCode::from(2);
+    }
 
     // By default (no --output), the HTML report is written to
     // `audit-reports` (`REPORTS_DIR`) under the scanned directory — same
@@ -3417,7 +3819,10 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
         && !config.with_tests
         && config.database.is_none()
         && metrics_output.is_none()
-        && !(format == "html" && explicit_output);
+        && !(format == "html" && explicit_output)
+        // Ticket #296: an explicit SBOM path expects a file written there,
+        // as an explicit HTML report path does.
+        && sbom_output.is_none();
     let shortcut_step = codefixture_audit::scan::debug_log::span("unchanged", || {
         format!("unchanged_check allowed={shortcut_allowed}")
     });
@@ -3433,7 +3838,8 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
             format: &format,
             output: output.as_deref().filter(|_| format != "html"),
             brand: &brand,
-            quiet,
+            custom_rules: &custom_rules,
+            blocking_rule: &blocking_rule,
             sbom: sbom.then_some((project_name.as_str(), &now)),
             script_locale: &script_locale,
             t_command_start,
@@ -3526,6 +3932,8 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
     for line in rule_source_lines(&report, &script_locale) {
         emit_progress(quiet, &format!("[codefixture-audit] {line}"));
     }
+    let client_counts = client_rule_counts(&report).unwrap_or((0, 0));
+    emit_custom_rules_line(&custom_rules, client_counts, &script_locale);
     // Ticket #152: the folders skipped as holding no project code, named
     // once per scan (`--quiet` hides it, like the scope line).
     if let Some(line) = skipped_dirs_line(&config.root, &report.skipped_dirs, |key| {
@@ -3588,16 +3996,15 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
     if sbom {
         let _sbom_step =
             codefixture_audit::scan::debug_log::span("report", || "write_sbom".to_string());
-        match write_sbom(&config, &project_name, &brand, &now) {
+        match write_sbom(&config, &project_name, &brand, &now, sbom_output.as_deref()) {
             Ok(sbom_path) => {
-                emit_progress(
-                    quiet,
-                    &format!(
-                        "[codefixture-audit] SBOM{}{}",
-                        codefixture_audit::i18n::t(&script_locale, "label_colon"),
-                        sbom_path.display()
-                    ),
-                );
+                // Ticket #297: a file written is a result, not progress: a
+                // CI job reads its path to keep it, `--quiet` or not.
+                emit_result(&format!(
+                    "[codefixture-audit] SBOM{}{}",
+                    codefixture_audit::i18n::t(&script_locale, "label_colon"),
+                    sbom_path.display()
+                ));
                 sbom_written = Some(sbom_path);
             }
             Err(e) => {
@@ -3624,7 +4031,12 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
                 project_version: String::new(),
                 project_uuid: String::new(),
                 project_description: String::new(),
-                project_path: config.root.display().to_string(),
+                // The full path of the folder scanned, not the one typed
+                // (`.` for `scan .` before 2026-11-25): shown in the header
+                // and the parameters section of the report.
+                project_path: codefixture_audit::project::project_config::project_dir_text(
+                    &codefixture_audit::project::project_config::project_dir_of(&config.root),
+                ),
                 tool_name: effective_tool_name(&brand),
                 // Footer, title and generator of the report: the release
                 // version, it showed "v0.1.0+506.ade3297" before 2026-11-24.
@@ -3698,10 +4110,21 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
     let write_step = codefixture_audit::scan::debug_log::span("report", || {
         format!("write_output path={:?}", output.as_deref())
     });
-    if let Err(code) = write_scan_output(output.as_deref(), &output_text, quiet, &script_locale) {
+    if let Err(code) = write_scan_output(output.as_deref(), &output_text, &script_locale) {
         return code;
     }
     drop(write_step);
+    // Ticket #297: the scan data (`<PREFIX>-DATA-<date>.json`) is the file a
+    // later scan compares with (`--baseline`): a CI job keeps it from one
+    // pipeline to the next, so its path is a result. It was never printed
+    // before 2026-11-25.
+    if let Some(export_path) = &report.export_path {
+        emit_result(&format!(
+            "[codefixture-audit] {}",
+            codefixture_audit::i18n::t(&script_locale, "scan_export_written")
+                .replace("{path}", &export_path.display().to_string())
+        ));
+    }
 
     // ADR-0050: the record that lets the next scan skip everything when
     // nothing changes, written once this scan's export and report exist,
@@ -3719,6 +4142,7 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
             report.total_loc,
         );
         record.sbom_path = sbom_written;
+        record.client_rules = client_rule_counts(&report);
         let saved = record.save(&config);
         codefixture_audit::debug_log!(
             "report",
@@ -3730,11 +4154,46 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
         );
     }
 
+    // Ticket #289: with `--fail-on-new`, only the findings new against the
+    // `--baseline` scan count for the exit code. The
+    // comparison is the report's own (`report::comparison`), so the exit
+    // code and the report's "new findings" never disagree.
+    let blocking: Vec<ReportFinding> = if fail_on_new {
+        let Some(comparison) = &report.comparison else {
+            // The baseline was read before the scan: only a file removed
+            // or damaged during the scan leaves no comparison.
+            emit_error(
+                &codefixture_audit::i18n::t(&script_locale, "scan_baseline_unreadable")
+                    .replace(
+                        "{path}",
+                        &baseline
+                            .as_deref()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_default(),
+                    )
+                    .replace("{error}", "no comparison could be made"),
+            );
+            return ExitCode::from(2);
+        };
+        emit_result(&format!(
+            "[codefixture-audit] {}",
+            fail_on_new_summary(
+                comparison,
+                baseline.as_deref(),
+                &blocking_rule,
+                &script_locale
+            )
+        ));
+        comparison.new_findings.clone()
+    } else {
+        report.findings.clone()
+    };
     let exit_code = finish_scan(
         &report.findings,
+        &blocking,
+        &blocking_rule,
         report.files_scanned,
         report.total_loc,
-        &config.root,
         &script_locale,
         t_command_start,
     );
@@ -3749,6 +4208,7 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
             &now.to_rfc3339(),
             t_command_start.elapsed().as_millis(),
             exit_code,
+            &custom_rules_metrics(&custom_rules, client_counts),
         );
         let written = serde_json::to_string_pretty(&metrics)
             .map_err(|e| e.to_string())
@@ -3760,6 +4220,13 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
             );
             return ExitCode::from(4);
         }
+        // Ticket #297: named like the other files written, even with
+        // `--quiet`.
+        emit_result(&format!(
+            "[codefixture-audit] {}",
+            codefixture_audit::i18n::t(&script_locale, "scan_metrics_written")
+                .replace("{path}", &metrics_path.display().to_string())
+        ));
     }
     ExitCode::from(exit_code)
 }
@@ -3777,22 +4244,71 @@ fn sarif_text(
         codefixture_audit::RELEASE_VERSION,
         &effective_website_url(brand),
     );
-    serde_json::to_string_pretty(&sarif).map_err(|e| {
+    let text = serde_json::to_string_pretty(&sarif).map_err(|e| {
         emit_error(
             &codefixture_audit::i18n::t(script_locale, "scan_internal_error")
                 .replace("{error}", &format!("SARIF serialization: {e}")),
         );
         ExitCode::from(4)
+    })?;
+    // Ticket #294: what GitHub code scanning would reject or cut, named
+    // before the file reaches it. The file is written all the same: other
+    // tools read SARIF without these limits.
+    for limit in codefixture_audit::report::exports::sarif::github_limits(&sarif, gzip_size(&text))
+    {
+        emit_warning(&format!(
+            "[codefixture-audit] {}",
+            github_limit_line(&limit, script_locale)
+        ));
+    }
+    Ok(text)
+}
+
+/// The size of `text` once gzip-compressed, as GitHub measures an upload.
+fn gzip_size(text: &str) -> usize {
+    use std::io::Write;
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    // Writing to memory cannot fail.
+    encoder.write_all(text.as_bytes()).expect("gzip to memory");
+    encoder.finish().expect("gzip to memory").len()
+}
+
+/// The console line of a limit of GitHub code scanning that the SARIF
+/// output goes beyond (ticket #294).
+fn github_limit_line(
+    limit: &codefixture_audit::report::exports::sarif::GithubLimit,
+    script_locale: &serde_json::Value,
+) -> String {
+    use codefixture_audit::report::exports::sarif::GithubLimitSubject;
+    let say = |key: &str| codefixture_audit::i18n::t(script_locale, key);
+    let numbers = LocaleFormat::of_console(script_locale);
+    let (key, rule) = match &limit.subject {
+        GithubLimitSubject::CompressedSize => ("sarif_limit_compressed", None),
+        GithubLimitSubject::Results => ("sarif_limit_results", None),
+        GithubLimitSubject::Rules => ("sarif_limit_rules", None),
+        GithubLimitSubject::RuleTags(rule) => ("sarif_limit_tags", Some(rule)),
+        GithubLimitSubject::FlowSteps(rule) => ("sarif_limit_flow", Some(rule)),
+        GithubLimitSubject::Description(rule) => ("sarif_limit_description", Some(rule)),
+        GithubLimitSubject::Name(rule) => ("sarif_limit_name", Some(rule)),
+    };
+    let what = say(key).replace("{rule}", rule.map(String::as_str).unwrap_or_default());
+    say(if limit.rejected {
+        "sarif_github_rejected"
+    } else {
+        "sarif_github_cut"
     })
+    .replace("{what}", &what)
+    .replace("{actual}", &numbers.count(limit.actual))
+    .replace("{limit}", &numbers.count(limit.limit))
 }
 
 /// Writes a scan's output to `output` and names the file, or prints it on
 /// stdout without `output`. A write error is reported, and the exit code
-/// is returned.
+/// is returned. The file is named even with `--quiet` (ticket #297): a CI
+/// job needs its path, and before 2026-11-25 `--quiet` hid it.
 fn write_scan_output(
     output: Option<&Path>,
     text: &str,
-    quiet: bool,
     script_locale: &serde_json::Value,
 ) -> Result<(), ExitCode> {
     let Some(out_path) = output else {
@@ -3806,26 +4322,126 @@ fn write_scan_output(
         );
         return Err(ExitCode::from(4));
     }
-    emit_progress(
-        quiet,
-        &format!(
-            "[codefixture-audit] {}{}{}",
-            codefixture_audit::i18n::t(script_locale, "report_generated"),
-            codefixture_audit::i18n::t(script_locale, "label_colon"),
-            out_path.display()
-        ),
-    );
+    emit_result(&format!(
+        "[codefixture-audit] {}{}{}",
+        codefixture_audit::i18n::t(script_locale, "report_generated"),
+        codefixture_audit::i18n::t(script_locale, "label_colon"),
+        out_path.display()
+    ));
     Ok(())
+}
+
+/// Which findings fail a scan, and how many are tolerated (ticket #290).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BlockingRule {
+    /// The lowest severity that blocks, as the findings write it
+    /// (`HIGH`): it and every severity above it block.
+    severity: &'static str,
+    /// Blocking findings tolerated before the scan fails: `--max-blocking`,
+    /// else `thresholds.max_high` of `audit.config.json`, else 0.
+    tolerated: u64,
+}
+
+/// The severities, the worst first.
+const SEVERITIES_WORST_FIRST: [&str; 5] = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"];
+
+impl BlockingRule {
+    /// Whether `finding` blocks: its severity is this rule's or worse. A
+    /// severity the engine does not write never blocks; none exists today.
+    fn blocks(&self, finding: &ReportFinding) -> bool {
+        let rank = |severity: &str| SEVERITIES_WORST_FIRST.iter().position(|s| *s == severity);
+        match (rank(&finding.severity), rank(self.severity)) {
+            (Some(finding_rank), Some(rule_rank)) => finding_rank <= rule_rank,
+            _ => false,
+        }
+    }
+}
+
+/// The blocking rule of a scan of `root`: `--fail-on` (default HIGH, the
+/// gate of ticket #42), and `--max-blocking`, which overrides
+/// `thresholds.max_high` of `audit.config.json`. A `thresholds.max_high`
+/// that is not a whole number of 0 or more stops the scan (exit 2) with
+/// the file and the value; it counted as 0 without a word before
+/// 2026-11-25. `--fail-on` and `--max-blocking` are checked by clap.
+fn blocking_rule(
+    fail_on: Option<&str>,
+    max_blocking: Option<u64>,
+    root: &Path,
+    script_locale: &serde_json::Value,
+) -> Result<BlockingRule, ExitCode> {
+    let severity = match fail_on.map(str::to_uppercase) {
+        None => "HIGH",
+        Some(given) => SEVERITIES_WORST_FIRST
+            .into_iter()
+            .find(|s| *s == given)
+            .expect("clap accepts only these severities"),
+    };
+    let tolerated = match max_blocking {
+        Some(n) => n,
+        None => match codefixture_audit::project::project_config::read_max_high_threshold(root) {
+            Ok(value) => value.unwrap_or(0),
+            Err(value) => {
+                emit_error(
+                    &codefixture_audit::i18n::t(script_locale, "scan_threshold_invalid")
+                        .replace(
+                            "{file}",
+                            &root.join("audit.config.json").display().to_string(),
+                        )
+                        .replace("{value}", &value),
+                );
+                return Err(ExitCode::from(2));
+            }
+        },
+    };
+    Ok(BlockingRule {
+        severity,
+        tolerated,
+    })
+}
+
+/// The console line of `--fail-on-new` (ticket #289): the scan compared
+/// with, its new findings, how many of them block, and how many were
+/// already there. Shown even with `--quiet`: it explains the exit code.
+fn fail_on_new_summary(
+    comparison: &codefixture_audit::report::comparison::ComparisonResult,
+    baseline: Option<&Path>,
+    rule: &BlockingRule,
+    script_locale: &serde_json::Value,
+) -> String {
+    let numbers = LocaleFormat::of_console(script_locale);
+    let blocking = comparison
+        .new_findings
+        .iter()
+        .filter(|f| rule.blocks(f))
+        .count();
+    codefixture_audit::i18n::t(script_locale, "scan_fail_on_new_summary")
+        .replace("{date}", &numbers.scan_timestamp(&comparison.baseline_date))
+        .replace(
+            "{path}",
+            &baseline
+                .map(|p| p.display().to_string())
+                .unwrap_or_default(),
+        )
+        .replace("{new}", &numbers.count(comparison.new_findings.len()))
+        .replace("{blocking}", &numbers.count(blocking))
+        .replace("{severity}", rule.severity)
+        .replace(
+            "{unchanged}",
+            &numbers.count(comparison.unchanged_findings.len()),
+        )
 }
 
 /// The last two lines of every scan, full or skipped as unchanged
 /// (ADR-0050): the summary and the total duration. Returns the exit code
-/// that `findings` give against the project's threshold.
+/// that `blocking` gives against the project's threshold: every finding,
+/// or with `--fail-on-new` the findings new against the baseline (ticket
+/// #289). The summary counts `findings`, all of them.
 fn finish_scan(
     findings: &[ReportFinding],
+    blocking: &[ReportFinding],
+    rule: &BlockingRule,
     files_scanned: usize,
     total_loc: usize,
-    root: &Path,
     script_locale: &serde_json::Value,
     t_command_start: std::time::Instant,
 ) -> u8 {
@@ -3852,24 +4468,18 @@ fn finish_scan(
         emit_json_line(
             LogLevel::Info,
             &duration,
-            Some(serde_json::json!(total_elapsed.as_millis())),
+            &[("duration_ms", serde_json::json!(total_elapsed.as_millis()))],
         );
     } else {
         emit_result(&format!("[codefixture-audit] {duration}"));
     }
 
-    let high_count = findings
-        .iter()
-        .filter(|f| f.severity == "HIGH" || f.severity == "CRITICAL")
-        .count();
-    // Configurable threshold (ticket #42/spec #27) — `0` by default
-    // (missing file or no `thresholds` section) reproduces
-    // exactly the previous hardcoded behavior: failure as soon as
-    // at least one HIGH/CRITICAL exists. Accepted deviations vs Python
-    // documented in `read_max_high_threshold_config`.
-    let max_high_threshold =
-        codefixture_audit::project::project_config::read_max_high_threshold_config(root);
-    u8::from(high_count as i64 > max_high_threshold)
+    let blocking_count = blocking.iter().filter(|f| rule.blocks(f)).count() as u64;
+    // Configurable threshold (ticket #42/spec #27, options of ticket #290):
+    // by default HIGH and CRITICAL block and none is tolerated, the
+    // previous hardcoded behavior. Accepted deviations vs Python
+    // documented in `read_max_high_threshold`.
+    u8::from(blocking_count > rule.tolerated)
 }
 
 /// The last two lines of a scan, without their `[codefixture-audit]`
@@ -3904,7 +4514,13 @@ struct UnchangedScan<'a> {
     /// Where `sarif` and `text` go; `None` for stdout, and for `html`.
     output: Option<&'a Path>,
     brand: &'a Brand,
-    quiet: bool,
+    /// What this scan does with the client's rules, named as in a full
+    /// scan (ticket #292).
+    custom_rules: &'a codefixture_audit::rules::custom::ScanCustomRules,
+    /// Which findings block, and how many are tolerated (ticket #290): the
+    /// exit code is computed again from the last export's findings with
+    /// this scan's options.
+    blocking_rule: &'a BlockingRule,
     /// Project name and scan date when `--sbom` is set.
     sbom: Option<(&'a str, &'a chrono::DateTime<chrono::Local>)>,
     script_locale: &'a serde_json::Value,
@@ -3936,6 +4552,15 @@ fn report_unchanged_scan(scan: UnchangedScan<'_>) -> ExitCode {
         "[codefixture-audit] {}",
         say("scan_unchanged").replace("{date}", &date)
     ));
+    // Ticket #292: the client's rules, as the last scan read them. Equal
+    // fingerprints mean the same rule files (`ScanInputs`), so its counts
+    // hold; a record without counts read no client folder, and an equal
+    // fingerprint then means the folder holds no rule file.
+    emit_custom_rules_line(
+        scan.custom_rules,
+        scan.last.client_rules.unwrap_or((0, 0)),
+        scan.script_locale,
+    );
     // The SBOM follows the report: the one written for these inputs is
     // named, not written again; written only when none was yet, and then
     // kept in the record for the next runs.
@@ -3946,16 +4571,15 @@ fn report_unchanged_scan(scan: UnchangedScan<'_>) -> ExitCode {
             say("scan_unchanged_sbom").replace("{path}", &sbom_path.display().to_string())
         ));
     } else if let Some((project_name, now)) = scan.sbom {
-        match write_sbom(scan.config, project_name, scan.brand, now) {
+        // `--sbom-output` never takes this shortcut: the default path only.
+        match write_sbom(scan.config, project_name, scan.brand, now, None) {
             Ok(sbom_path) => {
-                emit_progress(
-                    scan.quiet,
-                    &format!(
-                        "[codefixture-audit] SBOM{}{}",
-                        codefixture_audit::i18n::t(scan.script_locale, "label_colon"),
-                        sbom_path.display()
-                    ),
-                );
+                // Ticket #297: named even with `--quiet`, as in a full scan.
+                emit_result(&format!(
+                    "[codefixture-audit] SBOM{}{}",
+                    codefixture_audit::i18n::t(scan.script_locale, "label_colon"),
+                    sbom_path.display()
+                ));
                 // A record that cannot be written only costs the next run
                 // a new SBOM.
                 let mut record = scan.last.clone();
@@ -3981,8 +4605,7 @@ fn report_unchanged_scan(scan: UnchangedScan<'_>) -> ExitCode {
     };
     match text {
         Some(text) => {
-            if let Err(code) = write_scan_output(scan.output, &text, scan.quiet, scan.script_locale)
-            {
+            if let Err(code) = write_scan_output(scan.output, &text, scan.script_locale) {
                 return code;
             }
         }
@@ -3996,11 +4619,14 @@ fn report_unchanged_scan(scan: UnchangedScan<'_>) -> ExitCode {
             }
         }
     }
+    // `--fail-on-new` never takes this shortcut (it sets a baseline), so
+    // every finding counts here.
     ExitCode::from(finish_scan(
         &export.findings,
+        &export.findings,
+        scan.blocking_rule,
         scan.last.files_scanned,
         scan.last.total_loc,
-        &scan.config.root,
         scan.script_locale,
         scan.t_command_start,
     ))

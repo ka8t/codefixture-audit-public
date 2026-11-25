@@ -90,6 +90,7 @@ Depuis le dossier `codefixture-audit-public` (sous Windows, `.\target\release\co
 | Un rapport en français, espagnol ou allemand | `--lang fr`, `--lang es` ou `--lang de` |
 | Lister les règles | `./target/release/codefixture-audit list-rules` |
 | Un SBOM CycloneDX de vos dépendances | ajoutez `--sbom` (voir [Export SBOM](INSTALLATION.fr.md#export-sbom)) |
+| La lancer dans un job de CI | `--quiet`, `--output <fichier>`, `--metrics-output <fichier>`, `--log-format json`, `--fail-on-new --baseline <données d'analyse de la branche principale>` pour ne bloquer que ce qu'un changement ajoute, `--fail-on <gravité>` et `--max-blocking <N>` pour choisir ce qui bloque, `--sbom-output <fichier>` pour garder le SBOM sous un nom fixe (listées sous `CI/CD` dans `scan --help` ; voir [Dans une chaîne CI/CD](INSTALLATION.fr.md#dans-une-chaîne-cicd)) |
 | Laisser de la place sur la machine (par défaut : tous les cœurs sauf un, 75 % de la mémoire) | `--cpu 50%`, `--max-memory 8` (voir [Fils d'exécution et mémoire](INSTALLATION.fr.md#fils-dexécution-et-mémoire-de-lanalyse)) |
 | Ajouter vos propres règles | `./target/release/codefixture-audit custom-rules create`, ou des fichiers `.sca` dans `~/.codefixture-audit/custom-rules/` (voir [Vos propres règles](INSTALLATION.fr.md#vos-propres-règles), et le guide d'écriture des règles, [`RULE-LANGUAGE.fr.md`](RULE-LANGUAGE.fr.md)) |
 | Tester vos règles | `custom-rules test` lance leurs cas de test, `custom-rules try <règle> <projet>` en lance une sur un projet |

@@ -34,8 +34,10 @@ use crate::scan::orchestrator::{ScanConfig, discover_files};
 use crate::scan::scan_cache::{CacheKey, sha256_hex};
 
 /// Version of the `last-scan.json` layout; a record of another version is
-/// ignored, and the scan then runs in full.
-const FORMAT: u32 = 1;
+/// ignored, and the scan then runs in full. 2 since 2026-11-25: the record
+/// holds the counts of the client's rules (ticket #292), which a record of
+/// version 1 lacks.
+const FORMAT: u32 = 2;
 
 /// Name of the record in the engine's cache folder.
 const RECORD_FILE: &str = "last-scan.json";
@@ -220,6 +222,11 @@ pub struct LastScan {
     /// fingerprint: an unchanged scan names it instead of writing a copy.
     #[serde(default)]
     pub sbom_path: Option<PathBuf>,
+    /// The client's rules that scan read: rule files kept for the project's
+    /// languages, then rule files the folder holds; `None` when it read no
+    /// client folder. An unchanged scan names them as the full scan did.
+    #[serde(default)]
+    pub client_rules: Option<(usize, usize)>,
 }
 
 impl LastScan {
@@ -241,6 +248,7 @@ impl LastScan {
             files_scanned,
             total_loc,
             sbom_path: None,
+            client_rules: None,
         }
     }
 

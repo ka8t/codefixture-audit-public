@@ -22,6 +22,9 @@ fancy-regex = "0.19.0"
 # (ADR-0042, ADR-0043), pure Rust
 # backend (miniz_oxide): no C library to build on Windows.
 flate2 = { version = "1.1.11", default-features = false, features = ["rust_backend"] }
+# The serial number of a CycloneDX SBOM (`report::exports::sbom`, ticket #296):
+# already in the build through `chacha20poly1305`, so no new package.
+getrandom = "0.2.17"
 postgres = "0.19.10"
 rayon = "1.12.0"
 regex = "1.13.1"
@@ -68,3 +71,6 @@ sha2 = "0.11.0"
 # block: the shared binary reads it too.
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2.189"
+
+[dev-dependencies]
+jsonschema = { version = "0.61", default-features = false }

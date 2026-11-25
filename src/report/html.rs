@@ -973,6 +973,14 @@ pub fn generate_html(
     html = html.replace("{{lang}}", &ctx.report_lang);
     html = html.replace("{{lang_label}}", &t(&report_locale, "lang_label"));
     html = html.replace("{{project_name}}", &escape(&ctx.project_name));
+    // The full path of the folder scanned, under the title (2026-11-25,
+    // the maintainer's request: the header named only the folder). The label is the
+    // one of the parameters section, which shows the same path.
+    html = html.replace(
+        "{{i18n_header_project_path}}",
+        &t(&report_locale, "audit_params.project_path"),
+    );
+    html = html.replace("{{header_project_path}}", &escape(&ctx.project_path));
     let generated_at = fmt.datetime(&ctx.generated_at);
     html = html.replace("{{timestamp}}", &generated_at);
     html = html.replace("{{project_version}}", &escape(&ctx.project_version));
@@ -1512,6 +1520,32 @@ mod tests {
             "lone version marker in the header"
         );
         assert!(!without.contains("{{project_version_meta}}"));
+    }
+
+    /// The header gives the full path of the folder scanned under the
+    /// title, escaped, with the label of the report's language
+    /// (2026-11-25: it named only the folder).
+    #[test]
+    fn test_header_shows_full_project_path() {
+        let catalog = BTreeMap::new();
+        let context = ReportContext {
+            project_path: "/home/user/R&D/my-project".to_string(),
+            report_lang: "fr".to_string(),
+            ..ctx(&catalog)
+        };
+        let html = generate_html(&[], &context, None, None, None);
+        let header = html
+            .split(r#"<div class="meta project-path">"#)
+            .nth(1)
+            .and_then(|rest| rest.split("</div>").next())
+            .expect("project path line in the header");
+        assert!(
+            header.contains("<code>/home/user/R&amp;D/my-project</code>"),
+            "{header}"
+        );
+        assert!(header.contains("Chemin"), "{header}");
+        assert!(!html.contains("{{header_project_path}}"));
+        assert!(!html.contains("{{i18n_header_project_path}}"));
     }
 
     #[test]
