@@ -16,7 +16,7 @@
 //! the form of CycloneDX 1.5 and later (`components`, the array of 1.4
 //! being deprecated), and no `version` for a project that has none, where
 //! Python wrote `""`. The output validates against the official
-//! CycloneDX 1.6 schema (`tests/data/bom-1.6.schema.json`).
+//! CycloneDX 1.6 schema (`resources/schemas/bom-1.6.schema.json`).
 //!
 //! The SBOM stays an inventory: it carries no `vulnerabilities`. The
 //! vulnerabilities of the dependencies change faster than the inventory
@@ -313,10 +313,10 @@ mod tests {
     /// (exact version, range without version, Maven group, unknown
     /// ecosystem) validates against the official CycloneDX 1.6 schema,
     /// offline: the two schemas it refers to are registered from
-    /// `tests/data/` under the address its `$id` gives them.
+    /// `resources/schemas/` under the address its `$id` gives them.
     #[test]
     fn test_sbom_validates_against_the_cyclonedx_schema() {
-        let data = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data");
+        let data = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("resources/schemas");
         let read = |name: &str| -> serde_json::Value {
             serde_json::from_str(&std::fs::read_to_string(data.join(name)).expect(name))
                 .expect(name)

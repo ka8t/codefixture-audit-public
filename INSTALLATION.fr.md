@@ -258,6 +258,7 @@ Les options s'ajoutent à la même commande, par exemple `./target/release/codef
 | `--lang en\|fr\|es\|de` | langue du rapport |
 | `--no-cache` | analyse de nouveau tout le projet (voir l'étape 10) |
 | `--format sarif` | écrit un fichier SARIF au lieu du rapport HTML, pour un IDE ou une plateforme de code ; il est affiché dans le terminal, redirigez-le avec `> result.sarif`, ou donnez `--output result.sarif`. Chaque constat porte une empreinte, pour qu'une plateforme de code ne le rouvre pas quand sa ligne bouge |
+| `--format gitlab-sast` | écrit le rapport SAST de GitLab (schéma 15.2.5) au lieu du rapport HTML, pour `artifacts:reports:sast` ; voir [Dans une chaîne CI/CD](#dans-une-chaîne-cicd) |
 | `--output <fichier>` | écrit le rapport, ou le fichier SARIF, dans ce fichier |
 | `--quiet` | pour un job de CI : plus de lignes de progression ; la version, les chemins des fichiers écrits, le résumé, les avertissements et les erreurs restent |
 | `--metrics-output <fichier>` | pour un job de CI : un fichier JSON des chiffres de l'analyse (fichiers, lignes, constats par sévérité, durées des phases, vos règles lues, code de sortie) |
@@ -574,19 +575,36 @@ Le graphe de dépendances de GitHub lit lui-même vos manifestes et vos fichiers
 
 #### GitLab CI
 
-Pas encore testé. Tant que le moteur n'écrit pas le format de rapport propre à GitLab (ticket #295), gardez le fichier SARIF, le SBOM et le rapport HTML comme artefacts du job, sur un runner où le moteur a été copié :
+Pas encore testé sur une instance GitLab. `--format gitlab-sast` écrit le rapport SAST propre à GitLab (schéma 15.2.5), avec tous les constats, dépendances vulnérables comprises ; le SBOM part vers GitLab comme rapport `cyclonedx`. L'envoi du rapport fonctionne dans toutes les offres de GitLab ; le widget de merge request, le rapport des vulnérabilités et la liste des dépendances qui l'affichent sont réservés à l'offre Ultimate. GitLab n'ingère un rapport que d'un job qui réussit : le premier job ci-dessous garde le code de sortie du moteur et n'échoue que sur une erreur (2 ou 4), un second job échoue sur les constats bloquants.
 
 ```yaml
+stages: [test, gate]
+
 codefixture-audit:
+  stage: test
   tags: [codefixture-audit]
   script:
-    - /opt/codefixture-audit/codefixture-audit scan . --quiet --format sarif --output result.sarif
-        --sbom-output sbom.json --fail-on-new --baseline /var/lib/codefixture-audit/main.json
+    - |
+      set +e
+      /opt/codefixture-audit/codefixture-audit scan . --quiet --format gitlab-sast \
+        --output gl-sast-report.json --sbom-output sbom.json \
+        --fail-on-new --baseline /var/lib/codefixture-audit/main.json
+      code=$?
+      echo "$code" > codefixture-audit-exit-code
+      [ "$code" -le 1 ]
   artifacts:
     when: always
-    paths: [result.sarif, sbom.json, audit-reports/]
+    paths: [gl-sast-report.json, sbom.json, audit-reports/, codefixture-audit-exit-code]
     reports:
+      sast: gl-sast-report.json
       cyclonedx: sbom.json
+
+codefixture-audit-gate:
+  stage: gate
+  tags: [codefixture-audit]
+  needs: [codefixture-audit]
+  script:
+    - exit "$(cat codefixture-audit-exit-code)"
 ```
 
 #### Jenkins

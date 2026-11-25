@@ -8,7 +8,7 @@
 //! our versioned name and under `primaryLocationLineHash`, the only one
 //! GitHub reads (ADR-0067, ADR-0068), `automationDetails`, and the solution in the message
 //! instead of a `fixes` entry the schema refuses. The output validates
-//! against the official schema (`tests/data/sarif-schema-2.1.0.json`). Version
+//! against the official schema (`resources/schemas/sarif-schema-2.1.0.json`). Version
 //! **2.1.0** unambiguously (stable/final version of the OASIS
 //! standard, already the one produced by Python — `$schema`
 //! explicitly references `sarif-schema-2.1.0.json`).
@@ -423,7 +423,7 @@ pub const FINDING_FINGERPRINT: &str = "codefixtureFinding/v1";
 pub const GITHUB_FINGERPRINT: &str = "primaryLocationLineHash";
 
 /// The official location of the SARIF 2.1.0 schema (OASIS, errata 01),
-/// the one the tests validate against (`tests/data/sarif-schema-2.1.0.json`).
+/// the one the tests validate against (`resources/schemas/sarif-schema-2.1.0.json`).
 pub const SARIF_SCHEMA_URI: &str =
     "https://docs.oasis-open.org/sarif/sarif/v2.1.0/errata01/os/schemas/sarif-schema-2.1.0.json";
 
@@ -1137,14 +1137,14 @@ mod tests {
     }
 
     /// Ticket #291: the output validates against the official SARIF 2.1.0
-    /// schema (OASIS, errata 01, `tests/data/sarif-schema-2.1.0.json`),
+    /// schema (OASIS, errata 01, `resources/schemas/sarif-schema-2.1.0.json`),
     /// offline, with every kind of finding the engine writes: a line
     /// finding with a solution, a taint flow, a whole-file finding and
     /// project checks of several severities.
     #[test]
     fn test_output_validates_against_the_sarif_schema() {
         let schema_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/data/sarif-schema-2.1.0.json");
+            .join("resources/schemas/sarif-schema-2.1.0.json");
         let schema: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(schema_path).expect("SARIF schema"))
                 .expect("SARIF schema is JSON");

@@ -398,6 +398,7 @@
   "scan_fail_on_new_no_baseline": "Error: --fail-on-new compares with the scan you name: give it with --baseline <file> (in a CI job: the scan data of the main branch, {prefix}-DATA-<date>.json). The latest scan of the history folder is never taken: on a CI server it may be the previous pipeline's, of another branch.",
   "scan_fail_on_new_summary": "Compared with the scan of {date} ({path}): {new} new finding(s), {blocking} of them {severity} or above; {unchanged} already in that scan.",
   "scan_threshold_invalid": "Error: thresholds.max_high of {file} must be a whole number of 0 or more, found {value}. It is the number of blocking findings tolerated; --max-blocking overrides it.",
+  "gitlab_identifiers_cut": "GitLab keeps only the first {limit} identifiers of a vulnerability: those of rule {rule} have up to {count}.",
   "sarif_github_rejected": "GitHub code scanning would reject this SARIF file: {what} is {actual}, at most {limit}.",
   "sarif_github_cut": "GitHub code scanning keeps only part of this SARIF file: {what} is {actual}, it keeps {limit}.",
   "sarif_limit_compressed": "the compressed size in bytes",

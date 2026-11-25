@@ -258,6 +258,7 @@ Options are added to the same command, for example `./target/release/codefixture
 | `--lang en\|fr\|es\|de` | language of the report |
 | `--no-cache` | analyses everything again (see step 10) |
 | `--format sarif` | writes a SARIF file instead of the HTML report, for an IDE or a code platform; it is printed to the terminal, redirect it with `> result.sarif`, or give `--output result.sarif`. Each finding carries a fingerprint, so a code platform does not reopen it when its line moves |
+| `--format gitlab-sast` | writes GitLab's SAST report (schema 15.2.5) instead of the HTML report, for `artifacts:reports:sast`; see [In a CI/CD pipeline](#in-a-cicd-pipeline) |
 | `--output <file>` | writes the report, or the SARIF file, to this file |
 | `--quiet` | for a CI job: no progress lines; the version, the paths of the files written, the summary, warnings and errors stay |
 | `--metrics-output <file>` | for a CI job: a JSON file of the scan's numbers (files, lines, findings by severity, phase durations, your rules read, exit code) |
@@ -574,19 +575,36 @@ GitHub's dependency graph reads your manifests and lockfiles by itself, except t
 
 #### GitLab CI
 
-Not tested yet. Until the engine writes GitLab's own report format (ticket #295), keep the SARIF file, the SBOM and the HTML report as artifacts of the job, on a runner where the engine was copied:
+Not tested on a GitLab instance yet. `--format gitlab-sast` writes GitLab's own SAST report (schema 15.2.5), with every finding, vulnerable dependencies included; the SBOM goes to GitLab as a `cyclonedx` report. Uploading the report works in every GitLab tier; the merge request widget, the vulnerability report and the dependency list that show it are Ultimate features. GitLab ingests a report only from a job that succeeds: the first job below keeps the engine's exit code and fails only on an error (2 or 4), a second job fails on blocking findings.
 
 ```yaml
+stages: [test, gate]
+
 codefixture-audit:
+  stage: test
   tags: [codefixture-audit]
   script:
-    - /opt/codefixture-audit/codefixture-audit scan . --quiet --format sarif --output result.sarif
-        --sbom-output sbom.json --fail-on-new --baseline /var/lib/codefixture-audit/main.json
+    - |
+      set +e
+      /opt/codefixture-audit/codefixture-audit scan . --quiet --format gitlab-sast \
+        --output gl-sast-report.json --sbom-output sbom.json \
+        --fail-on-new --baseline /var/lib/codefixture-audit/main.json
+      code=$?
+      echo "$code" > codefixture-audit-exit-code
+      [ "$code" -le 1 ]
   artifacts:
     when: always
-    paths: [result.sarif, sbom.json, audit-reports/]
+    paths: [gl-sast-report.json, sbom.json, audit-reports/, codefixture-audit-exit-code]
     reports:
+      sast: gl-sast-report.json
       cyclonedx: sbom.json
+
+codefixture-audit-gate:
+  stage: gate
+  tags: [codefixture-audit]
+  needs: [codefixture-audit]
+  script:
+    - exit "$(cat codefixture-audit-exit-code)"
 ```
 
 #### Jenkins

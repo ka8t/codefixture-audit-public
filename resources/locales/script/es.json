@@ -398,6 +398,7 @@
   "scan_fail_on_new_no_baseline": "Error: --fail-on-new compara con el análisis que usted indica: indíquelo con --baseline <archivo> (en un job de CI: los datos de análisis de la rama principal, {prefix}-DATA-<date>.json). El último análisis de la carpeta de historial nunca se toma: en un servidor de CI puede ser el del pipeline anterior, de otra rama.",
   "scan_fail_on_new_summary": "Comparado con el análisis del {date} ({path}): {new} hallazgo(s) nuevo(s), {blocking} de ellos de gravedad {severity} o superior; {unchanged} ya presente(s) en ese análisis.",
   "scan_threshold_invalid": "Error: thresholds.max_high de {file} debe ser un número entero de 0 o más, se encontró {value}. Es el número de hallazgos bloqueantes tolerados; --max-blocking lo reemplaza.",
+  "gitlab_identifiers_cut": "GitLab solo conserva los {limit} primeros identificadores de una vulnerabilidad: los de la regla {rule} tienen hasta {count}.",
   "sarif_github_rejected": "GitHub code scanning rechazaría este archivo SARIF: {what} es {actual}, como máximo {limit}.",
   "sarif_github_cut": "GitHub code scanning solo conserva una parte de este archivo SARIF: {what} es {actual}, conserva {limit}.",
   "sarif_limit_compressed": "el tamaño comprimido en bytes",

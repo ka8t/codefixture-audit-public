@@ -1808,10 +1808,10 @@ struct Cli {
     command: Command,
 }
 
-/// Formats of `scan --format`: the shared binary writes the HTML report or
-/// SARIF (for an IDE or a code platform); the plain-text listing is a
-/// private tool (2026-11-14).
-const SCAN_FORMATS: &[&str] = &["html", "sarif"];
+/// Formats of `scan --format`: the shared binary writes the HTML report,
+/// SARIF (for an IDE or a code platform) or GitLab's SAST report (ticket
+/// #295, ADR-0069); the plain-text listing is a private tool (2026-11-14).
+const SCAN_FORMATS: &[&str] = &["html", "sarif", "gitlab-sast"];
 
 /// The command line the user typed, ready to copy and run again: each
 /// argument as it was, quoted when it holds a space or a quote.
@@ -1973,8 +1973,9 @@ enum Command {
         /// project's languages are kept.
         #[arg(long)]
         rules: Option<PathBuf>,
-        /// Output format: `html` (the report, default) or `sarif` (for an
-        /// IDE or a code platform).
+        /// Output format: `html` (the report, default), `sarif` (for an
+        /// IDE or a code platform) or `gitlab-sast` (GitLab's SAST report,
+        /// for `artifacts:reports:sast`).
         #[arg(long, default_value = "html", value_parser = clap::builder::PossibleValuesParser::new(SCAN_FORMATS))]
         format: String,
         /// HTML report language (`en`/`fr`/`es`/`de`).
@@ -3475,7 +3476,7 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
         Ok(path) => path,
         Err(code) => return code,
     };
-    if format != "text" && format != "sarif" && format != "html" {
+    if !SCAN_FORMATS.contains(&format.as_str()) {
         emit_error(
             &codefixture_audit::i18n::t(&script_locale, "scan_unknown_format")
                 .replace("{format}", &format),
@@ -4025,6 +4026,12 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
             Ok(text) => text,
             Err(code) => return code,
         },
+        "gitlab-sast" => {
+            match gitlab_text(&report.findings, &brand, now.to_utc(), &script_locale) {
+                Ok(text) => text,
+                Err(code) => return code,
+            }
+        }
         "html" => {
             let ctx = ReportContext {
                 project_name,
@@ -4262,6 +4269,51 @@ fn sarif_text(
         ));
     }
     Ok(text)
+}
+
+/// The GitLab SAST report of `findings` (ticket #295), for a scan started
+/// at `start`. A vulnerability with more identifiers than GitLab keeps is
+/// named in a warning; an error is reported to the user, and the exit
+/// code is returned.
+fn gitlab_text(
+    findings: &[ReportFinding],
+    brand: &Brand,
+    start: chrono::DateTime<chrono::Utc>,
+    script_locale: &serde_json::Value,
+) -> Result<String, ExitCode> {
+    use codefixture_audit::report::exports::gitlab::{
+        GITLAB_MAX_IDENTIFIERS, GitlabToolInfo, build_gitlab_sast_report, gitlab_identifier_limits,
+    };
+    let stamp = |t: chrono::DateTime<chrono::Utc>| t.format("%Y-%m-%dT%H:%M:%S").to_string();
+    let tool_name = effective_tool_name(brand);
+    let vendor = effective_company_name(brand);
+    let report = build_gitlab_sast_report(
+        findings,
+        &GitlabToolInfo {
+            tool_name: &tool_name,
+            tool_version: codefixture_audit::RELEASE_VERSION,
+            vendor: &vendor,
+        },
+        &stamp(start),
+        &stamp(chrono::Utc::now()),
+    );
+    let numbers = LocaleFormat::of_console(script_locale);
+    for (rule, count) in gitlab_identifier_limits(&report) {
+        emit_warning(&format!(
+            "[codefixture-audit] {}",
+            codefixture_audit::i18n::t(script_locale, "gitlab_identifiers_cut")
+                .replace("{rule}", &rule)
+                .replace("{count}", &numbers.count(count))
+                .replace("{limit}", &numbers.count(GITLAB_MAX_IDENTIFIERS))
+        ));
+    }
+    serde_json::to_string_pretty(&report).map_err(|e| {
+        emit_error(
+            &codefixture_audit::i18n::t(script_locale, "scan_internal_error")
+                .replace("{error}", &format!("GitLab report serialization: {e}")),
+        );
+        ExitCode::from(4)
+    })
 }
 
 /// The size of `text` once gzip-compressed, as GitHub measures an upload.
@@ -4600,6 +4652,14 @@ fn report_unchanged_scan(scan: UnchangedScan<'_>) -> ExitCode {
             Ok(text) => Some(text),
             Err(code) => return code,
         },
+        "gitlab-sast" => {
+            // The scan of this run starts now, nothing being analysed again.
+            let start = chrono::Utc::now() - scan.t_command_start.elapsed();
+            match gitlab_text(&export.findings, scan.brand, start, scan.script_locale) {
+                Ok(text) => Some(text),
+                Err(code) => return code,
+            }
+        }
         "text" => Some(format_text_report(&export.findings)),
         _ => None,
     };
