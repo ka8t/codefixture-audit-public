@@ -148,7 +148,7 @@ Windows :
 .\target\release\codefixture-audit.exe list-rules | Select-Object -First 1
 ```
 
-`--version` affiche la version compilée, par exemple `codefixture-audit 3.0.0+42.c5be809` : le nombre de commits et l'empreinte courte du commit indiquent exactement quel code vous avez compilé. Chaque analyse l'affiche aussi sur sa première ligne. `list-rules` affiche le nombre de règles sur sa première ligne : 38 pour les règles de démonstration livrées avec ce dépôt.
+`--version` affiche la version compilée, par exemple `codefixture-audit 3.1.0+42.c5be809` : le nombre de commits et l'empreinte courte du commit indiquent exactement quel code vous avez compilé. Chaque analyse l'affiche aussi sur sa première ligne. `list-rules` affiche le nombre de règles sur sa première ligne : 38 pour les règles de démonstration livrées avec ce dépôt.
 
 Toutes les commandes ci-dessous s'exécutent depuis le dossier `codefixture-audit-public`, avec le chemin complet du moteur.
 
@@ -237,7 +237,7 @@ Pour un rapport en français, en espagnol ou en allemand, remplacez `--lang en` 
 Le terminal affiche l'avancement, ce qui a été chargé et un résumé. Voici l'analyse d'OWASP Juice Shop avec les règles de démonstration de ce dépôt :
 
 ```text
-[codefixture-audit] codefixture-audit 3.0.0
+[codefixture-audit] codefixture-audit 3.1.0
 [codefixture-audit] Scope (audit.config.json): include the whole project; exclude 7 default patterns
 [codefixture-audit] Analysis in progress...
 …

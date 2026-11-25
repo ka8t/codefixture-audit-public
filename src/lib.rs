@@ -16,7 +16,7 @@ pub mod report;
 pub mod rules;
 pub mod scan;
 
-/// Build identifier of this binary, `3.0.0+415.588dc34` (ticket #149): the
+/// Build identifier of this binary, `3.1.0+415.588dc34` (ticket #149): the
 /// `Cargo.toml` version, commit count and short hash, `-dirty` for a tree
 /// with uncommitted changes, `+unknown` without git. Computed by
 /// `build.rs` (`build_version::format_build_version`). It names the exact
@@ -25,11 +25,12 @@ pub mod scan;
 /// shows [`RELEASE_VERSION`] instead.
 pub const BUILD_VERSION: &str = env!("CODEFIXTURE_AUDIT_BUILD_VERSION");
 
-/// Release version of the engine, `3.0.0`: the `Cargo.toml` version, the
+/// Release version of the engine, `3.1.0`: the `Cargo.toml` version, the
 /// only one a deliverable shows (HTML report, JSON export, SARIF, SBOM,
 /// metrics file, the console line that opens a scan). Decided on
 /// 2026-11-24: the reports showed "CodeFixture v0.1.0+506.ade3297", and a
 /// client has no use for the commit count and hash of the build, which
 /// `--version` still gives. `3.0.0` since 2026-11-24 too (ADR-0065): the
-/// numbering continues the Python engine's, released 1.0.0 to 2.0.0.
+/// numbering continues the Python engine's, released 1.0.0 to 2.0.0;
+/// `3.1.0` since 2026-11-25, the CI/CD integration (epic #288).
 pub const RELEASE_VERSION: &str = env!("CARGO_PKG_VERSION");
