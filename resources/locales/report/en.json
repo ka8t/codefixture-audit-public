@@ -115,7 +115,9 @@
     "dependencies_versions_not_checked": "Unpinned versions reported; published vulnerabilities not checked (the rule pack has no readable version rules)",
     "categories": "Categories",
     "cli_options": "CLI Options",
-    "vulnerability_sources": "Vulnerability data"
+    "vulnerability_sources": "Vulnerability data",
+    "weakness_catalog": "Weakness catalog",
+    "source_notices": "Terms of these sources"
   },
   "cli_options_desc": {
     "quick": "Quick mode: the slow optional steps, including the dependency check, do not run",
@@ -173,6 +175,7 @@
     "exploited": "exploited in attacks, CISA KEV since {date}",
     "exploited_ransomware": "exploited in attacks including ransomware, CISA KEV since {date}",
     "epss": "EPSS {percent}%",
+    "severity_nvd": "{severity} from CVSS {version} {score} ({source})",
     "decimal_mark": "."
   },
   "severity_filter_banner": "⚠️ Filtered scan — severity levels included: {levels}",
@@ -773,6 +776,8 @@
   "suppress_copy": "Copy",
   "suppress_clear": "Clear",
   "playbook_link": "Playbook",
+  "playbook_attack_patterns": "Known attack patterns (CAPEC):",
+  "playbook_cwe_deprecated": "deprecated by MITRE",
   "threat_tte": "Time-to-Exploit (TTE)",
   "threat_exposure": "Exposure window",
   "threat_context": "Threat context",

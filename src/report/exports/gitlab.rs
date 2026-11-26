@@ -63,6 +63,18 @@ pub struct GitlabScan {
     /// `success`: a scan that found vulnerabilities succeeded; a scan that
     /// failed writes no report at all.
     pub status: String,
+    /// Messages to whoever started the scan: MITRE's notice when a
+    /// vulnerability names a CWE from the embedded catalog (ADR-0070), as
+    /// the CWE terms of use ask every copy of CWE content to reproduce it.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub messages: Vec<GitlabMessage>,
+}
+
+/// One message of the scan (`level` `info`, `warn` or `fatal`).
+#[derive(Debug, Serialize, PartialEq)]
+pub struct GitlabMessage {
+    pub level: String,
+    pub value: String,
 }
 
 /// The analyzer or the scanner: here both are the engine.
@@ -181,14 +193,21 @@ fn primary_identifier(f: &ReportFinding) -> String {
 }
 
 /// A CWE identifier: `CWE-79` gives the value `79` and MITRE's page; a CWE
-/// written otherwise keeps its text as value, without a link.
+/// written otherwise keeps its text as value, without a link. Its name is
+/// the id followed by MITRE's name from the embedded catalog (ADR-0070),
+/// `CWE-79: Improper Neutralization of Input During Web Page Generation`,
+/// the id alone when the catalog lacks it: GitLab shows the name.
 fn cwe_identifier(cwe: &str) -> GitlabIdentifier {
     let number = cwe
         .strip_prefix("CWE-")
         .filter(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+    let name = match crate::report::cwe_catalog::weakness(cwe) {
+        Some(entry) => format!("{cwe}: {}", entry.name),
+        None => cwe.to_string(),
+    };
     GitlabIdentifier {
         identifier_type: "cwe".to_string(),
-        name: cwe.to_string(),
+        name,
         value: number.unwrap_or(cwe).to_string(),
         url: number.map(|n| format!("https://cwe.mitre.org/data/definitions/{n}.html")),
     }
@@ -305,9 +324,27 @@ pub fn build_gitlab_sast_report(
             start_time: start_time.to_string(),
             end_time: end_time.to_string(),
             status: "success".to_string(),
+            messages: cwe_notice(findings),
         },
         vulnerabilities,
     }
+}
+
+/// MITRE's notice for the CWE names of the report (ADR-0070), as one
+/// `info` message, when a finding cites a CWE the embedded catalog holds.
+fn cwe_notice(findings: &[ReportFinding]) -> Vec<GitlabMessage> {
+    let named = findings
+        .iter()
+        .flat_map(|f| &f.cwe)
+        .any(|id| crate::report::cwe_catalog::weakness(id).is_some());
+    if !named {
+        return Vec::new();
+    }
+    let release = &crate::report::cwe_catalog::catalog().cwe;
+    vec![GitlabMessage {
+        level: "info".to_string(),
+        value: format!("CWE {} names: {}", release.version, release.notice),
+    }]
 }
 
 /// The rules whose vulnerabilities have more identifiers than GitLab keeps
@@ -383,6 +420,21 @@ mod tests {
         assert_eq!(v.severity, "High");
         assert_eq!(v.identifiers[0].value, "python/os_system_injection");
         assert_eq!(v.identifiers[1].value, "78");
+        // ADR-0070: MITRE's name follows the id, and its notice is in the
+        // scan's messages.
+        assert_eq!(report.scan.messages.len(), 1);
+        assert!(
+            report.scan.messages[0]
+                .value
+                .contains("The MITRE Corporation")
+        );
+        assert_eq!(
+            v.identifiers[1].name,
+            format!(
+                "CWE-78: {}",
+                crate::report::cwe_catalog::weakness("CWE-78").unwrap().name
+            )
+        );
         assert_eq!(
             v.identifiers[1].url.as_deref(),
             Some("https://cwe.mitre.org/data/definitions/78.html")

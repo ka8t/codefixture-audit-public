@@ -4,7 +4,7 @@ name = "codefixture-audit"
 # which this crate succeeds (ADR-0065); 3.1.0 (2026-11-25) adds the CI/CD
 # integration of epic #288. `codefixture-audit-advisories` keeps its own
 # version: it is a separate program, never delivered.
-version = "3.1.0"
+version = "3.2.0"
 edition = "2024"
 # Oldest Rust that builds this crate: edition 2024 needs 1.85, and the
 # dependencies need up to 1.89 (`rusqlite`). Older Cargo, such as the 1.75 of
@@ -27,6 +27,11 @@ flate2 = { version = "1.1.11", default-features = false, features = ["rust_backe
 # already in the build through `chacha20poly1305`, so no new package.
 getrandom = "0.2.17"
 postgres = "0.19.10"
+# The engine's XML reader (`project::xml`, ADR-0064): `pom.xml` and the
+# CWE and CAPEC catalogs read element by element instead of by regular
+# expressions. Pure Rust, one dependency (`memchr`, already in the build),
+# and no DTD processing, so no external entity is ever resolved (XXE).
+quick-xml = "0.42.0"
 rayon = "1.12.0"
 regex = "1.13.1"
 serde = { version = "1.0.229", features = ["derive", "rc"] }

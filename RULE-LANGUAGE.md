@@ -216,7 +216,7 @@ The `metadata` block holds the references of the rule.
 
 | Key | Value |
 |---|---|
-| `cwe` | One or more `CWE-<n>`, separated by commas or spaces. |
+| `cwe` | One or more `CWE-<n>`, separated by commas or spaces. The report shows each with its name and its attack patterns from MITRE's CWE and CAPEC lists, built into the engine; an id the list does not hold is shown alone, and one MITRE deprecated says so. |
 | `owasp` | OWASP Top 10 entry, `A03:2021`. |
 | `cve` | One or more CVE ids. |
 | `iso27001`, `asvs`, `wcag` | Control ids. |

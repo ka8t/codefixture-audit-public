@@ -985,6 +985,32 @@ mod tests {
         );
     }
 
+    /// ADR-0070: each CWE follows the message with MITRE's name, an id the
+    /// catalog lacks alone, and MITRE's notice closes the report.
+    #[test]
+    fn test_format_text_report_names_the_cwe() {
+        let finding: ReportFinding = serde_json::from_value(serde_json::json!({
+            "rule_key": "sqli", "rule_name": "sqli", "category": "SECURITY",
+            "severity": "HIGH", "risk": "Injection.", "file": "db.py", "line": 3,
+            "solution": null, "cwe": ["CWE-89", "CWE-999999"], "owasp": null,
+            "taint_flow": null, "code": "", "context_before": "", "context_after": "",
+            "confidence": 80, "benefit": "", "committer": null, "rule_source": "json_builtin",
+            "file_scope": null,
+        }))
+        .expect("valid ReportFinding");
+        let name = &codefixture_audit::report::cwe_catalog::weakness("CWE-89")
+            .unwrap()
+            .name;
+        let text = format_text_report(&[finding]);
+        assert!(
+            text.starts_with(&format!(
+                "db.py:3: [HIGH] sqli — Injection. (CWE-89 {name}; CWE-999999)\n\n"
+            )),
+            "{text}"
+        );
+        assert!(text.contains("The MITRE Corporation"), "{text}");
+    }
+
     #[test]
     fn test_rerun_command_is_the_typed_command_ready_to_copy() {
         let args = [
@@ -1768,7 +1794,8 @@ mod tests {
             &chrono::Local::now(),
             None,
         );
-        let path = written.expect("SBOM written");
+        let (path, left_out) = written.expect("SBOM written");
+        assert!(left_out.is_empty(), "{left_out:?}");
         let json = std::fs::read_to_string(&path).unwrap_or_default();
         std::fs::remove_dir_all(&root).ok();
 
@@ -3179,7 +3206,8 @@ fn run_list_rules_command(lang: &str, rules: Option<PathBuf>) -> ExitCode {
 /// pattern as Python (`comparison.py::_export_sbom`,
 /// `{datas_dir}/{brand_prefix}-SBOM-{timestamp}.json`), same manifests as
 /// the `--with-deps` phase (`dependencies::collect_dependencies`). Each
-/// SBOM gets a new serial number. Returns the written path, or a
+/// SBOM gets a new serial number. Returns the written path and the
+/// manifests left out because they cannot be read (ADR-0070), or a
 /// description of the I/O, random source or serialization failure.
 fn write_sbom(
     config: &ScanConfig,
@@ -3187,7 +3215,13 @@ fn write_sbom(
     brand: &Brand,
     now: &chrono::DateTime<chrono::Local>,
     target: Option<&Path>,
-) -> Result<PathBuf, String> {
+) -> Result<
+    (
+        PathBuf,
+        Vec<codefixture_audit::project::dependencies::UnreadableManifest>,
+    ),
+    String,
+> {
     let dir = config
         .datas_dir
         .clone()
@@ -3196,13 +3230,13 @@ fn write_sbom(
         std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     }
     let serial_number = codefixture_audit::report::exports::sbom::random_serial_number()?;
-    let deps = codefixture_audit::project::dependencies::collect_dependencies(
+    let collected = codefixture_audit::project::dependencies::collect_dependencies(
         &config.root,
         &config.include_paths,
         &config.exclude_patterns,
     );
     let sbom = codefixture_audit::report::exports::sbom::build_dependency_sbom(
-        &deps,
+        &collected.dependencies,
         project_name,
         "",
         &effective_tool_name(brand),
@@ -3222,7 +3256,143 @@ fn write_sbom(
         )),
     };
     std::fs::write(&path, json).map_err(|e| format!("{}: {e}", path.display()))?;
-    Ok(path)
+    Ok((path, collected.unreadable))
+}
+
+/// Names each manifest the SBOM left out because it cannot be read
+/// (ADR-0070), as a warning `--quiet` does not hide: the SBOM lists
+/// fewer components than the project has.
+fn warn_sbom_left_out(
+    locale: &serde_json::Value,
+    root: &Path,
+    unreadable: &[codefixture_audit::project::dependencies::UnreadableManifest],
+) {
+    for manifest in unreadable {
+        let file =
+            codefixture_audit::scan::orchestrator::project_relative_path(root, &manifest.file);
+        let line = codefixture_audit::i18n::t(locale, "sbom_manifest_unreadable")
+            .replace("{reason}", &manifest.reason)
+            .replace("{file}", &file);
+        emit_warning(&format!("[codefixture-audit] {line}"));
+    }
+}
+
+/// Prints the system check (ADR-0071): one line for the system, one per
+/// runtime of the scanned languages, each saying whether it is at the
+/// latest version of its release, still supported, and hit by known
+/// vulnerabilities, with the date of the data. A line with something to
+/// act on is a warning, which `--quiet` does not hide; an up-to-date one
+/// is progress. Without system data in the pack, one line says so.
+fn host_check(config: &ScanConfig, locale: &serde_json::Value, quiet: bool) {
+    use codefixture_audit::project::host::{self, Support};
+    let say = |key: &str| codefixture_audit::i18n::t(locale, key);
+    let tables = match codefixture_audit::scan::orchestrator::read_version_rules(&config.rules_path)
+    {
+        Ok(Some(file)) => host::load_tables(&file),
+        Ok(None) => Ok(None),
+        Err(e) => Err(e.render(locale)),
+    };
+    let tables = match tables {
+        Ok(Some(tables)) => tables,
+        Ok(None) => {
+            emit_warning(&format!("[codefixture-audit] {}", say("host_no_data")));
+            return;
+        }
+        Err(e) => {
+            emit_warning(&format!(
+                "[codefixture-audit] {}",
+                say("host_unreadable").replace("{error}", &e)
+            ));
+            return;
+        }
+    };
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    if let Some(days) = host::days_between(&tables.date, &today)
+        && days > host::STALE_AFTER_DAYS
+    {
+        emit_warning(&format!(
+            "[codefixture-audit] {}",
+            say("host_stale")
+                .replace("{days}", &days.to_string())
+                .replace("{date}", &tables.date)
+        ));
+    }
+    let languages = codefixture_audit::scan::orchestrator::scanned_languages(config);
+    let mut detections = vec![host::detect_system()];
+    detections.extend(host::detect_runtimes(&languages, &config.root));
+    for (index, detection) in detections.into_iter().enumerate() {
+        let detected = match detection {
+            Ok(d) => d,
+            Err(missing) => {
+                let line = match &missing.not_found {
+                    Some(programs) => say("host_not_installed")
+                        .replace("{what}", &missing.what)
+                        .replace("{programs}", programs),
+                    None => say("host_not_checked")
+                        .replace("{what}", &missing.what)
+                        .replace("{reason}", &missing.reason),
+                };
+                emit_warning(&format!("[codefixture-audit] {line}"));
+                continue;
+            }
+        };
+        let check = host::check(&detected, &tables);
+        let status = match &check.support {
+            Support::UpToDate => say("host_status_up_to_date"),
+            Support::Behind { latest } => say("host_status_behind").replace("{latest}", latest),
+            Support::Unsupported { eol: Some(eol) } => {
+                say("host_status_unsupported_since").replace("{eol}", eol)
+            }
+            Support::Unsupported { eol: None } => say("host_status_unsupported"),
+            Support::UnknownCycle => say("host_status_unknown_cycle"),
+        };
+        let newer = check
+            .newer
+            .as_ref()
+            .map(|(cycle, latest)| {
+                say("host_newer")
+                    .replace("{cycle}", cycle)
+                    .replace("{latest}", latest)
+            })
+            .unwrap_or_default();
+        let vulnerabilities = if check.vulnerabilities.is_empty() {
+            String::new()
+        } else {
+            let mut text = say("host_vulnerabilities")
+                .replace("{count}", &check.vulnerabilities.len().to_string())
+                .replace(
+                    "{severity}",
+                    host::worst_severity(&check.vulnerabilities).unwrap_or("MEDIUM"),
+                );
+            if check.exploited > 0 {
+                text.push_str(
+                    &say("host_exploited").replace("{count}", &check.exploited.to_string()),
+                );
+            }
+            if detected.on_linux {
+                text.push_str(&say("host_to_confirm"));
+            }
+            text
+        };
+        let key = if index == 0 {
+            "host_line_system"
+        } else {
+            "host_line_runtime"
+        };
+        let line = say(key)
+            .replace("{what}", detected.product.label)
+            .replace("{version}", &detected.version)
+            .replace("{status}", &status)
+            .replace("{newer}", &newer)
+            .replace("{vulnerabilities}", &vulnerabilities)
+            .replace("{date}", &tables.date);
+        let fine = check.support == Support::UpToDate && check.vulnerabilities.is_empty();
+        if fine {
+            emit_progress(quiet, &format!("[codefixture-audit] {line}"));
+        } else {
+            emit_warning(&format!("[codefixture-audit] {line}"));
+        }
+    }
 }
 
 /// The first lines of a debug log (ticket #282): the build, the command
@@ -3807,6 +3977,11 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
         keep_rule_findings: false,
     };
 
+    // ADR-0071: the system this engine runs on and the runtimes of the
+    // scanned languages, checked against the pack before anything else
+    // runs. It never stops the scan.
+    host_check(&config, &script_locale, quiet);
+
     // ADR-0050: before any rule is loaded, has anything the scan reads
     // changed since the last one? Never with `--no-cache`, nor when the
     // results can change without any file changing (`--with-tests`,
@@ -3967,6 +4142,14 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
         };
         emit_warning(&format!("[codefixture-audit] {line}"));
     }
+    // ADR-0070: a manifest that cannot be read is named, as a warning that
+    // `--quiet` does not hide: none of its dependencies was checked.
+    for (file, reason) in &report.manifests_unreadable {
+        let line = codefixture_audit::i18n::t(&script_locale, "scan_manifest_unreadable")
+            .replace("{reason}", reason)
+            .replace("{file}", file);
+        emit_warning(&format!("[codefixture-audit] {line}"));
+    }
     // Taint cache (`scan_cache`): what a re-scan redid, so that a slow one
     // shows why (many files changed) and a fast one that it reused work.
     for stat in &report.cache_stats {
@@ -3998,7 +4181,8 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
         let _sbom_step =
             codefixture_audit::scan::debug_log::span("report", || "write_sbom".to_string());
         match write_sbom(&config, &project_name, &brand, &now, sbom_output.as_deref()) {
-            Ok(sbom_path) => {
+            Ok((sbom_path, left_out)) => {
+                warn_sbom_left_out(&script_locale, &config.root, &left_out);
                 // Ticket #297: a file written is a result, not progress: a
                 // CI job reads its path to keep it, `--quiet` or not.
                 emit_result(&format!(
@@ -4625,7 +4809,8 @@ fn report_unchanged_scan(scan: UnchangedScan<'_>) -> ExitCode {
     } else if let Some((project_name, now)) = scan.sbom {
         // `--sbom-output` never takes this shortcut: the default path only.
         match write_sbom(scan.config, project_name, scan.brand, now, None) {
-            Ok(sbom_path) => {
+            Ok((sbom_path, left_out)) => {
+                warn_sbom_left_out(scan.script_locale, &scan.config.root, &left_out);
                 // Ticket #297: named even with `--quiet`, as in a full scan.
                 emit_result(&format!(
                     "[codefixture-audit] SBOM{}{}",
@@ -4708,9 +4893,36 @@ fn format_text_report(findings: &[ReportFinding]) -> String {
         } else {
             format!("{}:{}", f.file, f.line)
         };
+        // ADR-0070: each CWE with MITRE's name, the id alone when the
+        // embedded catalog lacks it.
+        let cwe: Vec<String> = f
+            .cwe
+            .iter()
+            .map(
+                |id| match codefixture_audit::report::cwe_catalog::weakness(id) {
+                    Some(entry) => format!("{id} {}", entry.name),
+                    None => id.clone(),
+                },
+            )
+            .collect();
+        let cwe = if cwe.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", cwe.join("; "))
+        };
         out.push_str(&format!(
-            "{location}: [{}] {} — {}\n",
+            "{location}: [{}] {} — {}{cwe}\n",
             f.severity, f.rule_key, message
+        ));
+    }
+    if findings.iter().any(|f| {
+        f.cwe
+            .iter()
+            .any(|id| codefixture_audit::report::cwe_catalog::weakness(id).is_some())
+    }) {
+        out.push_str(&format!(
+            "\n{}\n",
+            codefixture_audit::report::cwe_catalog::catalog().cwe.notice
         ));
     }
     out

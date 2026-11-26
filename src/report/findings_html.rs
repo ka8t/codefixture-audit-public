@@ -1142,8 +1142,9 @@ mod tests {
         let a = dependency("pom.xml", &["CWE-502", "CWE-20"]);
         let b = dependency("composer.json", &["CWE-79", "CWE-502"]);
         let html = render_findings(&[&a, &b], "HIGH", &en, &RuleCatalog::new());
+        // The CWE pages only: the CAPEC links (ADR-0070) share the path.
         for n in ["502", "20", "79"] {
-            let link = format!("definitions/{n}.html");
+            let link = format!("cwe.mitre.org/data/definitions/{n}.html");
             assert_eq!(html.matches(&link).count(), 1, "CWE-{n} once: {html}");
         }
     }

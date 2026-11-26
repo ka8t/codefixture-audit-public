@@ -23,6 +23,13 @@
 //! known exploited vulnerabilities (`kev`) and FIRST's exploit prediction
 //! scores (`epss`). `load` marks each advisory with them, through its id
 //! and its aliases; they rank the vulnerabilities, they detect nothing.
+//!
+//! Since ADR-0070 a third table, `nvd`, gives the NVD's CVSS score of the
+//! CVEs that an advisory without severity names. The score never replaces
+//! a severity a record gives: it is read only for a vulnerability whose
+//! kept record has none ([`Advisory::severity_from_nvd`]), after the
+//! records of one vulnerability are merged, so that a GHSA record rated
+//! HIGH keeps HIGH even when its PYSEC twin, unrated, has an NVD score.
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
@@ -63,6 +70,55 @@ pub struct Advisory {
     /// `load` from the `epss` table.
     #[serde(skip)]
     pub epss: Option<Epss>,
+    /// The NVD's CVSS score of its CVE (ADR-0070): set by `load` from the
+    /// `nvd` table, read only when the record gives no severity.
+    #[serde(skip)]
+    pub nvd: Option<NvdScore>,
+}
+
+/// One row of the `nvd` table: the CVSS score the NVD feed carries for a
+/// CVE, as `codefixture-audit-advisories` chose it (ADR-0070).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct NvdScore {
+    /// CVSS version: `4.0`, `3.1`, `3.0` or `2.0`.
+    pub version: String,
+    /// Base score, 0 to 10.
+    pub score: f64,
+    /// Vector string.
+    pub vector: String,
+    /// `CRITICAL`, `HIGH`, `MEDIUM`, `LOW` or `NONE`.
+    pub severity: String,
+    /// `nvd@nist.gov` for the NVD's own score, else the CNA's address.
+    pub source: String,
+}
+
+/// The address the NVD signs its own scores with.
+pub const NVD_SOURCE: &str = "nvd@nist.gov";
+
+impl NvdScore {
+    /// The engine severity of this score. A CVSS score of 0.0 (`NONE`)
+    /// has no engine equivalent: it is reported as LOW, the score shown
+    /// beside it. A severity the CVSS specifications do not define is
+    /// MEDIUM, like a record without one.
+    pub fn engine_severity(&self) -> &'static str {
+        match self.severity.as_str() {
+            "CRITICAL" => "CRITICAL",
+            "HIGH" => "HIGH",
+            "MEDIUM" => "MEDIUM",
+            "LOW" | "NONE" => "LOW",
+            _ => "MEDIUM",
+        }
+    }
+
+    /// `NVD` for the NVD's own score, else the CNA's address as the feed
+    /// gives it.
+    pub fn source_label(&self) -> &str {
+        if self.source == NVD_SOURCE {
+            "NVD"
+        } else {
+            &self.source
+        }
+    }
 }
 
 /// One row of the `kev` table: a CVE that CISA lists as exploited.
@@ -118,6 +174,15 @@ impl Advisory {
     /// Its id and aliases, the keys of the tables by CVE.
     fn identifiers(&self) -> impl Iterator<Item = &str> {
         std::iter::once(self.id.as_str()).chain(self.aliases.iter().map(String::as_str))
+    }
+
+    /// The NVD score its severity comes from (ADR-0070): `Some` when the
+    /// record gives no severity the engine knows and its CVE has a score.
+    pub fn severity_from_nvd(&self) -> Option<&NvdScore> {
+        if severity_rank(&self.severity) > 0 {
+            return None;
+        }
+        self.nvd.as_ref()
     }
 
     /// The identifier to show first: the CVE when there is one (aliases
@@ -181,6 +246,7 @@ pub fn load(
     let mut errors = Vec::new();
     let kev: BTreeMap<String, Exploited> = load_table(file, "kev", &mut errors);
     let epss: BTreeMap<String, Epss> = load_table(file, "epss", &mut errors);
+    let nvd: BTreeMap<String, NvdScore> = load_table(file, "nvd", &mut errors);
     for ecosystem in ecosystems {
         let content = match file.ecosystem_json(ecosystem) {
             None => continue,
@@ -215,6 +281,8 @@ pub fn load(
             let score = advisory.identifiers().find_map(|id| epss.get(id)).copied();
             advisory.exploited = exploited;
             advisory.epss = score;
+            let nvd_score = advisory.identifiers().find_map(|id| nvd.get(id)).cloned();
+            advisory.nvd = nvd_score;
             let advisory = Arc::new(advisory);
             let names: BTreeSet<String> = advisory
                 .packages
@@ -300,7 +368,12 @@ pub fn find_vulnerable(deps: &[Dependency], db: &AdvisoryDb) -> Vec<VulnerableDe
             b.exploited
                 .is_some()
                 .cmp(&a.exploited.is_some())
-                .then_with(|| severity_rank(&b.severity).cmp(&severity_rank(&a.severity)))
+                // The severity the report shows (ADR-0070): a record
+                // without severity nor NVD score is shown MEDIUM and ranks
+                // as MEDIUM; until 2026-11-26 it ranked below LOW.
+                .then_with(|| {
+                    severity_rank(engine_severity(b)).cmp(&severity_rank(engine_severity(a)))
+                })
                 .then_with(|| {
                     let score = |x: &Advisory| x.epss.map_or(-1.0, |e| e.epss);
                     score(b).total_cmp(&score(a))
@@ -465,6 +538,9 @@ fn merge_aliases(hits: Vec<Arc<Advisory>>) -> Vec<Arc<Advisory>> {
                 if winner.epss.is_none() && other.epss.is_some() {
                     Arc::make_mut(&mut winner).epss = other.epss;
                 }
+                if winner.nvd.is_none() && other.nvd.is_some() {
+                    Arc::make_mut(&mut winner).nvd = other.nvd.clone();
+                }
                 let missing: Vec<String> = other
                     .identifiers()
                     .filter(|id| *id != winner.id && !winner.aliases.iter().any(|a| a == id))
@@ -481,12 +557,17 @@ fn merge_aliases(hits: Vec<Arc<Advisory>>) -> Vec<Arc<Advisory>> {
     groups.into_iter().map(|(_, a)| a).collect()
 }
 
-/// Engine severity for an advisory. `UNKNOWN` (no qualitative rating in
-/// the source record) is reported as `MEDIUM`.
+/// Engine severity for an advisory: the record's, else the one of its
+/// NVD score (ADR-0070); `UNKNOWN` without a score (no qualitative rating
+/// in the source record) is reported as `MEDIUM`.
 pub fn engine_severity(advisory: &Advisory) -> &'static str {
+    if let Some(score) = advisory.severity_from_nvd() {
+        return score.engine_severity();
+    }
     match advisory.severity.as_str() {
         "CRITICAL" => "CRITICAL",
         "HIGH" => "HIGH",
+        "MEDIUM" => "MEDIUM",
         "LOW" => "LOW",
         _ => "MEDIUM",
     }
@@ -874,6 +955,69 @@ mod tests {
             "the kept twin carries the KEV mark of its CVE"
         );
         assert_eq!(found[0].advisories[1].epss.map(|e| e.epss), Some(0.9));
+    }
+
+    /// ADR-0070: the NVD score fills the severity of a vulnerability whose
+    /// kept record has none, never one a record gives: a GHSA record
+    /// rated LOW keeps LOW although its unrated PYSEC twin's CVE scores
+    /// 9.8. A score of 0.0 is LOW; an unrated record without a score stays
+    /// MEDIUM. The filled severity ranks the list.
+    #[test]
+    fn test_nvd_score_fills_only_a_missing_severity() {
+        let package =
+            r#""packages":[{"name":"lib","ranges":[[{"introduced":"0"},{"fixed":"2.0"}]]}]"#;
+        let file = db_file_with_tables(
+            &[(
+                "PyPI",
+                &format!(
+                    r#"{{"format":1,"ecosystem":"PyPI","last_modified":"x","advisories":[
+                  {{"id":"PYSEC-1","aliases":["CVE-2026-1"],"summary":"Unrated","severity":"UNKNOWN",{package}}},
+                  {{"id":"PYSEC-2","aliases":["CVE-2026-2"],"summary":"Unrated twin","severity":"UNKNOWN",{package}}},
+                  {{"id":"GHSA-2","aliases":["CVE-2026-2","PYSEC-2"],"summary":"Rated","severity":"LOW",{package}}},
+                  {{"id":"PYSEC-3","aliases":["CVE-2026-3"],"summary":"Zero","severity":"UNKNOWN",{package}}},
+                  {{"id":"PYSEC-4","aliases":["CVE-2026-4"],"summary":"No score","severity":"UNKNOWN",{package}}}
+                ]}}"#
+                ),
+            )],
+            &[(
+                "nvd",
+                r#"{"format":1,"cves":{
+                  "CVE-2026-1":{"version":"3.1","score":9.8,"vector":"CVSS:3.1/x","severity":"CRITICAL","source":"nvd@nist.gov"},
+                  "CVE-2026-2":{"version":"3.1","score":9.8,"vector":"CVSS:3.1/x","severity":"CRITICAL","source":"nvd@nist.gov"},
+                  "CVE-2026-3":{"version":"3.1","score":0.0,"vector":"CVSS:3.1/x","severity":"NONE","source":"cna@example.org"}}}"#,
+            )],
+        );
+        let (db, errors) = load(&file, &BTreeSet::from(["PyPI".to_string()]));
+        assert!(errors.is_empty(), "{errors:?}");
+        let found = find_vulnerable(&[dep("PyPI", "lib", Some("1.0"), "lib==1.0")], &db);
+        let listed: Vec<(&str, &str, bool)> = found[0]
+            .advisories
+            .iter()
+            .map(|a| {
+                (
+                    a.display_id(),
+                    engine_severity(a),
+                    a.severity_from_nvd().is_some(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            listed,
+            vec![
+                ("CVE-2026-1", "CRITICAL", true),
+                ("CVE-2026-4", "MEDIUM", false),
+                ("CVE-2026-2", "LOW", false),
+                ("CVE-2026-3", "LOW", true),
+            ]
+        );
+        assert_eq!(
+            found[0].advisories[3].nvd.as_ref().unwrap().source_label(),
+            "cna@example.org"
+        );
+        assert_eq!(
+            found[0].advisories[0].nvd.as_ref().unwrap().source_label(),
+            "NVD"
+        );
     }
 
     /// A database written before ADR-0051 has no table: the advisories

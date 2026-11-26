@@ -649,6 +649,10 @@ pub struct ScanReport {
     /// binary one. Their manifests' ranges are checked
     /// at their declared minimum; the CLI names each one once.
     pub lockfiles_not_used: Vec<(String, Option<String>)>,
+    /// The manifests found under the scanned folders that could not be
+    /// read (ADR-0070), as `(path relative to the project, reason)`:
+    /// their dependencies are not checked; the CLI names each one.
+    pub manifests_unreadable: Vec<(String, String)>,
     /// Catalog of compiled rules, indexed by identity (language + name):
     /// where the reports read each finding's rule texts (risk, solution,
     /// `fix_before`/`fix_after`), see `rules::identity`.
@@ -746,7 +750,10 @@ pub enum VersionRulesStatus {
 /// Opens the version rules of the rule pack at `path` (ADR-0043): the
 /// advisory container of its version rules section. A folder of plain
 /// rules carries none.
-fn read_version_rules(
+/// The version rules section of the pack at `path`, decoded; `None`
+/// when there is no pack file or it holds no version rules. Also read by
+/// the CLI's system check at start (ADR-0071).
+pub fn read_version_rules(
     path: &Path,
 ) -> Result<Option<crate::project::advisory_file::DatabaseFile>, crate::rules::pack_format::PackError>
 {
@@ -1056,12 +1063,26 @@ fn lockfiles_not_used_by(
 
 /// What a finding says of one vulnerability between parentheses: its
 /// severity, then its KEV mark and its EPSS score when the pack has them
-/// (ADR-0051), in the report language.
+/// (ADR-0051), in the report language. A severity that comes from the
+/// NVD's CVSS score, the record giving none, says so with the score
+/// (ADR-0070).
 fn advisory_marks(
     advisory: &crate::project::advisories::Advisory,
     texts: &DependencyTexts,
 ) -> Vec<String> {
-    let mut marks = vec![crate::project::advisories::engine_severity(advisory).to_string()];
+    let severity = crate::project::advisories::engine_severity(advisory);
+    let mut marks = vec![match advisory.severity_from_nvd() {
+        Some(score) => texts
+            .get("severity_nvd")
+            .replace("{severity}", severity)
+            .replace("{version}", &score.version)
+            .replace(
+                "{score}",
+                &format!("{:.1}", score.score).replace('.', &texts.get("decimal_mark")),
+            )
+            .replace("{source}", score.source_label()),
+        None => severity.to_string(),
+    }];
     if let Some(exploited) = &advisory.exploited {
         let key = if exploited.ransomware {
             "exploited_ransomware"
@@ -1997,12 +2018,26 @@ fn reads_language_files(config: &ScanConfig, tag: &str) -> bool {
 /// with `/` separators on every system. A path outside `root` is kept as
 /// it is. The single place of this rule, used for the analysed files and
 /// for the dependency findings (which named the absolute path of the
-/// user's machine until 2026-11-14).
-fn project_relative_path(root: &Path, path: &Path) -> String {
+/// user's machine until 2026-11-14), and by the CLI for the manifests an
+/// SBOM leaves out (ADR-0070).
+pub fn project_relative_path(root: &Path, path: &Path) -> String {
     path.strip_prefix(root)
         .unwrap_or(path)
         .to_string_lossy()
         .replace('\\', "/")
+}
+
+/// The engine languages (`python`, `javascript`, `java`…) of the files a
+/// scan of `config` reads: the runtimes the system check looks at
+/// (ADR-0071).
+pub fn scanned_languages(config: &ScanConfig) -> std::collections::BTreeSet<String> {
+    // Its own lines in the debug log, as the unchanged-project check's.
+    crate::scan::discovery::traced_as("discovery_host_check", || discover_files(config))
+        .0
+        .iter()
+        .filter_map(|path| SourceLanguage::from_path(path))
+        .map(|language| language.rule_tag().to_string())
+        .collect()
 }
 
 /// Discovers the files a scan of `config` reads, and the folders it skips
@@ -2188,8 +2223,7 @@ pub fn run_scan(config: &ScanConfig) -> ScanReport {
     let pack_has_version_rules = config.rules_path.is_file()
         && crate::rules::pack_format::read_header_from_file(&config.rules_path)
             .is_ok_and(|header| header.has_version_rules());
-    let mut declared_dependencies = ((config.with_deps || pack_has_version_rules)
-        && !config.quick_mode)
+    let collected = ((config.with_deps || pack_has_version_rules) && !config.quick_mode)
         // Every manifest under the scanned folders, with the scan's
         // exclusions — see `dependencies::find_dependency_files` (#287).
         .then(|| {
@@ -2199,6 +2233,23 @@ pub fn run_scan(config: &ScanConfig) -> ScanReport {
                 &config.exclude_patterns,
             )
         });
+    // ADR-0070: the manifests that could not be read are named by the
+    // CLI even when no other manifest starts the dependency phase.
+    let manifests_unreadable: Vec<(String, String)> = collected
+        .as_ref()
+        .map(|c| {
+            c.unreadable
+                .iter()
+                .map(|m| {
+                    (
+                        project_relative_path(&config.root, &m.file),
+                        m.reason.clone(),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut declared_dependencies = collected.map(|c| c.dependencies);
     let deps_phase_active = !config.quick_mode
         && (config.with_deps
             || (pack_has_version_rules
@@ -2898,6 +2949,7 @@ pub fn run_scan(config: &ScanConfig) -> ScanReport {
         skipped_minified,
         skipped_saved_pages,
         lockfiles_not_used,
+        manifests_unreadable,
         rule_catalog,
         test_results,
         dependency_stats,
@@ -3883,6 +3935,33 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    /// ADR-0070: a manifest that cannot be read is named in the report,
+    /// relative to the project, with its reason, even when it is the
+    /// project's only manifest.
+    #[test]
+    fn test_unreadable_manifest_is_named_in_the_report() {
+        let root = temp_dir();
+        let rules_dir = root.join("rules");
+        std::fs::create_dir_all(&rules_dir).unwrap();
+        write(
+            &root,
+            "api/pom.xml",
+            "<project>\n<dependencies>\n</project>",
+        );
+        let report = run_scan(&ScanConfig {
+            root: root.clone(),
+            rules_path: rules_dir,
+            with_deps: true,
+            exclude_patterns: vec![],
+            ..ScanConfig::default()
+        });
+        assert_eq!(report.manifests_unreadable.len(), 1);
+        let (file, reason) = &report.manifests_unreadable[0];
+        assert_eq!(file, "api/pom.xml");
+        assert!(reason.starts_with("invalid XML, line 3"), "{reason}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     /// Ticket #197: the EPSS percentage is rounded down, so a score below
     /// 1 never reads 100 %.
     #[test]
@@ -3931,6 +4010,7 @@ mod tests {
             url: "https://www.cisa.gov/known-exploited-vulnerabilities-catalog".into(),
             license: "CC0-1.0".into(),
             records: 1,
+            notice: String::new(),
         }];
         let container = encode(&Contents {
             source: "test",

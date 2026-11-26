@@ -297,6 +297,13 @@ pub struct DataSource {
     pub license: String,
     /// Records or rows of the file that come from it.
     pub records: usize,
+    /// What its terms ask every copy to reproduce, verbatim (ADR-0070):
+    /// MITRE's copyright designation and license for the CVE Program,
+    /// the NVD's sentence for the NVD. Empty for a source that asks for
+    /// no more than its name and license; a file written before it reads
+    /// as empty.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub notice: String,
 }
 
 /// One table of the header: data keyed by CVE, beside the ecosystems.
@@ -842,6 +849,7 @@ mod tests {
             url: "https://www.cisa.gov/known-exploited-vulnerabilities-catalog".to_string(),
             license: "CC0-1.0".to_string(),
             records: 1,
+            notice: String::new(),
         }];
         let tables = [TablePayload {
             name: "kev".to_string(),

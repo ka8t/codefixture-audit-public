@@ -349,9 +349,6 @@ pub fn render_playbook_inline(
         .collect();
 
     let mut refs_html = String::new();
-    for id in cwe {
-        refs_html.push_str(&cwe_reference(id));
-    }
     if let Some(owasp) = &entry.references.owasp {
         refs_html.push_str(&format!(
             r#"<span class="playbook-ref">{}</span> "#,
@@ -391,9 +388,76 @@ pub fn render_playbook_inline(
         String::new()
     };
 
+    let cwe_html = cwe_list(cwe, report_locale);
     format!(
-        r#"<details class="playbook-details"><summary>📋 {label}</summary><ol class="playbook-steps">{steps_html}</ol>{benefit_html}<div class="playbook-refs">{refs_html}</div></details>"#
+        r#"<details class="playbook-details"><summary>📋 {label}</summary><ol class="playbook-steps">{steps_html}</ol>{benefit_html}{cwe_html}<div class="playbook-refs">{refs_html}</div></details>"#
     )
+}
+
+/// The CWEs of a finding with their names and attack patterns, from the
+/// catalog embedded in the engine (ADR-0070): one line per CWE, its id
+/// linked to MITRE's page, its name as MITRE writes it (MITRE publishes in
+/// English only), "deprecated by MITRE" for an entry MITRE removed, then
+/// the CAPEC attack patterns it points to, each linked. A CWE the catalog
+/// does not hold keeps its id alone, as before. Empty without CWE.
+fn cwe_list(cwe: &[String], report_locale: &Value) -> String {
+    if cwe.is_empty() {
+        return String::new();
+    }
+    let items: String = cwe
+        .iter()
+        .map(|id| {
+            let reference = cwe_reference(id);
+            let Some(entry) = crate::report::cwe_catalog::weakness(id) else {
+                return format!("<li>{reference}</li>");
+            };
+            let deprecated = if entry.is_deprecated() {
+                format!(
+                    r#" <em class="playbook-cwe-deprecated">({})</em>"#,
+                    escape(&t(report_locale, "playbook_cwe_deprecated"))
+                )
+            } else {
+                String::new()
+            };
+            let patterns: Vec<String> = crate::report::cwe_catalog::attack_patterns(id)
+                .into_iter()
+                .map(|(capec, pattern)| capec_reference(capec, pattern.map(|p| p.name.as_str())))
+                .collect();
+            let patterns_html = if patterns.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    r#"<div class="playbook-capec">{} {}</div>"#,
+                    escape(&t(report_locale, "playbook_attack_patterns")),
+                    patterns.join(" · ")
+                )
+            };
+            format!(
+                "<li>{reference}{}{deprecated}{patterns_html}</li>",
+                escape(&entry.name)
+            )
+        })
+        .collect();
+    format!(r#"<ul class="playbook-cwe">{items}</ul>"#)
+}
+
+/// One CAPEC attack pattern: its id linked to MITRE's page, then its name
+/// when the CAPEC catalog holds it.
+fn capec_reference(id: &str, name: Option<&str>) -> String {
+    let number = id
+        .strip_prefix("CAPEC-")
+        .filter(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+    let link = match number {
+        Some(n) => format!(
+            r#"<a href="https://capec.mitre.org/data/definitions/{n}.html" target="_blank" rel="noopener noreferrer">{}</a>"#,
+            escape(id)
+        ),
+        None => escape(id),
+    };
+    match name {
+        Some(name) => format!("{link} {}", escape(name)),
+        None => link,
+    }
 }
 
 #[cfg(test)]
@@ -608,6 +672,39 @@ mod tests {
             false,
         );
         assert!(!none.contains("CWE-"), "{none}");
+    }
+
+    /// ADR-0070: each CWE comes with MITRE's name and its CAPEC attack
+    /// patterns, linked; a deprecated entry says so in the report's
+    /// language; an id the catalog lacks keeps its id alone.
+    #[test]
+    fn test_cwe_list_names_weaknesses_and_attack_patterns() {
+        let fr = load_report_locale("fr");
+        let cwe = [
+            "CWE-89".to_string(),
+            "CWE-247".to_string(),
+            "CWE-999999".to_string(),
+        ];
+        let html = cwe_list(&cwe, &fr);
+        let sql = crate::report::cwe_catalog::weakness("CWE-89").unwrap();
+        assert!(html.contains(&escape(&sql.name)), "{html}");
+        let (capec, pattern) = crate::report::cwe_catalog::attack_patterns("CWE-89")[0];
+        let number = capec.trim_start_matches("CAPEC-");
+        assert!(
+            html.contains(&format!("capec.mitre.org/data/definitions/{number}.html")),
+            "{html}"
+        );
+        assert!(html.contains(&escape(&pattern.unwrap().name)), "{html}");
+        assert!(
+            html.contains(&escape(&t(&fr, "playbook_attack_patterns"))),
+            "{html}"
+        );
+        assert!(html.contains("(retiré par MITRE)"), "{html}");
+        assert!(
+            html.contains("<li><a href=\"https://cwe.mitre.org/data/definitions/999999.html\""),
+            "{html}"
+        );
+        assert_eq!(cwe_list(&[], &fr), "");
     }
 
     /// Ticket #215: a client rule's CWE is escaped, and linked only when

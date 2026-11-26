@@ -43,6 +43,15 @@ pub struct ExportData {
     /// as the baseline for the next scan
     /// (`_load_schema_from_history`).
     pub database_schema: Option<DatabaseSchema>,
+    /// The name of every CWE the findings cite, by id, from the catalog
+    /// embedded in the engine (ADR-0070); a CWE it lacks is not listed.
+    /// Empty in a file written before it. Nothing reads it back.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub cwe_names: BTreeMap<String, String>,
+    /// MITRE's copyright designation and license, which the CWE terms of
+    /// use ask every copy of CWE names to reproduce; empty without names.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub cwe_notice: String,
 }
 
 fn compute_totals(findings: &[ReportFinding]) -> BTreeMap<String, usize> {
@@ -66,6 +75,7 @@ pub fn build_export_data(
     date: &str,
     database_schema: Option<DatabaseSchema>,
 ) -> ExportData {
+    let cwe_names = crate::report::cwe_catalog::names_of(findings.iter().flat_map(|f| &f.cwe));
     ExportData {
         version: "1.0".to_string(),
         tool_version: crate::RELEASE_VERSION.to_string(),
@@ -74,6 +84,12 @@ pub fn build_export_data(
         totals: compute_totals(findings),
         findings: findings.to_vec(),
         database_schema,
+        cwe_names: cwe_names.clone(),
+        cwe_notice: if cwe_names.is_empty() {
+            String::new()
+        } else {
+            crate::report::cwe_catalog::catalog().cwe.notice.clone()
+        },
     }
 }
 
@@ -206,6 +222,22 @@ mod tests {
         assert_eq!(data.totals["LOW"], 1);
         assert_eq!(data.totals["CRITICAL"], 0);
         assert_eq!(data.findings.len(), 3);
+    }
+
+    /// ADR-0070: the names of the cited CWEs, with MITRE's notice; none
+    /// and no notice without a CWE the catalog holds.
+    #[test]
+    fn test_export_names_the_cited_cwe() {
+        let mut cited = finding("HIGH", "a.py");
+        cited.cwe = vec!["CWE-79".to_string(), "CWE-999999".to_string()];
+        let data = build_export_data(&[cited], "ts", "2026-11-26", None);
+        let names: Vec<&String> = data.cwe_names.keys().collect();
+        assert_eq!(names, vec!["CWE-79"]);
+        assert!(data.cwe_notice.contains("The MITRE Corporation"));
+        let none = build_export_data(&[finding("LOW", "b.py")], "ts", "2026-11-26", None);
+        assert!(none.cwe_names.is_empty() && none.cwe_notice.is_empty());
+        let json = serde_json::to_string(&none).unwrap();
+        assert!(!json.contains("cwe_names"), "{json}");
     }
 
     #[test]

@@ -391,6 +391,10 @@ pub fn render_audit_params_html(
             &vulnerability_sources_row(&info.vulnerability_sources, report_locale),
         )
         .replace(
+            "{{weakness_catalog_row}}",
+            &weakness_catalog_row(report_locale),
+        )
+        .replace(
             "{{i18n_categories}}",
             &t(report_locale, "audit_params.categories"),
         )
@@ -431,10 +435,52 @@ fn vulnerability_sources_row(
             )
         })
         .collect();
+    let notices: Vec<&str> = sources
+        .iter()
+        .map(|s| s.notice.as_str())
+        .filter(|n| !n.is_empty())
+        .collect();
     format!(
-        "<div class=\"param-item param-full\">\n            <span class=\"param-label\">{}</span>\n            <span class=\"param-value\">{}</span>\n        </div>",
+        "<div class=\"param-item param-full\">\n            <span class=\"param-label\">{}</span>\n            <span class=\"param-value\">{}{}</span>\n        </div>",
         escape(&t(report_locale, "audit_params.vulnerability_sources")),
-        items.join(", ")
+        items.join(", "),
+        notices_details(&notices, report_locale)
+    )
+}
+
+/// The notices the terms of some sources ask every copy to reproduce
+/// (ADR-0070), verbatim, folded under one summary. Empty without any.
+fn notices_details(notices: &[&str], report_locale: &Value) -> String {
+    if notices.is_empty() {
+        return String::new();
+    }
+    let paragraphs: String = notices
+        .iter()
+        .map(|n| format!("<p>{}</p>", escape(n)))
+        .collect();
+    format!(
+        "<details class=\"param-notices\"><summary>{}</summary>{paragraphs}</details>",
+        escape(&t(report_locale, "audit_params.source_notices"))
+    )
+}
+
+/// The row naming the CWE and CAPEC releases embedded in the engine, which
+/// name the weaknesses of every finding (ADR-0070), with MITRE's
+/// copyright designation and license, which their terms of use ask every
+/// copy to reproduce. Shown in every report: every report may name a CWE.
+fn weakness_catalog_row(report_locale: &Value) -> String {
+    let catalog = crate::report::cwe_catalog::catalog();
+    let releases = format!(
+        "<a href=\"https://cwe.mitre.org\" target=\"_blank\" rel=\"noopener noreferrer\">CWE {}</a> ({}), <a href=\"https://capec.mitre.org\" target=\"_blank\" rel=\"noopener noreferrer\">CAPEC {}</a> ({}), The MITRE Corporation",
+        escape(&catalog.cwe.version),
+        escape(&catalog.cwe.date),
+        escape(&catalog.capec.version),
+        escape(&catalog.capec.date)
+    );
+    format!(
+        "<div class=\"param-item param-full\">\n            <span class=\"param-label\">{}</span>\n            <span class=\"param-value\">{releases}{}</span>\n        </div>",
+        escape(&t(report_locale, "audit_params.weakness_catalog")),
+        notices_details(&[&catalog.cwe.notice, &catalog.capec.notice], report_locale)
     )
 }
 
@@ -475,6 +521,7 @@ mod tests {
                 url: "https://github.com/advisories".to_string(),
                 license: "CC-BY-4.0".to_string(),
                 records: 3,
+                notice: String::new(),
             }],
             &locale,
         );
@@ -489,6 +536,46 @@ mod tests {
         assert!(
             row.contains("GitHub Advisory Database &lt;GHSA&gt;</a> (CC-BY-4.0)"),
             "{row}"
+        );
+        assert!(!row.contains("param-notices"), "no notice, no block: {row}");
+    }
+
+    /// ADR-0070: a source whose terms ask for a notice shows it verbatim,
+    /// escaped, under the translated summary; the weakness catalog row
+    /// names both MITRE releases with their notices, in every report.
+    #[test]
+    fn test_source_notices_and_weakness_catalog_are_shown() {
+        let locale = load_report_locale("fr");
+        let row = vulnerability_sources_row(
+            &[crate::project::advisory_file::DataSource {
+                name: "NIST National Vulnerability Database (NVD)".to_string(),
+                url: "https://nvd.nist.gov".to_string(),
+                license: "Public domain (NIST)".to_string(),
+                records: 2,
+                notice: "This product uses data from the NVD API but is not endorsed or certified by the NVD.".to_string(),
+            }],
+            &locale,
+        );
+        assert!(
+            row.contains("<summary>Conditions de ces sources</summary>"),
+            "{row}"
+        );
+        assert!(
+            row.contains("not endorsed or certified by the NVD."),
+            "{row}"
+        );
+
+        let catalog = weakness_catalog_row(&locale);
+        let embedded = crate::report::cwe_catalog::catalog();
+        assert!(catalog.contains("Catalogue des faiblesses"), "{catalog}");
+        assert!(
+            catalog.contains(&format!("CWE {}</a>", embedded.cwe.version)),
+            "{catalog}"
+        );
+        assert!(catalog.contains(&escape(&embedded.cwe.notice)), "{catalog}");
+        assert!(
+            catalog.contains(&escape(&embedded.capec.notice)),
+            "{catalog}"
         );
     }
 

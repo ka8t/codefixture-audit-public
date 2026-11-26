@@ -237,20 +237,25 @@ For a report in French, Spanish or German, replace `--lang en` with `--lang fr`,
 The terminal shows the progress, what was loaded and a summary. Here, the analysis of OWASP Juice Shop with this repository's demonstration rules:
 
 ```text
-[codefixture-audit] codefixture-audit 3.1.0
+[codefixture-audit] codefixture-audit 3.2.0
 [codefixture-audit] Scope (audit.config.json): include the whole project; exclude 7 default patterns
+[codefixture-audit] System: macOS 26.5.2, behind, the latest version of its release is 26.7.3; the newest release is 27 (27.2.1); 694 known vulnerability(ies), worst CRITICAL, 2 exploited in attacks (CISA KEV) (data of 2026-11-26).
+[codefixture-audit] Python 3.15.2: up to date (data of 2026-11-26).
+[codefixture-audit] Node.js not checked: node not found on PATH outside the scanned folder.
 [codefixture-audit] Analysis in progress...
 …
 [codefixture-audit] Rules: 23/38 rule file(s) kept for the project's languages, from the pack /…/target/release/rules.cfpack
 [codefixture-audit] 23 rule(s) loaded for languages: dockerfile, html, javascript, python, yaml
 [codefixture-audit] Your rules: none, the folder /…/.codefixture-audit/custom-rules does not exist (default folder; another one: --custom-rules-dir or CODEFIXTURE_AUDIT_CUSTOM_RULES)
 …
-[codefixture-audit] Version rules: 26 advisory records for 21 published vulnerabilities (21 with a CVE), from the rule pack /…/target/release/rules.cfpack, OSV data up to November 18, 2026: Maven 5, NuGet 3, Packagist 3, PyPI 10, npm 5.
+[codefixture-audit] Version rules: 26 advisory records for 21 published vulnerabilities (21 with a CVE), from the rule pack /…/target/release/rules.cfpack, OSV data up to November 26, 2026: Maven 5, NuGet 3, Packagist 3, PyPI 10, npm 5.
 [codefixture-audit] Report generated: /path/to/your/project/audit-reports/SCA-REPORT-2026-11-20-13-17.html
 [codefixture-audit] Scan data: /path/to/your/project/audit-reports/audit-datas/SCA-DATA-2026-11-20-13-17.json
 [codefixture-audit] 871 file(s) scanned, 91,999 line(s) of code, 31 finding(s)
-[codefixture-audit] Total duration: 2.1 s
+[codefixture-audit] Total duration: 2.2 s
 ```
+
+The lines that follow the scope are the system check (ADR-0071): the system running the engine, then the runtime of each scanned language (Python, Node.js, PHP, the JDK, .NET), compared with the data of the rule pack, dated. A line with something to act on is a warning, shown even with `--quiet`; the analysis goes on in every case. On Linux, the vulnerabilities of the distribution and its runtimes are marked to confirm: distributions fix flaws without changing the version number.
 
 The analysis ends with exit code 1 here: some findings are HIGH or CRITICAL, which block by default; without a blocking finding it ends with 0 (all the exit codes: [In a CI/CD pipeline](#in-a-cicd-pipeline)).
 

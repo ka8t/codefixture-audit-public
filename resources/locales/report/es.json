@@ -115,7 +115,9 @@
     "dependencies_versions_not_checked": "Versiones no fijadas señaladas; vulnerabilidades publicadas no verificadas (el paquete de reglas no tiene reglas de versión legibles)",
     "categories": "Categorías",
     "cli_options": "Opciones CLI",
-    "vulnerability_sources": "Datos de vulnerabilidades"
+    "vulnerability_sources": "Datos de vulnerabilidades",
+    "weakness_catalog": "Catálogo de debilidades",
+    "source_notices": "Condiciones de estas fuentes"
   },
   "cli_options_desc": {
     "quick": "Modo rápido: los pasos lentos opcionales, incluida la verificación de dependencias, no se ejecutan",
@@ -173,6 +175,7 @@
     "exploited": "explotada en ataques, CISA KEV desde el {date}",
     "exploited_ransomware": "explotada en ataques, incluso de ransomware, CISA KEV desde el {date}",
     "epss": "EPSS {percent} %",
+    "severity_nvd": "{severity} según CVSS {version} {score} ({source})",
     "decimal_mark": ","
   },
   "severity_filter_banner": "⚠️ Escaneo filtrado — severidades incluidas: {levels}",
@@ -773,6 +776,8 @@
   "suppress_copy": "Copiar",
   "suppress_clear": "Borrar",
   "playbook_link": "Playbook",
+  "playbook_attack_patterns": "Patrones de ataque conocidos (CAPEC):",
+  "playbook_cwe_deprecated": "retirado por MITRE",
   "threat_tte": "Tiempo hasta la explotación (TTE)",
   "threat_exposure": "Ventana de exposición",
   "threat_context": "Contexto de seguridad",

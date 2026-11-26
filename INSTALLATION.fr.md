@@ -237,20 +237,25 @@ Pour un rapport en français, en espagnol ou en allemand, remplacez `--lang en` 
 Le terminal affiche l'avancement, ce qui a été chargé et un résumé. Voici l'analyse d'OWASP Juice Shop avec les règles de démonstration de ce dépôt :
 
 ```text
-[codefixture-audit] codefixture-audit 3.1.0
+[codefixture-audit] codefixture-audit 3.2.0
 [codefixture-audit] Scope (audit.config.json): include the whole project; exclude 7 default patterns
+[codefixture-audit] System: macOS 26.5.2, behind, the latest version of its release is 26.7.3; the newest release is 27 (27.2.1); 694 known vulnerability(ies), worst CRITICAL, 2 exploited in attacks (CISA KEV) (data of 2026-11-26).
+[codefixture-audit] Python 3.15.2: up to date (data of 2026-11-26).
+[codefixture-audit] Node.js not checked: node not found on PATH outside the scanned folder.
 [codefixture-audit] Analysis in progress...
 …
 [codefixture-audit] Rules: 23/38 rule file(s) kept for the project's languages, from the pack /…/target/release/rules.cfpack
 [codefixture-audit] 23 rule(s) loaded for languages: dockerfile, html, javascript, python, yaml
 [codefixture-audit] Your rules: none, the folder /…/.codefixture-audit/custom-rules does not exist (default folder; another one: --custom-rules-dir or CODEFIXTURE_AUDIT_CUSTOM_RULES)
 …
-[codefixture-audit] Version rules: 26 advisory records for 21 published vulnerabilities (21 with a CVE), from the rule pack /…/target/release/rules.cfpack, OSV data up to November 18, 2026: Maven 5, NuGet 3, Packagist 3, PyPI 10, npm 5.
+[codefixture-audit] Version rules: 26 advisory records for 21 published vulnerabilities (21 with a CVE), from the rule pack /…/target/release/rules.cfpack, OSV data up to November 26, 2026: Maven 5, NuGet 3, Packagist 3, PyPI 10, npm 5.
 [codefixture-audit] Report generated: /path/to/your/project/audit-reports/SCA-REPORT-2026-11-20-13-17.html
 [codefixture-audit] Scan data: /path/to/your/project/audit-reports/audit-datas/SCA-DATA-2026-11-20-13-17.json
 [codefixture-audit] 871 file(s) scanned, 91,999 line(s) of code, 31 finding(s)
-[codefixture-audit] Total duration: 2.1 s
+[codefixture-audit] Total duration: 2.2 s
 ```
+
+Les lignes qui suivent le périmètre sont la vérification du système (ADR-0071) : le système qui exécute le moteur, puis l'environnement d'exécution de chaque langage analysé (Python, Node.js, PHP, le JDK, .NET), comparés aux données du pack de règles, datées. Une ligne qui demande une action est un avertissement, affiché même avec `--quiet` ; l'analyse continue dans tous les cas. Sous Linux, les failles de la distribution et de ses environnements sont marquées à confirmer : les distributions corrigent les failles sans changer le numéro de version.
 
 L'analyse se termine ici avec le code de sortie 1 : des constats sont HIGH ou CRITICAL, ce qui bloque par défaut ; sans constat bloquant, elle se termine avec 0 (tous les codes de sortie : [Dans une chaîne CI/CD](#dans-une-chaîne-cicd)).
 

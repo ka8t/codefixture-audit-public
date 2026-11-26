@@ -7,6 +7,7 @@ pub mod comparison;
 pub mod comparison_html;
 pub mod compliance;
 pub mod compliance_html;
+pub mod cwe_catalog;
 pub mod data;
 pub mod export_json;
 pub mod exports;

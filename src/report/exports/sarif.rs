@@ -197,7 +197,57 @@ pub struct SarifRun {
     #[serde(rename = "automationDetails")]
     pub automation_details: SarifAutomationDetails,
     pub results: Vec<SarifResult>,
+    /// The CWE taxonomy (ADR-0070): the CWE entries the findings cite,
+    /// with MITRE's names from the catalog embedded in the engine. Absent
+    /// when no finding cites a CWE the catalog holds.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub taxonomies: Vec<SarifTaxonomy>,
 }
+
+/// A taxonomy of SARIF 2.1.0 (`toolComponent`): here MITRE's CWE list, at
+/// the release the engine embeds. Its `fullDescription` holds MITRE's
+/// copyright designation and license, which the CWE terms of use ask
+/// every copy of CWE content to reproduce.
+#[derive(Debug, Serialize, PartialEq)]
+pub struct SarifTaxonomy {
+    pub name: String,
+    pub version: String,
+    pub organization: String,
+    #[serde(rename = "informationUri")]
+    pub information_uri: String,
+    #[serde(rename = "fullDescription")]
+    pub full_description: SarifText,
+    pub taxa: Vec<SarifTaxon>,
+}
+
+/// One CWE entry of the taxonomy (`reportingDescriptor`): `CWE-79`, its
+/// name, and MITRE's page.
+#[derive(Debug, Serialize, PartialEq)]
+pub struct SarifTaxon {
+    pub id: String,
+    #[serde(rename = "shortDescription")]
+    pub short_description: SarifText,
+    #[serde(rename = "helpUri")]
+    pub help_uri: String,
+}
+
+/// A result's reference to one CWE entry of the taxonomy
+/// (`reportingDescriptorReference`).
+#[derive(Debug, Serialize, PartialEq)]
+pub struct SarifTaxonReference {
+    pub id: String,
+    #[serde(rename = "toolComponent")]
+    pub tool_component: SarifToolComponentReference,
+}
+
+/// Names the taxonomy a reference points into.
+#[derive(Debug, Serialize, PartialEq)]
+pub struct SarifToolComponentReference {
+    pub name: String,
+}
+
+/// Name of the CWE taxonomy in a SARIF run.
+const CWE_TAXONOMY: &str = "CWE";
 
 /// `runAutomationDetails` of SARIF 2.1.0: `id` is `<category>/`, the part
 /// before the last `/` naming the kind of analysis.
@@ -281,6 +331,10 @@ pub struct SarifResult {
     /// catalog rule, whose rule tags hold its CWE.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub properties: Option<SarifResultProperties>,
+    /// The finding's CWEs that the embedded catalog holds, as references
+    /// into the run's CWE taxonomy (ADR-0070).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub taxa: Vec<SarifTaxonReference>,
 }
 
 /// The property bag of a result (SARIF 2.1.0 `propertyBag`).
@@ -749,9 +803,21 @@ pub fn build_sarif_report(
                 code_flows: f.taint_flow.as_ref().map(build_code_flows),
                 properties: (f.rule_language.is_empty() && !f.cwe.is_empty())
                     .then(|| SarifResultProperties { cwe: f.cwe.clone() }),
+                taxa: f
+                    .cwe
+                    .iter()
+                    .filter(|id| crate::report::cwe_catalog::weakness(id).is_some())
+                    .map(|id| SarifTaxonReference {
+                        id: id.trim().to_string(),
+                        tool_component: SarifToolComponentReference {
+                            name: CWE_TAXONOMY.to_string(),
+                        },
+                    })
+                    .collect(),
             }
         })
         .collect();
+    let taxonomies = cwe_taxonomy(findings).into_iter().collect();
 
     SarifReport {
         schema: SARIF_SCHEMA_URI.to_string(),
@@ -769,8 +835,47 @@ pub fn build_sarif_report(
                 id: format!("{tool_name}/"),
             },
             results,
+            taxonomies,
         }],
     }
+}
+
+/// The CWE taxonomy of `findings` (ADR-0070): every CWE entry they cite
+/// that the embedded catalog holds, once, sorted, with its name. `None`
+/// when there is none.
+fn cwe_taxonomy(findings: &[ReportFinding]) -> Option<SarifTaxonomy> {
+    let ids: std::collections::BTreeSet<&str> = findings
+        .iter()
+        .flat_map(|f| f.cwe.iter().map(|c| c.trim()))
+        .collect();
+    let taxa: Vec<SarifTaxon> = ids
+        .into_iter()
+        .filter_map(|id| {
+            let entry = crate::report::cwe_catalog::weakness(id)?;
+            let number = id.strip_prefix("CWE-")?;
+            Some(SarifTaxon {
+                id: id.to_string(),
+                short_description: SarifText {
+                    text: entry.name.clone(),
+                },
+                help_uri: format!("https://cwe.mitre.org/data/definitions/{number}.html"),
+            })
+        })
+        .collect();
+    if taxa.is_empty() {
+        return None;
+    }
+    let release = &crate::report::cwe_catalog::catalog().cwe;
+    Some(SarifTaxonomy {
+        name: CWE_TAXONOMY.to_string(),
+        version: release.version.clone(),
+        organization: "MITRE".to_string(),
+        information_uri: "https://cwe.mitre.org".to_string(),
+        full_description: SarifText {
+            text: release.notice.clone(),
+        },
+        taxa,
+    })
 }
 
 // ============================================================================
@@ -1134,6 +1239,38 @@ mod tests {
     fn test_run_has_automation_details() {
         let report = build_sarif_report(&[], "codefixture-audit", "1.0", "https://x");
         assert_eq!(report.runs[0].automation_details.id, "codefixture-audit/");
+    }
+
+    /// ADR-0070: the run's CWE taxonomy names each cited CWE once, with
+    /// MITRE's notice; each result points to its CWEs; a CWE the catalog
+    /// lacks stays out of the taxonomy.
+    #[test]
+    fn test_cwe_taxonomy_names_the_cited_weaknesses() {
+        let mut a = finding("xss", "a.py", 1);
+        a.cwe = vec!["CWE-79".to_string(), "CWE-999999".to_string()];
+        let mut b = finding("xss", "b.py", 2);
+        b.cwe = vec!["CWE-79".to_string()];
+        let report = build_sarif_report(&[a, b], "t", "1", "https://x");
+        let run = &report.runs[0];
+        assert_eq!(run.taxonomies.len(), 1);
+        let taxonomy = &run.taxonomies[0];
+        assert_eq!(taxonomy.name, "CWE");
+        assert!(
+            taxonomy
+                .full_description
+                .text
+                .contains("The MITRE Corporation")
+        );
+        let ids: Vec<&str> = taxonomy.taxa.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(ids, vec!["CWE-79"]);
+        assert_eq!(
+            taxonomy.taxa[0].short_description.text,
+            crate::report::cwe_catalog::weakness("CWE-79").unwrap().name
+        );
+        let refs: Vec<&str> = run.results[0].taxa.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(refs, vec!["CWE-79"]);
+        let none = build_sarif_report(&[finding("x", "c.py", 1)], "t", "1", "https://x");
+        assert!(none.runs[0].taxonomies.is_empty());
     }
 
     /// Ticket #291: the output validates against the official SARIF 2.1.0

@@ -219,7 +219,7 @@ Le bloc `metadata` contient les références de la règle.
 
 | Clé | Valeur |
 |---|---|
-| `cwe` | Une ou plusieurs `CWE-<n>`, séparées par des virgules ou des espaces. |
+| `cwe` | Une ou plusieurs `CWE-<n>`, séparées par des virgules ou des espaces. Le rapport affiche chacune avec son nom et ses schémas d'attaque, tirés des listes CWE et CAPEC de MITRE intégrées au moteur ; un identifiant absent de la liste est affiché seul, et une CWE retirée par MITRE est signalée comme telle. |
 | `owasp` | Entrée du Top 10 OWASP, `A03:2021`. |
 | `cve` | Un ou plusieurs identifiants CVE. |
 | `iso27001`, `asvs`, `wcag` | Identifiants de contrôles. |

@@ -115,7 +115,9 @@
     "dependencies_versions_not_checked": "Nicht festgelegte Versionen gemeldet; veröffentlichte Schwachstellen nicht geprüft (das Regelpaket hat keine lesbaren Versionsregeln)",
     "categories": "Kategorien",
     "cli_options": "CLI-Optionen",
-    "vulnerability_sources": "Schwachstellendaten"
+    "vulnerability_sources": "Schwachstellendaten",
+    "weakness_catalog": "Schwachstellenkatalog",
+    "source_notices": "Bedingungen dieser Quellen"
   },
   "cli_options_desc": {
     "quick": "Schnellmodus: die langsamen optionalen Schritte, darunter die Abhängigkeitsprüfung, laufen nicht",
@@ -173,6 +175,7 @@
     "exploited": "in Angriffen ausgenutzt, CISA KEV seit {date}",
     "exploited_ransomware": "in Angriffen ausgenutzt, auch durch Ransomware, CISA KEV seit {date}",
     "epss": "EPSS {percent} %",
+    "severity_nvd": "{severity} laut CVSS {version} {score} ({source})",
     "decimal_mark": ","
   },
   "severity_filter_banner": "⚠️ Gefilterter Scan — eingeschlossene Schweregrade: {levels}",
@@ -773,6 +776,8 @@
   "suppress_copy": "Kopieren",
   "suppress_clear": "Löschen",
   "playbook_link": "Playbook",
+  "playbook_attack_patterns": "Bekannte Angriffsmuster (CAPEC):",
+  "playbook_cwe_deprecated": "von MITRE zurückgezogen",
   "threat_tte": "Zeit bis zur Ausnutzung (TTE)",
   "threat_exposure": "Expositionsfenster",
   "threat_context": "Sicherheitskontext",

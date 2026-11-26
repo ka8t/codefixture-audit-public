@@ -25,12 +25,14 @@ pub mod scan;
 /// shows [`RELEASE_VERSION`] instead.
 pub const BUILD_VERSION: &str = env!("CODEFIXTURE_AUDIT_BUILD_VERSION");
 
-/// Release version of the engine, `3.1.0`: the `Cargo.toml` version, the
+/// Release version of the engine, `3.2.0`: the `Cargo.toml` version, the
 /// only one a deliverable shows (HTML report, JSON export, SARIF, SBOM,
 /// metrics file, the console line that opens a scan). Decided on
 /// 2026-11-24: the reports showed "CodeFixture v0.1.0+506.ade3297", and a
 /// client has no use for the commit count and hash of the build, which
 /// `--version` still gives. `3.0.0` since 2026-11-24 too (ADR-0065): the
 /// numbering continues the Python engine's, released 1.0.0 to 2.0.0;
-/// `3.1.0` since 2026-11-25, the CI/CD integration (epic #288).
+/// `3.1.0` since 2026-11-25, the CI/CD integration (epic #288); `3.2.0`
+/// since 2026-11-26, the NVD, CWE and CAPEC sources (ADR-0070) and the
+/// system check at start (ADR-0071).
 pub const RELEASE_VERSION: &str = env!("CARGO_PKG_VERSION");
