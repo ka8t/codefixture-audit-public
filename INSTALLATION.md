@@ -653,6 +653,137 @@ pipeline {
 ```
 
 
+### Tester's procedure: update and test
+
+Everything a tester runs after new commits, in order, from the `codefixture-audit-public` folder. This repository holds one program, the engine, with its 38 demo rules and the demo vulnerability data. About 10 minutes.
+
+**1. Update the code and build.**
+
+macOS and Linux:
+
+```bash
+git pull
+cargo build --release
+./target/release/codefixture-audit --version
+```
+
+Windows:
+
+```powershell
+git pull
+cargo build --release
+.\target\release\codefixture-audit.exe --version
+```
+
+**Expected**: the product version (`3.3.0` or higher), the commit count and the short hash of the latest commit of the [repository page](https://github.com/ka8t/codefixture-audit-public).
+
+**2. Run the automatic checks.** About 3 minutes:
+
+```bash
+cargo test
+cargo clippy --all-targets -- -D warnings
+cargo fmt --all -- --check
+```
+
+**Expected**: `0 failed` on every `test result` line, no output from `clippy` but its `Finished` line, none from `fmt`.
+
+**3. Scan the test project.** It holds two dependencies with a vulnerability exploited in attacks (Log4Shell, Spring4Shell), a Python dependency, a vulnerable Python line, and a broken manifest.
+
+macOS and Linux:
+
+```bash
+mkdir -p ~/tester-check/broken && cd ~/tester-check
+cat > pom.xml <<'XML'
+<project>
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>demo</groupId>
+  <artifactId>tester-check</artifactId>
+  <version>1.0</version>
+  <dependencies>
+    <dependency>
+      <groupId>org.apache.logging.log4j</groupId>
+      <artifactId>log4j-core</artifactId>
+      <version>2.14.1</version>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework</groupId>
+      <artifactId>spring-beans</artifactId>
+      <version>5.3.17</version>
+    </dependency>
+  </dependencies>
+</project>
+XML
+printf 'mitogen==0.2.2\n' > requirements.txt
+printf 'import os\n\nos.system(input())\n' > app.py
+printf '<project><dependencies></project>\n' > broken/pom.xml
+cd -
+./target/release/codefixture-audit scan ~/tester-check --lang en
+./target/release/codefixture-audit scan ~/tester-check --lang en --no-cache
+```
+
+Windows:
+
+```powershell
+New-Item -ItemType Directory -Force -Path ~\tester-check\broken | Out-Null
+@'
+<project>
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>demo</groupId>
+  <artifactId>tester-check</artifactId>
+  <version>1.0</version>
+  <dependencies>
+    <dependency>
+      <groupId>org.apache.logging.log4j</groupId>
+      <artifactId>log4j-core</artifactId>
+      <version>2.14.1</version>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework</groupId>
+      <artifactId>spring-beans</artifactId>
+      <version>5.3.17</version>
+    </dependency>
+  </dependencies>
+</project>
+'@ | Set-Content ~\tester-check\pom.xml
+"mitogen==0.2.2" | Set-Content ~\tester-check\requirements.txt
+"import os`n`nos.system(input())" | Set-Content ~\tester-check\app.py
+"<project><dependencies></project>" | Set-Content ~\tester-check\broken\pom.xml
+.\target\release\codefixture-audit.exe scan ~\tester-check --lang en
+.\target\release\codefixture-audit.exe scan ~\tester-check --lang en --no-cache
+```
+
+**Expected**, on 2026-11-26 on macOS (the system, the runtimes and the dates depend on your machine):
+
+```text
+[codefixture-audit] codefixture-audit 3.3.0
+[codefixture-audit] Scope (no audit.config.json in …/tester-check): include the whole project; exclude 7 default patterns
+[codefixture-audit] System: macOS 26.5.2, behind, the latest version of its release is 26.7.3; the newest release is 27 (27.2.1); 694 known vulnerability(ies), worst CRITICAL, 2 exploited in attacks (CISA KEV) (data of 2026-11-26).
+[codefixture-audit] Python 3.15.2: up to date (data of 2026-11-26).
+[codefixture-audit] Java not checked: it gives no version, its answer is “The operation couldn’t be completed. Unable to locate a Java Runtime.”.
+…
+[codefixture-audit] Unreadable manifest: broken/pom.xml (invalid XML, line 1: not well-formed XML: ill-formed document: expected `</dependencies>`, but `</project>` was found). None of its dependencies was checked.
+…
+[codefixture-audit] Rules: 10/38 rule file(s) kept for the project's languages, from the pack …/target/release/rules.cfpack
+…
+[codefixture-audit] Version rules: 26 advisory records for 21 published vulnerabilities (21 with a CVE), from the rule pack …/target/release/rules.cfpack, OSV data up to November 26, 2026: Maven 5, NuGet 3, Packagist 3, PyPI 10, npm 5.
+…
+[codefixture-audit] 🚨 To treat urgently (exploited in attacks, CISA KEV): 3
+[codefixture-audit]    macOS 26.5.2: 2 exploited vulnerability(ies) (CVE-2026-65400, CVE-2026-86950) → upgrade to 26.7.3
+[codefixture-audit]    org.apache.logging.log4j:log4j-core 2.14.1 (pom.xml:9): CVE-2021-44228 exploited since 2021-12-10, used by ransomware → upgrade to 2.15.0
+[codefixture-audit]    org.springframework:spring-beans 5.3.17 (pom.xml:14): CVE-2022-22965 exploited since 2022-04-04 → upgrade to 5.3.18
+[codefixture-audit] 3 file(s) scanned, 21 line(s) of code, 3 finding(s)
+```
+
+What to check:
+
+- **The first lines** name your system and the runtime of each scanned language (here Python, and Java for `pom.xml`): up to date, behind, no longer supported, not found or giving no version. On Linux, the vulnerabilities of the distribution and its runtimes end with "to confirm". On Windows, the system is named by its release, then its build: `Windows 11 24H2 (10.0.…)`.
+- **The broken manifest** is named, with its line; the other manifests are still checked.
+- **The urgent block** closes the output, right above the summary; the second scan, `--no-cache` so that it analyses again, adds `(previous scan: 3)` to its first line; without it, an unchanged project shows the last scan's results. The demo data hold only a few vulnerabilities: the full catalog also lists `mitogen` and gives the latest fixed versions.
+- **The report** (`audit-reports/` in `~/tester-check`): the same block sits in the header, right above the security score, red, with a chart per urgent item and a link per CVE (NVD page) and per dependency ("see the finding"). The links `🚨 To treat urgently` of the top bar and of the side bar lead to it. In a finding's playbook, each CWE has its name and its CAPEC attack patterns. In "Parameters", "Vulnerability data" and "Weakness catalog" each fold the notices of their sources.
+- **The exit code** is 1: some findings are HIGH or CRITICAL.
+
+**4. Report what differs.** For any line that differs from these expectations beyond your system, your runtimes and the dates: the command, its full output, `--version`, and your system (see "When something goes wrong" below).
+
 ### When something goes wrong
 
 ```mermaid
