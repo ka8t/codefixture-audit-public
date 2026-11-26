@@ -52,6 +52,17 @@ pub struct Detected {
     pub cpes: Vec<String>,
     /// Running on Linux: a vulnerability found is "to confirm".
     pub on_linux: bool,
+    /// The version compared with the NVD's CPE matches, when it is not
+    /// `version`: a Linux distribution's release (`24.04`, `13`), which
+    /// the NVD names exactly (`ubuntu_linux:24.04`), while `version` holds
+    /// its point release (`24.04.5`, `13.7`).
+    pub cpe_version: Option<String>,
+    /// The version as the console and the report name it: `version`,
+    /// except Windows, whose release goes first (`Server 2025
+    /// (10.0.26100.33828)`, `11 24H2 (10.0.26100.4349)`), since a build
+    /// number alone does not say which Windows it is (seen on a GitHub
+    /// runner, 2026-11-26).
+    pub shown_version: String,
 }
 
 /// Something that could not be detected, named for the console.
@@ -64,6 +75,10 @@ pub struct NotDetected {
     /// scanned folder: the console says so in its language rather than
     /// show `reason`.
     pub not_found: Option<String>,
+    /// The first line a program printed when it gave no version (macOS's
+    /// `java` without a JDK: "Unable to locate a Java Runtime"): the
+    /// console quotes it in its language rather than show `reason`.
+    pub no_version: Option<String>,
 }
 
 /// The two tables of the pack, and the KEV CVEs (ADR-0071).
@@ -129,6 +144,7 @@ pub fn detect_system() -> Result<Detected, NotDetected> {
         what: std::env::consts::OS.to_string(),
         reason,
         not_found: None,
+        no_version: None,
     };
     match std::env::consts::OS {
         "macos" => {
@@ -215,6 +231,7 @@ fn windows_from_registry(output: &str) -> Result<Detected, String> {
             .ok_or_else(|| format!("Windows Server release not found in {name:?}"))?;
         let mut detected =
             with_defaults(product("windows-server").expect("followed"), version, false);
+        detected.shown_version = format!("{year} ({})", detected.version);
         detected.cycle = Some(year.to_string());
         detected.cpes = vec![format!("o:microsoft:windows_server_{year}")];
         return Ok(detected);
@@ -231,12 +248,18 @@ fn windows_from_registry(output: &str) -> Result<Detected, String> {
         "w"
     };
     let mut detected = with_defaults(product("windows").expect("followed"), version, false);
+    detected.shown_version = format!(
+        "{major} {} ({})",
+        release.to_ascii_uppercase(),
+        detected.version
+    );
     detected.cycle = Some(format!("{major}-{release}-{line}"));
     detected.cpes = vec![format!("o:microsoft:windows_{major}_{release}")];
     Ok(detected)
 }
 
-/// Linux from `/etc/os-release` (`ID`, `VERSION_ID`, `NAME`); Debian's
+/// Linux from `/etc/os-release` (`ID`, `VERSION_ID`, `NAME`, and `VERSION`
+/// when it extends `VERSION_ID`, as Ubuntu's point release does); Debian's
 /// point release from `/etc/debian_version`, which `os-release` lacks.
 fn linux_from_os_release(release: &str, debian_version: Option<&str>) -> Result<Detected, String> {
     let fields: BTreeMap<&str, String> = release
@@ -259,31 +282,42 @@ fn linux_from_os_release(release: &str, debian_version: Option<&str>) -> Result<
             ));
         }
     };
-    let mut version = fields
+    let release = fields
         .get("VERSION_ID")
         .cloned()
         .ok_or("/etc/os-release gives no VERSION_ID")?;
+    let mut version = release.clone();
+    // Ubuntu's point release is in `VERSION` ("24.04.5 LTS (Noble
+    // Numbat)"), not in `VERSION_ID` ("24.04"): without it every Ubuntu
+    // read as behind (found on the real image, 2026-11-26).
+    if let Some(full) = fields
+        .get("VERSION")
+        .and_then(|v| v.split_whitespace().next())
+        .filter(|v| v.starts_with(&format!("{version}.")))
+    {
+        version = full.to_string();
+    }
     if product_id == "debian"
         && let Some(point) = debian_version.map(str::trim)
         && point.starts_with(&format!("{version}."))
     {
         version = point.to_string();
     }
-    Ok(with_defaults(
-        product(product_id).expect("followed"),
-        version,
-        true,
-    ))
+    let mut detected = with_defaults(product(product_id).expect("followed"), version, true);
+    detected.cpe_version = Some(release);
+    Ok(detected)
 }
 
 /// A detection with the product's own CPEs and no named cycle.
 fn with_defaults(product: &'static Product, version: String, on_linux: bool) -> Detected {
     Detected {
         product,
+        shown_version: version.clone(),
         version,
         cycle: None,
         cpes: product.cpes.iter().map(|c| c.to_string()).collect(),
         on_linux,
+        cpe_version: None,
     }
 }
 
@@ -352,6 +386,7 @@ fn runtime_version(
         what: what.to_string(),
         reason,
         not_found: None,
+        no_version: None,
     };
     let candidates = names
         .iter()
@@ -363,6 +398,7 @@ fn runtime_version(
             names.join(" or ")
         ),
         not_found: Some(names.join(", ")),
+        no_version: None,
     })?;
     run(&program, args).map_err(fail)
 }
@@ -436,8 +472,18 @@ fn parse_simple(
                 text.lines().next().unwrap_or_default()
             ),
             not_found: None,
+            no_version: first_line(text),
         })?;
     Ok(with_defaults(product, version.to_string(), on_linux))
+}
+
+/// The first line of a program's answer that is not blank, for a
+/// [`NotDetected::no_version`].
+fn first_line(text: &str) -> Option<String> {
+    text.lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .map(str::to_string)
 }
 
 /// A JDK from `java -XshowSettings:properties -version`: `java.version`,
@@ -455,6 +501,7 @@ fn parse_java(text: &str, on_linux: bool) -> Result<Detected, NotDetected> {
         what: "Java".to_string(),
         reason: "no java.version in the JDK's properties".to_string(),
         not_found: None,
+        no_version: first_line(text),
     })?;
     let vendor = property("java.vendor").unwrap_or_default();
     let vm = property("java.vm.name").unwrap_or_default();
@@ -471,6 +518,7 @@ fn parse_java(text: &str, on_linux: bool) -> Result<Detected, NotDetected> {
                 what: "Java".to_string(),
                 reason: format!("JDK {version} of vendor {other:?} is not followed"),
                 not_found: None,
+                no_version: None,
             });
         }
     };
@@ -496,6 +544,7 @@ fn parse_dotnet(text: &str, on_linux: bool) -> Vec<Result<Detected, NotDetected>
             what: product.label.to_string(),
             reason: "dotnet lists no Microsoft.NETCore.App runtime".to_string(),
             not_found: None,
+            no_version: None,
         })];
     }
     versions
@@ -573,7 +622,7 @@ pub fn check(detected: &Detected, tables: &Tables) -> Check {
         .iter()
         .filter_map(|cpe| tables.platform.get(cpe))
         .flatten()
-        .filter(|v| v.affects(&detected.version))
+        .filter(|v| v.affects(detected.cpe_version.as_deref().unwrap_or(&detected.version)))
         .filter(|v| seen.insert(v.cve.clone()))
         .cloned()
         .collect();
@@ -732,6 +781,7 @@ mod tests {
         assert_eq!(detected.version, "10.0.26100.4349");
         assert_eq!(detected.cycle.as_deref(), Some("11-24h2-w"));
         assert_eq!(detected.cpes, vec!["o:microsoft:windows_11_24h2"]);
+        assert_eq!(detected.shown_version, "11 24H2 (10.0.26100.4349)");
         let check = check(&detected, &tables());
         assert_eq!(check.support, Support::UpToDate);
         assert_eq!(check.vulnerabilities[0].cve, "CVE-3");
@@ -740,6 +790,7 @@ mod tests {
         let detected = windows_from_registry(server).unwrap();
         assert_eq!(detected.product.id, "windows-server");
         assert_eq!(detected.cpes, vec!["o:microsoft:windows_server_2022"]);
+        assert_eq!(detected.shown_version, "2022 (10.0.20348.1)");
     }
 
     /// Linux distributions from os-release; Debian's point release; an
@@ -788,6 +839,17 @@ mod tests {
         .unwrap();
         assert_eq!(php.version, "8.3.1");
         assert!(parse_simple("command not found", "Python ", "python", false).is_err());
+        // macOS's `java` without a JDK answers without any version: the
+        // console quotes its answer.
+        let stub = parse_java(
+            "The operation couldn’t be completed. Unable to locate a Java Runtime.\nPlease visit http://www.java.com for information on installing Java.\n",
+            false,
+        )
+        .unwrap_err();
+        assert_eq!(
+            stub.no_version.as_deref(),
+            Some("The operation couldn’t be completed. Unable to locate a Java Runtime.")
+        );
 
         let temurin = parse_java(
             "Property settings:\n    java.vendor = Eclipse Adoptium\n    java.version = 21.0.2\n    java.vm.name = OpenJDK 64-Bit Server VM\nopenjdk version \"21.0.2\"",
@@ -855,5 +917,37 @@ mod tests {
     fn test_days_between() {
         assert_eq!(days_between("2026-10-27", "2026-11-26"), Some(30));
         assert_eq!(days_between("x", "2026-11-26"), None);
+    }
+    /// The real `/etc/os-release` of Ubuntu 24.04, Debian 13 (with its
+    /// `/etc/debian_version`) and Alpine 3.24, and the real answers of
+    /// Python 3.13.18 and Node.js 24.22.3, read from those images on
+    /// 2026-11-26.
+    #[test]
+    fn test_real_linux_systems_and_runtimes() {
+        const UBUNTU: &str = "PRETTY_NAME=\"Ubuntu 24.04.5 LTS\"\nNAME=\"Ubuntu\"\nVERSION_ID=\"24.04\"\nVERSION=\"24.04.5 LTS (Noble Numbat)\"\nVERSION_CODENAME=noble\nID=ubuntu\nID_LIKE=debian\nHOME_URL=\"https://www.ubuntu.com/\"\nSUPPORT_URL=\"https://help.ubuntu.com/\"\nBUG_REPORT_URL=\"https://bugs.launchpad.net/ubuntu/\"\nPRIVACY_POLICY_URL=\"https://www.ubuntu.com/legal/terms-and-policies/privacy-policy\"\nUBUNTU_CODENAME=noble\nLOGO=ubuntu-logo\n";
+        const DEBIAN: &str = "PRETTY_NAME=\"Debian GNU/Linux 13 (trixie)\"\nNAME=\"Debian GNU/Linux\"\nVERSION_ID=\"13\"\nVERSION=\"13 (trixie)\"\nVERSION_CODENAME=trixie\nDEBIAN_VERSION_FULL=13.7\nID=debian\nHOME_URL=\"https://www.debian.org/\"\nSUPPORT_URL=\"https://www.debian.org/support\"\nBUG_REPORT_URL=\"https://bugs.debian.org/\"\n";
+        const ALPINE: &str = "NAME=\"Alpine Linux\"\nID=alpine\nVERSION_ID=3.24.4\nPRETTY_NAME=\"Alpine Linux v3.24\"\nHOME_URL=\"https://alpinelinux.org/\"\nBUG_REPORT_URL=\"https://gitlab.alpinelinux.org/alpine/aports/-/issues\"\n";
+        let ubuntu = linux_from_os_release(UBUNTU, None).unwrap();
+        assert_eq!(
+            (ubuntu.product.id, ubuntu.version.as_str()),
+            ("ubuntu", "24.04.5")
+        );
+        // The NVD names the release, not the point release.
+        assert_eq!(ubuntu.cpe_version.as_deref(), Some("24.04"));
+        let debian = linux_from_os_release(DEBIAN, Some("13.7\n")).unwrap();
+        assert_eq!(
+            (debian.product.id, debian.version.as_str()),
+            ("debian", "13.7")
+        );
+        let alpine = linux_from_os_release(ALPINE, None).unwrap();
+        assert_eq!(
+            (alpine.product.id, alpine.version.as_str()),
+            ("alpine-linux", "3.24.4")
+        );
+        assert!(ubuntu.on_linux && debian.on_linux && alpine.on_linux);
+        let python = parse_simple("Python 3.13.18\n", "Python ", "python", true).unwrap();
+        assert_eq!(python.version, "3.13.18");
+        let node = parse_simple("v24.22.3\n", "v", "nodejs", true).unwrap();
+        assert_eq!(node.version, "24.22.3");
     }
 }

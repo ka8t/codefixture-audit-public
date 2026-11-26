@@ -370,12 +370,16 @@ fn linkify(escaped: &str, ids: &[&str]) -> String {
 fn platform_text(check: &Check, say: &dyn Fn(&str) -> String) -> String {
     let action = match (&check.support, &check.newer) {
         (Support::Behind { latest }, _) => say("upgrade_to").replace("{version}", latest),
+        // On Linux the vulnerability is a package's: an up-to-date release
+        // gets it from the distribution's own updates, not from a newer
+        // release (Ubuntu 24.04.5 told to move to 26.10, 2026-11-26).
+        (Support::UpToDate, _) if check.detected.on_linux => say("update_packages"),
         (_, Some((_, latest))) => say("upgrade_to").replace("{version}", latest),
         _ => say("no_fix"),
     };
     say("platform_item")
         .replace("{what}", check.detected.product.label)
-        .replace("{version}", &check.detected.version)
+        .replace("{version}", &check.detected.shown_version)
         .replace("{count}", &check.exploited.to_string())
         .replace("{cves}", &check.exploited_cves.join(", "))
         .replace("{action}", &action)

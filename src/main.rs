@@ -3329,11 +3329,14 @@ fn host_check(
         let detected = match detection {
             Ok(d) => d,
             Err(missing) => {
-                let line = match &missing.not_found {
-                    Some(programs) => say("host_not_installed")
+                let line = match (&missing.not_found, &missing.no_version) {
+                    (Some(programs), _) => say("host_not_installed")
                         .replace("{what}", &missing.what)
                         .replace("{programs}", programs),
-                    None => say("host_not_checked")
+                    (None, Some(answer)) => say("host_no_version")
+                        .replace("{what}", &missing.what)
+                        .replace("{answer}", answer),
+                    (None, None) => say("host_not_checked")
                         .replace("{what}", &missing.what)
                         .replace("{reason}", &missing.reason),
                 };
@@ -3356,9 +3359,15 @@ fn host_check(
             .newer
             .as_ref()
             .map(|(cycle, latest)| {
-                say("host_newer")
-                    .replace("{cycle}", cycle)
-                    .replace("{latest}", latest)
+                // "26.10 (26.10)": a release whose latest version is its
+                // own name is named once.
+                if cycle == latest {
+                    say("host_newer_same").replace("{latest}", latest)
+                } else {
+                    say("host_newer")
+                        .replace("{cycle}", cycle)
+                        .replace("{latest}", latest)
+                }
             })
             .unwrap_or_default();
         let vulnerabilities = if check.vulnerabilities.is_empty() {
@@ -3387,7 +3396,7 @@ fn host_check(
         };
         let line = say(key)
             .replace("{what}", detected.product.label)
-            .replace("{version}", &detected.version)
+            .replace("{version}", &detected.shown_version)
             .replace("{status}", &status)
             .replace("{newer}", &newer)
             .replace("{vulnerabilities}", &vulnerabilities)
