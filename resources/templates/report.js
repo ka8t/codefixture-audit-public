@@ -71,6 +71,13 @@ function scrollToSection(id) {
         sectionEl.classList.add('open');
         sectionEl = sectionEl.parentElement && sectionEl.parentElement.closest('.section');
     }
+    // A finding target (the priorities at the top, ticket #308) opens
+    // every group that folds it: sub-group, category, rule.
+    let group = el.parentElement && el.parentElement.closest('.sub-group, .category-group, .rule-group');
+    while (group) {
+        group.classList.add('open');
+        group = group.parentElement && group.parentElement.closest('.sub-group, .category-group, .rule-group');
+    }
     if (el.classList.contains('section')) {
         el.querySelectorAll(':scope > .section-content > .sub-group').forEach(function(sg) {
             sg.classList.add('open');

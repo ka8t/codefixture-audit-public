@@ -916,5 +916,24 @@
   "fix_none_file": "Aucune ligne à corriger : c'est le fichier entier qui est concerné. Appliquez la solution ci-dessus ; l'exemple générique en montre le principe.",
   "fix_note_button_submit": "Si ce bouton envoie un formulaire, mettez plutôt type=\"submit\".",
   "fix_note_th_row": "Si cette cellule est un en-tête de ligne, mettez plutôt scope=\"row\".",
-  "custom_rules_duplicate": "Fait doublon avec la règle livrée {shipped} sur {lines} ligne(s) : les constats de la règle livrée y sont gardés."
+  "custom_rules_duplicate": "Fait doublon avec la règle livrée {shipped} sur {lines} ligne(s) : les constats de la règle livrée y sont gardés.",
+  "priorities": {
+      "urgent": "À traiter en urgence (exploitées dans des attaques, CISA KEV) : {count}",
+      "urgent_none": "À traiter en urgence : aucune faille exploitée connue (CISA KEV)",
+      "previous": " (analyse précédente : {count})",
+      "next": "Ensuite (sévérité, puis probabilité d'exploitation EPSS) :",
+      "platform_item": "{what} {version} : {count} faille(s) exploitée(s) ({cves}) → {action}",
+      "dependency_urgent_item": "{package} {version} ({file}:{line}) : {exploited} → {action}",
+      "exploited_cve": "{cve} exploitée depuis le {date}",
+      "ransomware": ", utilisée par des rançongiciels",
+      "dependency_next_item": "{package} {version} ({file}:{line}) : {count} faille(s), la plus grave {cve} {severity}{epss} → {action}",
+      "epss": ", EPSS {percent} %",
+      "upgrade_to": "passer à {version}",
+      "no_fix": "aucune version corrigée publiée",
+      "exploited_badge": "exploitée",
+    "chart_legend": "Barre : probabilité d'exploitation dans les 30 jours (EPSS), relative à la plus forte de la liste, couleur selon la sévérité ; pleine et rouge : exploitée dans des attaques.",
+    "see_finding": "voir le constat",
+    "nav": "À traiter en urgence",
+    "decimal_mark": ","
+  }
 }

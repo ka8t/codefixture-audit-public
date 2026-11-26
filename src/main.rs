@@ -3283,7 +3283,12 @@ fn warn_sbom_left_out(
 /// vulnerabilities, with the date of the data. A line with something to
 /// act on is a warning, which `--quiet` does not hide; an up-to-date one
 /// is progress. Without system data in the pack, one line says so.
-fn host_check(config: &ScanConfig, locale: &serde_json::Value, quiet: bool) {
+fn host_check(
+    config: &ScanConfig,
+    locale: &serde_json::Value,
+    quiet: bool,
+) -> Vec<codefixture_audit::project::host::Check> {
+    let mut checks = Vec::new();
     use codefixture_audit::project::host::{self, Support};
     let say = |key: &str| codefixture_audit::i18n::t(locale, key);
     let tables = match codefixture_audit::scan::orchestrator::read_version_rules(&config.rules_path)
@@ -3296,14 +3301,14 @@ fn host_check(config: &ScanConfig, locale: &serde_json::Value, quiet: bool) {
         Ok(Some(tables)) => tables,
         Ok(None) => {
             emit_warning(&format!("[codefixture-audit] {}", say("host_no_data")));
-            return;
+            return checks;
         }
         Err(e) => {
             emit_warning(&format!(
                 "[codefixture-audit] {}",
                 say("host_unreadable").replace("{error}", &e)
             ));
-            return;
+            return checks;
         }
     };
     let today = chrono::Local::now().format("%Y-%m-%d").to_string();
@@ -3337,6 +3342,7 @@ fn host_check(config: &ScanConfig, locale: &serde_json::Value, quiet: bool) {
             }
         };
         let check = host::check(&detected, &tables);
+        checks.push(check.clone());
         let status = match &check.support {
             Support::UpToDate => say("host_status_up_to_date"),
             Support::Behind { latest } => say("host_status_behind").replace("{latest}", latest),
@@ -3393,6 +3399,7 @@ fn host_check(config: &ScanConfig, locale: &serde_json::Value, quiet: bool) {
             emit_warning(&format!("[codefixture-audit] {line}"));
         }
     }
+    checks
 }
 
 /// The first lines of a debug log (ticket #282): the build, the command
@@ -3980,7 +3987,18 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
     // ADR-0071: the system this engine runs on and the runtimes of the
     // scanned languages, checked against the pack before anything else
     // runs. It never stops the scan.
-    host_check(&config, &script_locale, quiet);
+    let host_checks = host_check(&config, &script_locale, quiet);
+    // Ticket #308: the urgent count of the previous scan, read before
+    // this one writes its own data.
+    let previous_urgent = codefixture_audit::report::export_json::find_latest_baseline(
+        &config
+            .datas_dir
+            .clone()
+            .unwrap_or_else(|| config.root.join(DATAS_DIR)),
+        &config.brand_prefix,
+    )
+    .and_then(|p| codefixture_audit::report::export_json::load_export(&p).ok())
+    .and_then(|data| data.urgent);
 
     // ADR-0050: before any rule is loaded, has anything the scan reads
     // changed since the last one? Never with `--no-cache`, nor when the
@@ -4019,6 +4037,7 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
             sbom: sbom.then_some((project_name.as_str(), &now)),
             script_locale: &script_locale,
             t_command_start,
+            host_checks: &host_checks,
         });
     }
 
@@ -4039,6 +4058,27 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
         panic!("CODEFIXTURE_AUDIT_DEBUG_PANIC_IN_SCAN set");
     }
     let report = run_scan(&config);
+    // Ticket #308: what to treat first, from the system check and the
+    // dependency phase, in the console and at the top of the report; the
+    // count goes into the scan data for the next comparison.
+    let priorities = codefixture_audit::report::priorities::Priorities::new(
+        &host_checks,
+        &report.dependency_priorities,
+    );
+    let priority_lines = priorities.console_lines(&script_locale, previous_urgent);
+    if let Some(export_path) = &report.export_path
+        && let Err(error) = codefixture_audit::report::export_json::record_priorities(
+            export_path,
+            priorities.urgent_count(),
+            &report.dependency_priorities,
+        )
+    {
+        emit_warning(&format!(
+            "[codefixture-audit] {}",
+            codefixture_audit::i18n::t(&script_locale, "scan_internal_error")
+                .replace("{error}", &error)
+        ));
+    }
     scan_step.end_with(|| {
         format!(
             "files={} loc={} findings={} stopped_for_memory={}",
@@ -4233,7 +4273,7 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
                 // version, it showed "v0.1.0+506.ade3297" before 2026-11-24.
                 tool_version: codefixture_audit::RELEASE_VERSION.to_string(),
                 company_name: effective_company_name(&brand),
-                report_lang: lang,
+                report_lang: lang.clone(),
                 // Written in the report's language by the report itself
                 // (`report::locale_format`), no longer here the French way.
                 generated_at: now.naive_local(),
@@ -4244,6 +4284,11 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
                 rule_catalog: &report.rule_catalog,
                 history: &report.history,
                 custom_rule_duplicates: &report.custom_rule_duplicates,
+                // Ticket #308: what to treat first, in the report's language.
+                priorities_html: priorities.html(
+                    &codefixture_audit::i18n::load_report_locale(&lang),
+                    previous_urgent,
+                ),
             };
             let audit_params_info = codefixture_audit::report::audit_params::AuditParamsInfo {
                 languages: report.languages.clone(),
@@ -4379,6 +4424,7 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
     } else {
         report.findings.clone()
     };
+    emit_priorities(&priority_lines);
     let exit_code = finish_scan(
         &report.findings,
         &blocking,
@@ -4761,6 +4807,9 @@ struct UnchangedScan<'a> {
     sbom: Option<(&'a str, &'a chrono::DateTime<chrono::Local>)>,
     script_locale: &'a serde_json::Value,
     t_command_start: std::time::Instant,
+    /// This run's system check (ADR-0071), for the priorities (ticket
+    /// #308), with the dependencies the last scan recorded.
+    host_checks: &'a [codefixture_audit::project::host::Check],
 }
 
 /// Ends a scan whose inputs are those of the last one (ADR-0050): nothing
@@ -4797,6 +4846,13 @@ fn report_unchanged_scan(scan: UnchangedScan<'_>) -> ExitCode {
         scan.last.client_rules.unwrap_or((0, 0)),
         scan.script_locale,
     );
+    // Ticket #308: the priorities of the unchanged project, with today's
+    // system check; no comparison, the last scan being this same state.
+    let priorities = codefixture_audit::report::priorities::Priorities::new(
+        scan.host_checks,
+        &export.dependency_priorities,
+    );
+    let priority_lines = priorities.console_lines(scan.script_locale, None);
     // The SBOM follows the report: the one written for these inputs is
     // named, not written again; written only when none was yet, and then
     // kept in the record for the next runs.
@@ -4866,6 +4922,7 @@ fn report_unchanged_scan(scan: UnchangedScan<'_>) -> ExitCode {
     }
     // `--fail-on-new` never takes this shortcut (it sets a baseline), so
     // every finding counts here.
+    emit_priorities(&priority_lines);
     ExitCode::from(finish_scan(
         &export.findings,
         &export.findings,
@@ -4875,6 +4932,14 @@ fn report_unchanged_scan(scan: UnchangedScan<'_>) -> ExitCode {
         scan.script_locale,
         scan.t_command_start,
     ))
+}
+
+/// What to treat first (ticket #308), right above the summary: the last
+/// lines a reader sees, never hidden by `--quiet`.
+fn emit_priorities(lines: &[String]) {
+    for line in lines {
+        emit_result(&format!("[codefixture-audit] {line}"));
+    }
 }
 
 /// The `text` format: one `file:line: [severity] rule — message` line per

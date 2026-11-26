@@ -18,6 +18,7 @@ pub mod html;
 mod html_languages;
 pub mod locale_format;
 pub mod playbook;
+pub mod priorities;
 pub mod report_assets;
 pub mod successes;
 pub mod summary_html;

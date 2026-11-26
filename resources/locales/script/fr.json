@@ -699,5 +699,24 @@
   "wizard_edit_by_hand": "Cette règle utilise des parties du langage que l'assistant ne demande pas : la réécrire à partir des réponses les perdrait. Modifiez {file} à la main, ou choisissez un autre nom.",
   "scan_custom_rule_duplicates": "Votre règle {rule} fait doublon avec la règle livrée {shipped} sur {lines} ligne(s) : les constats de la règle livrée y sont gardés.",
   "custom_rules_try_duplicate": "signalé aussi par la règle livrée {shipped} : le rapport garde son constat",
-  "wizard_pattern_duplicate_own": "Des règles de ce langage cherchent déjà ce texte :"
+  "wizard_pattern_duplicate_own": "Des règles de ce langage cherchent déjà ce texte :",
+  "priorities": {
+      "urgent": "À traiter en urgence (exploitées dans des attaques, CISA KEV) : {count}",
+      "urgent_none": "À traiter en urgence : aucune faille exploitée connue (CISA KEV)",
+      "previous": " (analyse précédente : {count})",
+      "next": "Ensuite (sévérité, puis probabilité d'exploitation EPSS) :",
+      "platform_item": "{what} {version} : {count} faille(s) exploitée(s) ({cves}) → {action}",
+      "dependency_urgent_item": "{package} {version} ({file}:{line}) : {exploited} → {action}",
+      "exploited_cve": "{cve} exploitée depuis le {date}",
+      "ransomware": ", utilisée par des rançongiciels",
+      "dependency_next_item": "{package} {version} ({file}:{line}) : {count} faille(s), la plus grave {cve} {severity}{epss} → {action}",
+      "epss": ", EPSS {percent} %",
+      "upgrade_to": "passer à {version}",
+      "no_fix": "aucune version corrigée publiée",
+      "exploited_badge": "exploitée",
+    "chart_legend": "Barre : probabilité d'exploitation dans les 30 jours (EPSS), relative à la plus forte de la liste, couleur selon la sévérité ; pleine et rouge : exploitée dans des attaques.",
+    "see_finding": "voir le constat",
+    "nav": "À traiter en urgence",
+    "decimal_mark": ","
+  }
 }

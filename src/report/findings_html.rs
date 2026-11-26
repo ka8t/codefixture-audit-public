@@ -393,6 +393,10 @@ fn render_finding_item(
         line_hash(&f.code)
     };
     item = item.replace("{{code_hash}}", &code_hash.to_string());
+    item = item.replace(
+        "{{finding_anchor}}",
+        &finding_anchor(&f.rule_key, &f.file, f.line),
+    );
     item = item.replace("{{category_icon}}", category_icon(&f.category));
     item = item.replace(
         "{{category_name}}",
@@ -739,6 +743,16 @@ pub fn render_severity_section(
         .replace("{{count}}", &fmt.int(findings.len() as u64))
         .replace("{{issues_label}}", &t(report_locale, "issues_count_label"))
         .replace("{{content}}", &findings_html)
+}
+
+/// The `id` of a finding in the HTML report (ticket #308): `finding-` and
+/// the first 12 hexadecimal digits of the SHA-256 of its rule, file and
+/// line, so that the priorities at the top of the report link to it. Two
+/// findings of one rule on one line share it; the link goes to the first.
+pub fn finding_anchor(rule_key: &str, file: &str, line: usize) -> String {
+    let digest =
+        crate::scan::scan_cache::sha256_hex(format!("{rule_key}\u{0}{file}\u{0}{line}").as_bytes());
+    format!("finding-{}", &digest[..12])
 }
 
 #[cfg(test)]

@@ -798,6 +798,145 @@ a.playbook-ref:hover { background: var(--primary-light); color: #fff; }
    label (the other report languages write the colon right after it). */
 :lang(fr) .param-label::after { content: "\00a0:"; }
 
+/* Ticket #308: what to treat first, below the health score. */
+.priorities {
+    background: white;
+    border-radius: 8px;
+    padding: 1rem 1.5rem;
+    margin-bottom: 2rem;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+    border-left: 4px solid var(--success);
+}
+.priorities-urgent {
+    border-left-color: var(--danger);
+}
+.priorities h2 {
+    font-size: 1.15rem;
+    margin-bottom: 0.5rem;
+}
+.priorities h3 {
+    font-size: 1rem;
+    margin: 0.75rem 0 0.25rem;
+}
+.priorities ul {
+    margin-left: 1.25rem;
+}
+.priorities li {
+    margin: 0.2rem 0;
+}
+.priorities-head {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+}
+.priorities-count {
+    font-size: 2.5rem;
+    font-weight: 700;
+    min-width: 3.5rem;
+    text-align: center;
+    border-radius: 8px;
+    padding: 0.25rem 0.5rem;
+    color: white;
+    background: var(--success);
+}
+.priorities-urgent .priorities-count {
+    background: var(--danger);
+}
+.priorities-legend {
+    font-size: 0.8rem;
+    color: var(--gray-600);
+}
+.priorities-list {
+    list-style: none;
+    margin-left: 0;
+}
+.priority {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 160px 4.5rem;
+    gap: 0.75rem;
+    align-items: center;
+    padding: 0.35rem 0;
+    border-bottom: 1px solid var(--gray-100);
+}
+.priority-bar {
+    height: 10px;
+    background: var(--gray-100);
+    border-radius: 5px;
+    overflow: hidden;
+}
+.priority-bar span {
+    display: block;
+    height: 100%;
+}
+.bar-exploited, .bar-critical {
+    background: var(--danger);
+}
+.bar-high {
+    background: #e67e22;
+}
+.bar-medium {
+    background: var(--warning);
+}
+.bar-low {
+    background: var(--info);
+}
+.priority-value {
+    font-size: 0.8rem;
+    font-weight: 600;
+    text-align: right;
+}
+.priorities {
+    color: var(--gray-800);
+    text-align: left;
+}
+.priorities a {
+    color: var(--primary-light);
+}
+.priority-urgent-item {
+    grid-template-columns: minmax(0, 1fr) 6.5rem;
+}
+.priority-urgent-item .priority-text {
+    grid-column: 1 / -1;
+}
+.severity-stack {
+    display: flex;
+    height: 14px;
+    border-radius: 7px;
+    overflow: hidden;
+    background: var(--gray-100);
+}
+.severity-stack span {
+    display: block;
+    height: 100%;
+}
+.bar-exploited-text {
+    color: var(--danger);
+}
+.severity-legend {
+    grid-column: 1 / -1;
+    font-size: 0.75rem;
+    color: var(--gray-600);
+}
+.legend-critical {
+    color: var(--danger);
+}
+.legend-high {
+    color: #e67e22;
+}
+.priority-details {
+    font-size: 0.8rem;
+    white-space: nowrap;
+}
+/* Ticket #308: the link to what to treat first, in the table of contents bar. */
+.toc-level-pill-urgent {
+    background: #fdecea;
+    color: var(--danger);
+}
+.toc-level-pill-urgent:hover {
+    background: var(--danger);
+    color: white;
+}
+
 /* ========== PHONE WIDTH (2026-11-24) ==========
    At 375 px an opened finding was about 130 px wide and the page 550 to
    790 px wide: every nesting level (section, business/dependencies group,
@@ -808,6 +947,8 @@ a.playbook-ref:hover { background: var(--primary-light); color: #fff; }
    scroll inside theirs, so that the page itself never scrolls sideways.
    The desktop layout is untouched: every rule sits in this query. */
 @media (max-width: 640px) {
+    .priority { grid-template-columns: minmax(0, 1fr) 4.5rem; }
+    .priority-bar { grid-column: 1 / -1; }
     .container { padding: 0.75rem; }
     .print-btn { position: static; margin: 0 0 0.75rem auto; padding: 0.5rem 0.9rem; font-size: 0.85rem; }
     .toc-block { margin-bottom: 1rem; }
@@ -883,3 +1024,4 @@ a.playbook-ref:hover { background: var(--primary-light); color: #fff; }
     .back-to-top { bottom: 4rem; right: 0.75rem; }
     .suppress-panel { left: 0.75rem; right: 0.75rem; bottom: 3.75rem; flex-wrap: wrap; gap: 0.5rem; padding: 0.6rem 0.8rem; }
 }
+

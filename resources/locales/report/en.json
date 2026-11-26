@@ -916,5 +916,24 @@
   "fix_none_file": "No line to correct: the whole file is concerned. Apply the solution above; the generic example shows the idea.",
   "fix_note_button_submit": "If this button submits a form, write type=\"submit\" instead.",
   "fix_note_th_row": "If this cell heads a row, write scope=\"row\" instead.",
-  "custom_rules_duplicate": "Duplicates the delivered rule {shipped} on {lines} line(s): the delivered rule's findings are kept there."
+  "custom_rules_duplicate": "Duplicates the delivered rule {shipped} on {lines} line(s): the delivered rule's findings are kept there.",
+  "priorities": {
+      "urgent": "To treat urgently (exploited in attacks, CISA KEV): {count}",
+      "urgent_none": "To treat urgently: no known exploited vulnerability (CISA KEV)",
+      "previous": " (previous scan: {count})",
+      "next": "Next (severity, then EPSS probability of exploitation):",
+      "platform_item": "{what} {version}: {count} exploited vulnerability(ies) ({cves}) → {action}",
+      "dependency_urgent_item": "{package} {version} ({file}:{line}): {exploited} → {action}",
+      "exploited_cve": "{cve} exploited since {date}",
+      "ransomware": ", used by ransomware",
+      "dependency_next_item": "{package} {version} ({file}:{line}): {count} vulnerability(ies), the worst {cve} {severity}{epss} → {action}",
+      "epss": ", EPSS {percent}%",
+      "upgrade_to": "upgrade to {version}",
+      "no_fix": "no fixed version published yet",
+      "exploited_badge": "exploited",
+    "chart_legend": "Bar: probability of exploitation in the next 30 days (EPSS), relative to the highest of the list, coloured by severity; full and red: exploited in attacks.",
+    "see_finding": "see the finding",
+    "nav": "To treat urgently",
+    "decimal_mark": "."
+  }
 }

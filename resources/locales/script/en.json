@@ -699,5 +699,24 @@
   "wizard_edit_by_hand": "This rule uses parts of the language the wizard does not ask for: rewriting it from the answers would lose them. Edit {file} by hand, or choose another name.",
   "scan_custom_rule_duplicates": "Your rule {rule} duplicates the delivered rule {shipped} on {lines} line(s): the delivered rule's findings are kept there.",
   "custom_rules_try_duplicate": "also flagged by the delivered rule {shipped}: the report keeps its finding",
-  "wizard_pattern_duplicate_own": "Rules of this language already search for this text:"
+  "wizard_pattern_duplicate_own": "Rules of this language already search for this text:",
+  "priorities": {
+      "urgent": "To treat urgently (exploited in attacks, CISA KEV): {count}",
+      "urgent_none": "To treat urgently: no known exploited vulnerability (CISA KEV)",
+      "previous": " (previous scan: {count})",
+      "next": "Next (severity, then EPSS probability of exploitation):",
+      "platform_item": "{what} {version}: {count} exploited vulnerability(ies) ({cves}) → {action}",
+      "dependency_urgent_item": "{package} {version} ({file}:{line}): {exploited} → {action}",
+      "exploited_cve": "{cve} exploited since {date}",
+      "ransomware": ", used by ransomware",
+      "dependency_next_item": "{package} {version} ({file}:{line}): {count} vulnerability(ies), the worst {cve} {severity}{epss} → {action}",
+      "epss": ", EPSS {percent}%",
+      "upgrade_to": "upgrade to {version}",
+      "no_fix": "no fixed version published yet",
+      "exploited_badge": "exploited",
+    "chart_legend": "Bar: probability of exploitation in the next 30 days (EPSS), relative to the highest of the list, coloured by severity; full and red: exploited in attacks.",
+    "see_finding": "see the finding",
+    "nav": "To treat urgently",
+    "decimal_mark": "."
+  }
 }

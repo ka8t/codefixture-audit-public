@@ -80,6 +80,9 @@ pub struct ReportContext<'a> {
     /// flags the same line (`ScanReport::custom_rule_duplicates`, epic
     /// #278): the "Custom rules" section names each pair.
     pub custom_rule_duplicates: &'a [crate::scan::orchestrator::CustomRuleDuplicate],
+    /// The block of what to treat first (ticket #308), at the top of the
+    /// report, already in the report's language; empty to show none.
+    pub priorities_html: String,
 }
 
 fn category_severity_matrix(
@@ -841,6 +844,8 @@ pub fn generate_html(
     for (placeholder, key) in [
         ("{{i18n_navigation}}", "navigation"),
         ("{{i18n_level_executive}}", "level_executive"),
+        // Ticket #308: the link to what to treat first.
+        ("{{i18n_priorities_nav}}", "priorities.nav"),
         ("{{i18n_health_score}}", "health_score"),
         ("{{i18n_visualization}}", "visualization"),
         ("{{i18n_summary}}", "summary"),
@@ -1036,6 +1041,8 @@ pub fn generate_html(
     html = html.replace("{{demo_watermark_text}}", "");
     html = html.replace("{{demo_footer_text}}", "");
     html = html.replace("{{severity_filter_banner}}", "");
+    // Ticket #308: what to treat first, right below the health score.
+    html = html.replace("{{priorities_section}}", &ctx.priorities_html);
 
     // --- assets ---------------------------------------------------------
     html = html.replace("{{css}}", load_asset("report.css"));
@@ -1298,6 +1305,7 @@ mod tests {
             rule_catalog,
             history: &[],
             custom_rule_duplicates: &[],
+            priorities_html: String::new(),
         }
     }
 
@@ -1679,6 +1687,7 @@ mod tests {
         let context = ReportContext {
             history: &history,
             custom_rule_duplicates: &[],
+            priorities_html: String::new(),
             ..ctx(&catalog)
         };
         let html = generate_html(&[], &context, None, None, None);

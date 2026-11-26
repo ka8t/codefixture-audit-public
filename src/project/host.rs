@@ -534,6 +534,8 @@ pub struct Check {
     pub vulnerabilities: Vec<PlatformVulnerability>,
     /// How many of them CISA lists as exploited.
     pub exploited: usize,
+    /// Their CVEs, in the order of `vulnerabilities` (ticket #308).
+    pub exploited_cves: Vec<String>,
 }
 
 /// Checks `detected` against `tables`.
@@ -575,10 +577,12 @@ pub fn check(detected: &Detected, tables: &Tables) -> Check {
         .filter(|v| seen.insert(v.cve.clone()))
         .cloned()
         .collect();
-    let exploited = vulnerabilities
+    let exploited_cves: Vec<String> = vulnerabilities
         .iter()
         .filter(|v| tables.exploited.contains(&v.cve))
-        .count();
+        .map(|v| v.cve.clone())
+        .collect();
+    let exploited = exploited_cves.len();
     Check {
         detected: detected.clone(),
         cycle: cycle.map(|c| c.name.clone()),
@@ -586,6 +590,7 @@ pub fn check(detected: &Detected, tables: &Tables) -> Check {
         newer,
         vulnerabilities,
         exploited,
+        exploited_cves,
     }
 }
 

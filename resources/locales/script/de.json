@@ -699,5 +699,24 @@
   "wizard_edit_by_hand": "Diese Regel nutzt Teile der Sprache, nach denen der Assistent nicht fragt: sie aus den Antworten neu zu schreiben, würde sie verlieren. Bearbeiten Sie {file} von Hand oder wählen Sie einen anderen Namen.",
   "scan_custom_rule_duplicates": "Ihre Regel {rule} doppelt die ausgelieferte Regel {shipped} in {lines} Zeile(n): dort werden die Befunde der ausgelieferten Regel behalten.",
   "custom_rules_try_duplicate": "auch von der ausgelieferten Regel {shipped} gemeldet: der Bericht behält deren Befund",
-  "wizard_pattern_duplicate_own": "Regeln dieser Sprache suchen bereits nach diesem Text:"
+  "wizard_pattern_duplicate_own": "Regeln dieser Sprache suchen bereits nach diesem Text:",
+  "priorities": {
+      "urgent": "Dringend zu behandeln (in Angriffen ausgenutzt, CISA KEV): {count}",
+      "urgent_none": "Dringend zu behandeln: keine bekannte ausgenutzte Schwachstelle (CISA KEV)",
+      "previous": " (vorherige Analyse: {count})",
+      "next": "Danach (Schweregrad, dann EPSS-Ausnutzungswahrscheinlichkeit):",
+      "platform_item": "{what} {version}: {count} ausgenutzte Schwachstelle(n) ({cves}) → {action}",
+      "dependency_urgent_item": "{package} {version} ({file}:{line}): {exploited} → {action}",
+      "exploited_cve": "{cve} ausgenutzt seit {date}",
+      "ransomware": ", von Ransomware genutzt",
+      "dependency_next_item": "{package} {version} ({file}:{line}): {count} Schwachstelle(n), die schwerste {cve} {severity}{epss} → {action}",
+      "epss": ", EPSS {percent} %",
+      "upgrade_to": "auf {version} aktualisieren",
+      "no_fix": "noch keine korrigierte Version veröffentlicht",
+      "exploited_badge": "ausgenutzt",
+    "chart_legend": "Balken: Ausnutzungswahrscheinlichkeit in den nächsten 30 Tagen (EPSS), relativ zur höchsten der Liste, Farbe nach Schweregrad; voll und rot: in Angriffen ausgenutzt.",
+    "see_finding": "Befund ansehen",
+    "nav": "Dringend zu behandeln",
+    "decimal_mark": ","
+  }
 }

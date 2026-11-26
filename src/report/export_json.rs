@@ -52,6 +52,17 @@ pub struct ExportData {
     /// use ask every copy of CWE names to reproduce; empty without names.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub cwe_notice: String,
+    /// How many things the scan found to treat urgently (ticket #308):
+    /// systems, runtimes and dependencies with an exploited vulnerability.
+    /// The next scan compares its own count with it. `None` in a file
+    /// written before it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub urgent: Option<usize>,
+    /// The vulnerable dependencies, structured as the priorities rank
+    /// them (ticket #308): a scan skipped because nothing changed shows
+    /// them again. Empty in a file written before it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dependency_priorities: Vec<crate::report::priorities::DependencyPriority>,
 }
 
 fn compute_totals(findings: &[ReportFinding]) -> BTreeMap<String, usize> {
@@ -85,12 +96,29 @@ pub fn build_export_data(
         findings: findings.to_vec(),
         database_schema,
         cwe_names: cwe_names.clone(),
+        urgent: None,
+        dependency_priorities: Vec::new(),
         cwe_notice: if cwe_names.is_empty() {
             String::new()
         } else {
             crate::report::cwe_catalog::catalog().cwe.notice.clone()
         },
     }
+}
+
+/// Records the priorities in the export at `path` (ticket #308): the urgent
+/// count and the dependencies, known once the system check and the
+/// dependency phase are both done, after the scan wrote its data.
+pub fn record_priorities(
+    path: &Path,
+    urgent: usize,
+    dependencies: &[crate::report::priorities::DependencyPriority],
+) -> Result<(), String> {
+    let mut data = load_export(path)?;
+    data.urgent = Some(urgent);
+    data.dependency_priorities = dependencies.to_vec();
+    let json = serde_json::to_string_pretty(&data).map_err(|e| e.to_string())?;
+    std::fs::write(path, json).map_err(|e| format!("{}: {e}", path.display()))
 }
 
 /// Writes the export to `{datas_dir}/{prefix}-DATA-{timestamp}.json`,

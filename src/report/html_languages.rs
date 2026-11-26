@@ -475,6 +475,7 @@ mod tests {
             rule_catalog: &catalog,
             history: &history,
             custom_rule_duplicates: &[],
+            priorities_html: String::new(),
         };
         let params = AuditParamsInfo {
             languages: vec!["python".to_string()],

@@ -653,6 +653,10 @@ pub struct ScanReport {
     /// read (ADR-0070), as `(path relative to the project, reason)`:
     /// their dependencies are not checked; the CLI names each one.
     pub manifests_unreadable: Vec<(String, String)>,
+    /// The vulnerable dependencies, structured for the priorities at the
+    /// top of the console and the report (ticket #308); empty when the
+    /// dependency phase did not run.
+    pub dependency_priorities: Vec<crate::report::priorities::DependencyPriority>,
     /// Catalog of compiled rules, indexed by identity (language + name):
     /// where the reports read each finding's rule texts (risk, solution,
     /// `fix_before`/`fix_after`), see `rules::identity`.
@@ -834,7 +838,7 @@ fn vulnerable_dependency_findings(
     root: &Path,
     texts: &DependencyTexts,
     script_locale: Option<&serde_json::Value>,
-) -> Vec<ReportFinding> {
+) -> Vec<(ReportFinding, crate::report::priorities::DependencyPriority)> {
     use crate::project::advisories;
 
     let ecosystems: std::collections::BTreeSet<String> =
@@ -937,7 +941,28 @@ fn vulnerable_dependency_findings(
             } else {
                 "vulnerable_risk_many"
             };
-            ReportFinding {
+            // Ticket #308: the same vulnerabilities, structured, for the
+            // priorities at the top of the console and the report.
+            let priority = crate::report::priorities::DependencyPriority {
+                file: project_relative_path(root, &dep.file),
+                line: dep.line,
+                package: dep.name.clone(),
+                version: hit.version.clone(),
+                severity: severity.to_string(),
+                cves: hit
+                    .advisories
+                    .iter()
+                    .map(|a| crate::report::priorities::PriorityCve {
+                        id: a.display_id().to_string(),
+                        severity: advisories::engine_severity(a).to_string(),
+                        epss: a.epss.map(|e| e.epss),
+                        exploited_since: a.exploited.as_ref().map(|x| x.added.clone()),
+                        ransomware: a.exploited.as_ref().is_some_and(|x| x.ransomware),
+                    })
+                    .collect(),
+                fixed_version: hit.fixed_version.clone(),
+            };
+            let finding = ReportFinding {
                 rule_key: "vulnerable_dependency".to_string(),
                 rule_language: String::new(), // no catalog rule: the version rules of the pack.
                 rule_name: texts.get("vulnerable_name"),
@@ -974,7 +999,8 @@ fn vulnerable_dependency_findings(
                 committer: None,
                 rule_source: "advisory_db".to_string(),
                 file_scope: None,
-            }
+            };
+            (finding, priority)
         })
         .collect()
 }
@@ -2655,6 +2681,7 @@ pub fn run_scan(config: &ScanConfig) -> ScanReport {
     let mut dependency_stats = None;
     let mut version_rules = None;
     let mut lockfiles_not_used = Vec::new();
+    let mut dependency_priorities = Vec::new();
     if deps_phase_active {
         let _deps_step =
             crate::scan::debug_log::span("dependencies", || "dependencies_phase".to_string());
@@ -2752,12 +2779,18 @@ pub fn run_scan(config: &ScanConfig) -> ScanReport {
         version_rules = Some(status);
         let vulnerable_count = vulnerable.len();
         // The report's 🚫 suppressions apply to dependency findings as to
-        // every other finding (they never did before 2026-11-14). The
-        // counts below stay those of what was detected.
+        // every other finding (they never did before 2026-11-14), and to
+        // their priorities (ticket #308). The counts below stay those of
+        // what was detected.
         let not_suppressed =
             |f: &ReportFinding| !suppressions.is_suppressed(&f.rule_key, &f.file, &f.code);
         all_findings.extend(unpinned_findings.into_iter().filter(not_suppressed));
-        all_findings.extend(vulnerable.into_iter().filter(not_suppressed));
+        for (finding, priority) in vulnerable {
+            if not_suppressed(&finding) {
+                all_findings.push(finding);
+                dependency_priorities.push(priority);
+            }
+        }
         dependency_stats = Some(DependencyStats {
             total_scanned: all_deps.len(),
             unpinned: unpinned.len(),
@@ -2950,6 +2983,7 @@ pub fn run_scan(config: &ScanConfig) -> ScanReport {
         skipped_saved_pages,
         lockfiles_not_used,
         manifests_unreadable,
+        dependency_priorities,
         rule_catalog,
         test_results,
         dependency_stats,

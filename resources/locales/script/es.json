@@ -699,5 +699,24 @@
   "wizard_edit_by_hand": "Esta regla usa partes del lenguaje que el asistente no pregunta: reescribirla a partir de las respuestas las perdería. Edite {file} a mano, o elija otro nombre.",
   "scan_custom_rule_duplicates": "Su regla {rule} duplica la regla entregada {shipped} en {lines} línea(s): allí se conservan los hallazgos de la regla entregada.",
   "custom_rules_try_duplicate": "señalado también por la regla entregada {shipped}: el informe conserva su hallazgo",
-  "wizard_pattern_duplicate_own": "Algunas reglas de este lenguaje ya buscan este texto:"
+  "wizard_pattern_duplicate_own": "Algunas reglas de este lenguaje ya buscan este texto:",
+  "priorities": {
+      "urgent": "A tratar con urgencia (explotadas en ataques, CISA KEV): {count}",
+      "urgent_none": "A tratar con urgencia: ninguna vulnerabilidad explotada conocida (CISA KEV)",
+      "previous": " (análisis anterior: {count})",
+      "next": "Después (gravedad, luego probabilidad de explotación EPSS):",
+      "platform_item": "{what} {version}: {count} vulnerabilidad(es) explotada(s) ({cves}) → {action}",
+      "dependency_urgent_item": "{package} {version} ({file}:{line}): {exploited} → {action}",
+      "exploited_cve": "{cve} explotada desde el {date}",
+      "ransomware": ", usada por ransomware",
+      "dependency_next_item": "{package} {version} ({file}:{line}): {count} vulnerabilidad(es), la más grave {cve} {severity}{epss} → {action}",
+      "epss": ", EPSS {percent} %",
+      "upgrade_to": "actualizar a {version}",
+      "no_fix": "ninguna versión corregida publicada",
+      "exploited_badge": "explotada",
+    "chart_legend": "Barra: probabilidad de explotación en los próximos 30 días (EPSS), relativa a la más alta de la lista, color según la gravedad; llena y roja: explotada en ataques.",
+    "see_finding": "ver el hallazgo",
+    "nav": "A tratar con urgencia",
+    "decimal_mark": ","
+  }
 }
