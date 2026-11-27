@@ -720,6 +720,20 @@
     "chart_legend": "Bar: probability of exploitation in the next 30 days (EPSS), relative to the highest of the list, coloured by severity; full and red: exploited in attacks.",
     "see_finding": "see the finding",
     "nav": "To treat urgently",
+    "machine": "This machine:",
+    "platform_clear": "{what} {version}: no exploited vulnerability",
+    "folder_checked": "Scanned folder: {count} dependency(ies) compared with the vulnerability database{not_compared}{result}",
+    "folder_not_compared": " (not compared: {list})",
+    "folder_unversioned": "{count} without a version",
+    "folder_outside_database": "{count} of an ecosystem the database does not hold",
+    "folder_unreadable_manifests": "{count} unreadable manifest(s)",
+    "folder_result_none": ", none with an exploited vulnerability",
+    "folder_result_some": ", {exploited} with an exploited vulnerability:",
+    "folder_no_dependency": "Scanned folder: no declared dependency, nothing to compare with the vulnerability database",
+    "folder_quick": "Scanned folder: dependencies not compared with the vulnerability database (--quick)",
+    "folder_no_version_rules": "Scanned folder: dependencies not compared, the rules read carry no vulnerability database",
+    "folder_unreadable": "Scanned folder: dependencies not compared, the vulnerability database could not be read (see above)",
+    "folder_unrecorded": "Scanned folder: not recorded by the last scan; run it again with --no-cache to know",
     "decimal_mark": "."
   }
 }

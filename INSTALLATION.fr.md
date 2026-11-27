@@ -252,7 +252,11 @@ Le terminal affiche l'avancement, ce qui a été chargé et un résumé. Voici l
 [codefixture-audit] Report generated: /path/to/your/project/audit-reports/SCA-REPORT-2026-11-20-13-17.html
 [codefixture-audit] Scan data: /path/to/your/project/audit-reports/audit-datas/SCA-DATA-2026-11-20-13-17.json
 [codefixture-audit] 🚨 To treat urgently (exploited in attacks, CISA KEV): 1
-[codefixture-audit]    macOS 26.5.2: 2 exploited vulnerability(ies) (CVE-2026-65400, CVE-2026-86950) → upgrade to 26.7.3
+[codefixture-audit]    This machine:
+[codefixture-audit]      macOS 26.5.2: 2 exploited vulnerability(ies) (CVE-2026-65400, CVE-2026-86950) → upgrade to 26.7.3
+[codefixture-audit]      Python 3.15.2: no exploited vulnerability
+[codefixture-audit]      Node.js not checked: node not found on PATH outside the scanned folder.
+[codefixture-audit]    Scanned folder: 161 dependency(ies) compared with the vulnerability database, none with an exploited vulnerability
 [codefixture-audit] 871 file(s) scanned, 91,999 line(s) of code, 31 finding(s)
 [codefixture-audit] Total duration: 2.3 s
 ```
@@ -768,9 +772,13 @@ New-Item -ItemType Directory -Force -Path ~\tester-check\broken | Out-Null
 [codefixture-audit] Version rules: 26 advisory records for 21 published vulnerabilities (21 with a CVE), from the rule pack …/target/release/rules.cfpack, OSV data up to November 26, 2026: Maven 5, NuGet 3, Packagist 3, PyPI 10, npm 5.
 …
 [codefixture-audit] 🚨 To treat urgently (exploited in attacks, CISA KEV): 3
-[codefixture-audit]    macOS 26.5.2: 2 exploited vulnerability(ies) (CVE-2026-65400, CVE-2026-86950) → upgrade to 26.7.3
-[codefixture-audit]    org.apache.logging.log4j:log4j-core 2.14.1 (pom.xml:9): CVE-2021-44228 exploited since 2021-12-10, used by ransomware → upgrade to 2.15.0
-[codefixture-audit]    org.springframework:spring-beans 5.3.17 (pom.xml:14): CVE-2022-22965 exploited since 2022-04-04 → upgrade to 5.3.18
+[codefixture-audit]    This machine:
+[codefixture-audit]      macOS 26.5.2: 2 exploited vulnerability(ies) (CVE-2026-65400, CVE-2026-86950) → upgrade to 26.7.3
+[codefixture-audit]      Python 3.15.2: no exploited vulnerability
+[codefixture-audit]      Java not checked: it gives no version, its answer is “The operation couldn’t be completed. Unable to locate a Java Runtime.”.
+[codefixture-audit]    Scanned folder: 3 dependency(ies) compared with the vulnerability database (not compared: 1 unreadable manifest(s)), 2 with an exploited vulnerability:
+[codefixture-audit]      org.apache.logging.log4j:log4j-core 2.14.1 (pom.xml:9): CVE-2021-44228 exploited since 2021-12-10, used by ransomware → upgrade to 2.15.0
+[codefixture-audit]      org.springframework:spring-beans 5.3.17 (pom.xml:14): CVE-2022-22965 exploited since 2022-04-04 → upgrade to 5.3.18
 [codefixture-audit] 3 file(s) scanned, 21 line(s) of code, 3 finding(s)
 ```
 
@@ -778,8 +786,8 @@ New-Item -ItemType Directory -Force -Path ~\tester-check\broken | Out-Null
 
 - **Les premières lignes** nomment votre système et l'environnement d'exécution de chaque langage analysé (ici Python, et Java pour `pom.xml`) : à jour, en retard, plus maintenu, introuvable ou sans version. Sous Linux, les failles de la distribution et de ses environnements se terminent par « to confirm ». Sous Windows, le système est nommé par sa version, puis son build : `Windows 11 24H2 (10.0.…)`.
 - **Le manifeste cassé** est nommé, avec sa ligne ; les autres manifestes sont quand même vérifiés.
-- **Le bloc des urgences** termine la sortie, juste au-dessus du résumé ; la seconde analyse, avec `--no-cache` pour qu'elle analyse de nouveau, ajoute `(previous scan: 3)` à sa première ligne ; sans lui, un projet inchangé montre les résultats de la dernière analyse. Les données de démonstration ne contiennent que quelques vulnérabilités : le catalogue complet liste aussi `mitogen` et donne les dernières versions corrigées.
-- **Le rapport** (`audit-reports/` dans `~/tester-check`) : le même bloc est dans l'en-tête, juste au-dessus du score de sécurité, en rouge, avec un graphique par urgence et un lien par CVE (page du NVD) et par dépendance (« see the finding »). Les liens `🚨 To treat urgently` de la barre du haut et de la barre latérale y mènent. Dans le guide de correction d'un constat, chaque CWE a son nom et ses schémas d'attaque CAPEC. Dans « Parameters », « Vulnerability data » et « Weakness catalog » replient chacun les mentions de leurs sources. Avec `--lang fr`, ces textes sont en français.
+- **Le bloc des urgences** termine la sortie, juste au-dessus du résumé. Il nomme toujours les deux côtés, même sans rien d'exploité : « This machine » (le système et chaque environnement : exploité avec ce qu'il faut faire, aucune faille exploitée, ou non vérifié et pourquoi), puis « Scanned folder » (combien de dépendances ont été comparées à la base des failles, combien ont une faille exploitée, et ce qui n'a pas été comparé). Un constat du code n'est jamais urgent : seule la base des failles en décide. La seconde analyse, avec `--no-cache` pour qu'elle analyse de nouveau, ajoute `(previous scan: 3)` à sa première ligne ; sans lui, un projet inchangé montre les résultats de la dernière analyse. Les données de démonstration ne contiennent que quelques vulnérabilités : le catalogue complet liste aussi `mitogen` et donne les dernières versions corrigées.
+- **Le rapport** (`audit-reports/` dans `~/tester-check`) : le même bloc est dans l'en-tête, juste au-dessus du score de sécurité, en rouge, avec un graphique par urgence et un lien par CVE (page du NVD) et par dépendance (« see the finding »). Les liens `🚨 To treat urgently` de la barre du haut et de la barre latérale y mènent. Son lien « see the detail », et `🖥️ System` dans la barre latérale, mènent à la section « System » : pour le système et chaque environnement, la ligne de la console, ses failles exploitées, puis toutes ses failles connues dans un tableau replié (lien vers le NVD, sévérité, EPSS, date d'inscription par la CISA comme exploitée), les exploitées d'abord. Dans le guide de correction d'un constat, chaque CWE a son nom et ses schémas d'attaque CAPEC. Dans « Parameters », « Vulnerability data » et « Weakness catalog » replient chacun les mentions de leurs sources. Avec `--lang fr`, ces textes sont en français.
 - **Le code de sortie** est 1 : des constats sont HIGH ou CRITICAL.
 
 **4. Signaler ce qui diffère.** Pour toute ligne qui diffère de ces résultats au-delà de votre système, de vos environnements d'exécution et des dates : la commande, sa sortie complète, `--version` et votre système (voir « En cas de problème » plus bas).

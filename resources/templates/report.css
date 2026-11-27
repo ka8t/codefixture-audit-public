@@ -927,6 +927,48 @@ a.playbook-ref:hover { background: var(--primary-light); color: #fff; }
     font-size: 0.8rem;
     white-space: nowrap;
 }
+/* ADR-0072, amended 2026-11-26: a detection with nothing exploited, in
+   the list of what to treat first; the "System" section of the report. */
+.priority-clear-item {
+    grid-template-columns: minmax(0, 1fr);
+}
+.system-entry {
+    margin: 1rem 0 1.5rem;
+}
+.system-entry h3 {
+    font-size: 1.05rem;
+    margin-bottom: 0.25rem;
+}
+.system-entry h4 {
+    font-size: 0.95rem;
+    margin: 0.75rem 0 0.25rem;
+    color: var(--danger);
+}
+.system-intro {
+    color: var(--gray-600);
+}
+.system-warning {
+    color: var(--danger);
+    font-weight: 600;
+}
+.system-all summary {
+    cursor: pointer;
+    font-weight: 600;
+    margin: 0.5rem 0;
+}
+.system-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.85rem;
+}
+.system-table th, .system-table td {
+    text-align: left;
+    padding: 0.3rem 0.5rem;
+    border-bottom: 1px solid var(--gray-100);
+}
+.system-exploited {
+    background: #fdecea;
+}
 /* Ticket #308: the link to what to treat first, in the table of contents bar. */
 .toc-level-pill-urgent {
     background: #fdecea;
@@ -949,6 +991,7 @@ a.playbook-ref:hover { background: var(--primary-light); color: #fff; }
 @media (max-width: 640px) {
     .priority { grid-template-columns: minmax(0, 1fr) 4.5rem; }
     .priority-bar { grid-column: 1 / -1; }
+    .system-table { display: block; overflow-x: auto; }
     .container { padding: 0.75rem; }
     .print-btn { position: static; margin: 0 0 0.75rem auto; padding: 0.5rem 0.9rem; font-size: 0.85rem; }
     .toc-block { margin-bottom: 1rem; }

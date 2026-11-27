@@ -657,6 +657,10 @@ pub struct ScanReport {
     /// top of the console and the report (ticket #308); empty when the
     /// dependency phase did not run.
     pub dependency_priorities: Vec<crate::report::priorities::DependencyPriority>,
+    /// What the dependency phase could say of the folder, for the urgent
+    /// list (ADR-0072, amended 2026-11-26). `None` only for a scan
+    /// stopped before reading any file.
+    pub folder_check: Option<crate::report::priorities::FolderCheck>,
     /// Catalog of compiled rules, indexed by identity (language + name):
     /// where the reports read each finding's rule texts (risk, solution,
     /// `fix_before`/`fix_after`), see `rules::identity`.
@@ -832,13 +836,22 @@ impl DependencyTexts {
 /// advisory identifiers and OSV summaries stay as published, in English.
 /// The lines about unreadable files follow the console language
 /// (`script_locale`, ticket #280), English without one.
+/// The vulnerable dependencies of `deps`, each as a finding and as a
+/// priority, and the [`FolderCheck`](crate::report::priorities::FolderCheck)
+/// of the folder: how many dependencies were really compared with the
+/// database (ADR-0072, amended 2026-11-26). A dependency without a version
+/// is not compared, nor one whose ecosystem the database does not hold or
+/// could not load: both are counted apart, never as "not vulnerable".
 fn vulnerable_dependency_findings(
     file: &crate::project::advisory_file::DatabaseFile,
     deps: &[crate::project::dependencies::Dependency],
     root: &Path,
     texts: &DependencyTexts,
     script_locale: Option<&serde_json::Value>,
-) -> Vec<(ReportFinding, crate::report::priorities::DependencyPriority)> {
+) -> (
+    Vec<(ReportFinding, crate::report::priorities::DependencyPriority)>,
+    crate::report::priorities::FolderCheck,
+) {
     use crate::project::advisories;
 
     let ecosystems: std::collections::BTreeSet<String> =
@@ -850,13 +863,28 @@ fn vulnerable_dependency_findings(
             version_rules_skipped_line(&error, script_locale)
         );
     }
+    let unversioned = deps.iter().filter(|d| d.version.is_none()).count();
+    let outside_database = deps
+        .iter()
+        .filter(|d| d.version.is_some() && !db.loaded_ecosystems.contains(&d.ecosystem))
+        .count();
+    let folder = if deps.is_empty() {
+        crate::report::priorities::FolderCheck::NoDependency
+    } else {
+        crate::report::priorities::FolderCheck::Checked {
+            compared: deps.len() - unversioned - outside_database,
+            unversioned,
+            outside_database,
+            unreadable_manifests: 0,
+        }
+    };
     let rank = |s: &str| match s {
         "CRITICAL" => 4,
         "HIGH" => 3,
         "MEDIUM" => 2,
         _ => 1,
     };
-    advisories::find_vulnerable(deps, &db)
+    let found = advisories::find_vulnerable(deps, &db)
         .into_iter()
         .map(|hit| {
             let dep = &hit.dependency;
@@ -1002,7 +1030,8 @@ fn vulnerable_dependency_findings(
             };
             (finding, priority)
         })
-        .collect()
+        .collect();
+    (found, folder)
 }
 
 /// The version a finding names, with where it comes from when the
@@ -2682,6 +2711,19 @@ pub fn run_scan(config: &ScanConfig) -> ScanReport {
     let mut version_rules = None;
     let mut lockfiles_not_used = Vec::new();
     let mut dependency_priorities = Vec::new();
+    // ADR-0072, amended 2026-11-26: the urgent list names the folder's
+    // side even when nothing in it is exploited. Without the phase, why
+    // it did not run: `--quick`, no manifest, or no vulnerability database.
+    // Not collected (`None`) means the pack has no version rules and
+    // `with_deps` is off; collected but empty means no manifest declares
+    // any dependency; collected and not empty, the phase runs.
+    use crate::report::priorities::FolderCheck;
+    let mut folder_check = match &declared_dependencies {
+        _ if config.quick_mode => FolderCheck::Quick,
+        None => FolderCheck::NoVersionRules,
+        Some(d) if d.is_empty() => FolderCheck::NoDependency,
+        Some(_) => FolderCheck::NoVersionRules,
+    };
     if deps_phase_active {
         let _deps_step =
             crate::scan::debug_log::span("dependencies", || "dependencies_phase".to_string());
@@ -2748,7 +2790,7 @@ pub fn run_scan(config: &ScanConfig) -> ScanReport {
                 }
             })
             .collect();
-        let (vulnerable, status) = match read_version_rules(&config.rules_path) {
+        let ((vulnerable, folder), status) = match read_version_rules(&config.rules_path) {
             Ok(Some(file)) => {
                 let status = VersionRulesStatus::Read {
                     pack: config.rules_path.clone(),
@@ -2773,9 +2815,16 @@ pub fn run_scan(config: &ScanConfig) -> ScanReport {
                     status,
                 )
             }
-            Ok(None) => (Vec::new(), VersionRulesStatus::Missing),
-            Err(error) => (Vec::new(), VersionRulesStatus::Unreadable { error }),
+            Ok(None) => (
+                (Vec::new(), FolderCheck::NoVersionRules),
+                VersionRulesStatus::Missing,
+            ),
+            Err(error) => (
+                (Vec::new(), FolderCheck::VersionRulesUnreadable),
+                VersionRulesStatus::Unreadable { error },
+            ),
         };
+        folder_check = folder;
         version_rules = Some(status);
         let vulnerable_count = vulnerable.len();
         // The report's 🚫 suppressions apply to dependency findings as to
@@ -2964,6 +3013,30 @@ pub fn run_scan(config: &ScanConfig) -> ScanReport {
         .collect();
     let governance_names = patterns::governance_names(&rule_jsons);
 
+    // ADR-0070: an unreadable manifest's dependencies are not known;
+    // the folder's line counts the manifest among what was not
+    // compared, the console having named it.
+    let folder_check = match folder_check {
+        _ if manifests_unreadable.is_empty() => folder_check,
+        FolderCheck::Checked {
+            compared,
+            unversioned,
+            outside_database,
+            ..
+        } => FolderCheck::Checked {
+            compared,
+            unversioned,
+            outside_database,
+            unreadable_manifests: manifests_unreadable.len(),
+        },
+        FolderCheck::NoDependency => FolderCheck::Checked {
+            compared: 0,
+            unversioned: 0,
+            outside_database: 0,
+            unreadable_manifests: manifests_unreadable.len(),
+        },
+        other => other,
+    };
     ScanReport {
         memory: Some(memory),
         stopped_for_memory: false,
@@ -2984,6 +3057,7 @@ pub fn run_scan(config: &ScanConfig) -> ScanReport {
         lockfiles_not_used,
         manifests_unreadable,
         dependency_priorities,
+        folder_check: Some(folder_check),
         rule_catalog,
         test_results,
         dependency_stats,
@@ -4090,6 +4164,90 @@ mod tests {
             Some(VersionRulesStatus::Read { sources: read, .. }) => assert_eq!(read, &sources),
             other => panic!("version rules read: {other:?}"),
         }
+    }
+
+    /// ADR-0072, amended 2026-11-26: the folder's side of the urgent list
+    /// says what was really compared, and why nothing was when nothing
+    /// was: a dependency without a version, one of an ecosystem the
+    /// database does not hold, and an unreadable manifest are counted
+    /// apart, and a folder whose only manifest is unreadable is never
+    /// "no declared dependency".
+    #[test]
+    fn test_folder_check_counts_what_was_compared() {
+        use crate::project::advisory_file::{Contents, EcosystemPayload, encode};
+        use crate::report::priorities::FolderCheck;
+        let root = temp_dir();
+        let pypi = r#"{"format":1,"ecosystem":"PyPI","last_modified":"2026-11-07T00:00:00Z","advisories":[]}"#;
+        let container = encode(&Contents {
+            source: "test",
+            sources: &[],
+            ecosystems: &[EcosystemPayload {
+                name: "PyPI".into(),
+                advisories: 0,
+                last_modified: "2026-11-07T00:00:00Z".into(),
+                json: pypi.as_bytes().to_vec(),
+            }],
+            tables: &[],
+        })
+        .unwrap();
+        let pack = root.join("rules.cfpack");
+        std::fs::write(
+            &pack,
+            crate::rules::pack_format::write_pack("test", &[], Some(&container)),
+        )
+        .unwrap();
+        let project = root.join("project");
+        let scan = |quick: bool, rules_path: &Path| {
+            run_scan(&ScanConfig {
+                root: project.clone(),
+                rules_path: rules_path.to_path_buf(),
+                exclude_patterns: vec![],
+                quick_mode: quick,
+                ..ScanConfig::default()
+            })
+            .folder_check
+        };
+        // No manifest at all.
+        write(&project, "app.py", "print(1)\n");
+        assert_eq!(scan(false, &pack), Some(FolderCheck::NoDependency));
+        // Only an unreadable manifest: nothing compared, the manifest named.
+        write(
+            &project,
+            "broken/pom.xml",
+            "<project><dependencies></project>\n",
+        );
+        assert_eq!(
+            scan(false, &pack),
+            Some(FolderCheck::Checked {
+                compared: 0,
+                unversioned: 0,
+                outside_database: 0,
+                unreadable_manifests: 1,
+            })
+        );
+        // One compared, one without a version, one npm package the
+        // database (PyPI only) does not hold.
+        write(&project, "requirements.txt", "lxml==4.6.2\nrequests\n");
+        write(
+            &project,
+            "package.json",
+            r#"{"dependencies": {"left-pad": "1.3.0"}}"#,
+        );
+        assert_eq!(
+            scan(false, &pack),
+            Some(FolderCheck::Checked {
+                compared: 1,
+                unversioned: 1,
+                outside_database: 1,
+                unreadable_manifests: 1,
+            })
+        );
+        assert_eq!(scan(true, &pack), Some(FolderCheck::Quick));
+        // Plain rules carry no vulnerability database.
+        let plain = root.join("plain");
+        std::fs::create_dir_all(&plain).unwrap();
+        assert_eq!(scan(false, &plain), Some(FolderCheck::NoVersionRules));
+        std::fs::remove_dir_all(&root).ok();
     }
 
     /// Ticket #189: the dependency findings were in English whatever

@@ -63,6 +63,11 @@ pub struct ExportData {
     /// them again. Empty in a file written before it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dependency_priorities: Vec<crate::report::priorities::DependencyPriority>,
+    /// What the dependency phase could compare in the folder (ADR-0072,
+    /// amended 2026-11-26): a scan skipped as unchanged names it again.
+    /// `None` in a file written before it, which that scan then says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder_check: Option<crate::report::priorities::FolderCheck>,
 }
 
 fn compute_totals(findings: &[ReportFinding]) -> BTreeMap<String, usize> {
@@ -98,6 +103,7 @@ pub fn build_export_data(
         cwe_names: cwe_names.clone(),
         urgent: None,
         dependency_priorities: Vec::new(),
+        folder_check: None,
         cwe_notice: if cwe_names.is_empty() {
             String::new()
         } else {
@@ -107,16 +113,19 @@ pub fn build_export_data(
 }
 
 /// Records the priorities in the export at `path` (ticket #308): the urgent
-/// count and the dependencies, known once the system check and the
-/// dependency phase are both done, after the scan wrote its data.
+/// count, the dependencies and what the dependency phase could compare
+/// in the folder, known once the system check and the dependency phase
+/// are both done, after the scan wrote its data.
 pub fn record_priorities(
     path: &Path,
     urgent: usize,
     dependencies: &[crate::report::priorities::DependencyPriority],
+    folder: Option<crate::report::priorities::FolderCheck>,
 ) -> Result<(), String> {
     let mut data = load_export(path)?;
     data.urgent = Some(urgent);
     data.dependency_priorities = dependencies.to_vec();
+    data.folder_check = folder;
     let json = serde_json::to_string_pretty(&data).map_err(|e| e.to_string())?;
     std::fs::write(path, json).map_err(|e| format!("{}: {e}", path.display()))
 }

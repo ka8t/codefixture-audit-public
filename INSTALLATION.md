@@ -252,7 +252,11 @@ The terminal shows the progress, what was loaded and a summary. Here, the analys
 [codefixture-audit] Report generated: /path/to/your/project/audit-reports/SCA-REPORT-2026-11-20-13-17.html
 [codefixture-audit] Scan data: /path/to/your/project/audit-reports/audit-datas/SCA-DATA-2026-11-20-13-17.json
 [codefixture-audit] 🚨 To treat urgently (exploited in attacks, CISA KEV): 1
-[codefixture-audit]    macOS 26.5.2: 2 exploited vulnerability(ies) (CVE-2026-65400, CVE-2026-86950) → upgrade to 26.7.3
+[codefixture-audit]    This machine:
+[codefixture-audit]      macOS 26.5.2: 2 exploited vulnerability(ies) (CVE-2026-65400, CVE-2026-86950) → upgrade to 26.7.3
+[codefixture-audit]      Python 3.15.2: no exploited vulnerability
+[codefixture-audit]      Node.js not checked: node not found on PATH outside the scanned folder.
+[codefixture-audit]    Scanned folder: 161 dependency(ies) compared with the vulnerability database, none with an exploited vulnerability
 [codefixture-audit] 871 file(s) scanned, 91,999 line(s) of code, 31 finding(s)
 [codefixture-audit] Total duration: 2.3 s
 ```
@@ -768,9 +772,13 @@ New-Item -ItemType Directory -Force -Path ~\tester-check\broken | Out-Null
 [codefixture-audit] Version rules: 26 advisory records for 21 published vulnerabilities (21 with a CVE), from the rule pack …/target/release/rules.cfpack, OSV data up to November 26, 2026: Maven 5, NuGet 3, Packagist 3, PyPI 10, npm 5.
 …
 [codefixture-audit] 🚨 To treat urgently (exploited in attacks, CISA KEV): 3
-[codefixture-audit]    macOS 26.5.2: 2 exploited vulnerability(ies) (CVE-2026-65400, CVE-2026-86950) → upgrade to 26.7.3
-[codefixture-audit]    org.apache.logging.log4j:log4j-core 2.14.1 (pom.xml:9): CVE-2021-44228 exploited since 2021-12-10, used by ransomware → upgrade to 2.15.0
-[codefixture-audit]    org.springframework:spring-beans 5.3.17 (pom.xml:14): CVE-2022-22965 exploited since 2022-04-04 → upgrade to 5.3.18
+[codefixture-audit]    This machine:
+[codefixture-audit]      macOS 26.5.2: 2 exploited vulnerability(ies) (CVE-2026-65400, CVE-2026-86950) → upgrade to 26.7.3
+[codefixture-audit]      Python 3.15.2: no exploited vulnerability
+[codefixture-audit]      Java not checked: it gives no version, its answer is “The operation couldn’t be completed. Unable to locate a Java Runtime.”.
+[codefixture-audit]    Scanned folder: 3 dependency(ies) compared with the vulnerability database (not compared: 1 unreadable manifest(s)), 2 with an exploited vulnerability:
+[codefixture-audit]      org.apache.logging.log4j:log4j-core 2.14.1 (pom.xml:9): CVE-2021-44228 exploited since 2021-12-10, used by ransomware → upgrade to 2.15.0
+[codefixture-audit]      org.springframework:spring-beans 5.3.17 (pom.xml:14): CVE-2022-22965 exploited since 2022-04-04 → upgrade to 5.3.18
 [codefixture-audit] 3 file(s) scanned, 21 line(s) of code, 3 finding(s)
 ```
 
@@ -778,8 +786,8 @@ What to check:
 
 - **The first lines** name your system and the runtime of each scanned language (here Python, and Java for `pom.xml`): up to date, behind, no longer supported, not found or giving no version. On Linux, the vulnerabilities of the distribution and its runtimes end with "to confirm". On Windows, the system is named by its release, then its build: `Windows 11 24H2 (10.0.…)`.
 - **The broken manifest** is named, with its line; the other manifests are still checked.
-- **The urgent block** closes the output, right above the summary; the second scan, `--no-cache` so that it analyses again, adds `(previous scan: 3)` to its first line; without it, an unchanged project shows the last scan's results. The demo data hold only a few vulnerabilities: the full catalog also lists `mitogen` and gives the latest fixed versions.
-- **The report** (`audit-reports/` in `~/tester-check`): the same block sits in the header, right above the security score, red, with a chart per urgent item and a link per CVE (NVD page) and per dependency ("see the finding"). The links `🚨 To treat urgently` of the top bar and of the side bar lead to it. In a finding's playbook, each CWE has its name and its CAPEC attack patterns. In "Parameters", "Vulnerability data" and "Weakness catalog" each fold the notices of their sources.
+- **The urgent block** closes the output, right above the summary. It always names both sides, even with nothing exploited: "This machine" (the system and each runtime: exploited with what to do, no exploited vulnerability, or not checked and why), then "Scanned folder" (how many dependencies were compared with the vulnerability database, how many have an exploited one, and what was not compared). Code findings are never urgent: the vulnerability database alone decides. The second scan, `--no-cache` so that it analyses again, adds `(previous scan: 3)` to its first line; without it, an unchanged project shows the last scan's results. The demo data hold only a few vulnerabilities: the full catalog also lists `mitogen` and gives the latest fixed versions.
+- **The report** (`audit-reports/` in `~/tester-check`): the same block sits in the header, right above the security score, red, with a chart per urgent item and a link per CVE (NVD page) and per dependency ("see the finding"). The links `🚨 To treat urgently` of the top bar and of the side bar lead to it. Its "see the detail" link, and `🖥️ System` in the side bar, lead to the "System" section: for the system and each runtime, the console's line, its exploited vulnerabilities, then every known one in a folded table (NVD link, severity, EPSS, date CISA lists it as exploited), the exploited first. In a finding's playbook, each CWE has its name and its CAPEC attack patterns. In "Parameters", "Vulnerability data" and "Weakness catalog" each fold the notices of their sources.
 - **The exit code** is 1: some findings are HIGH or CRITICAL.
 
 **4. Report what differs.** For any line that differs from these expectations beyond your system, your runtimes and the dates: the command, its full output, `--version`, and your system (see "When something goes wrong" below).

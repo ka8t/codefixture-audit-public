@@ -27,6 +27,7 @@
         <a href="#section-comparison" style="{{comparison_display}}">📊 {{i18n_comparison}}</a>
         <a href="#section-findings">🔍 {{i18n_findings}}</a>
         <a href="#section-custom-rules">📜 {{i18n_custom_rules_nav}}</a>
+        <a href="#section-system" style="{{system_display}}">🖥️ {{i18n_system_title}}</a>
         <a href="#section-fixtures" style="{{fixtures_display}}">🔬 {{i18n_fixtures_nav}}</a>
         <a href="#section-dependencies" style="{{dependencies_display}}">📦 {{i18n_dependencies_title}}</a>
         <!--DEV_ONLY_DB--><a href="#section-database" id="toc-database" style="{{database_display}}">🗄️ {{i18n_database_schema}}</a><!--/DEV_ONLY_DB-->
@@ -74,6 +75,7 @@
                     <li style="{{comparison_display}}"><a href="#section-comparison">📊 {{i18n_comparison}}</a></li>
                     <li><a href="#section-findings">🔍 {{i18n_findings}}</a></li>
                     <li><a href="#section-custom-rules">📜 {{i18n_custom_rules_nav}}</a></li>
+                    <li style="{{system_display}}"><a href="#section-system">🖥️ {{i18n_system_title}}</a></li>
                     <li style="{{fixtures_display}}"><a href="#section-fixtures">🔬 {{i18n_fixtures_nav}}</a></li>
                     <li style="{{dependencies_display}}"><a href="#section-dependencies">📦 {{i18n_dependencies_title}}</a></li>
                     <!--DEV_ONLY_DB--><li style="{{database_display}}"><a href="#section-database">🗄️ {{i18n_database_schema}}</a></li><!--/DEV_ONLY_DB-->
@@ -280,6 +282,8 @@
         </div>
 
         <div id="section-custom-rules">{{custom_rules_html}}</div>
+
+        {{system_section}}
 
         <div id="section-tests" data-nav-section="{{i18n_tests}}">{{tests_html}}</div>
 

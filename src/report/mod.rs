@@ -22,4 +22,5 @@ pub mod priorities;
 pub mod report_assets;
 pub mod successes;
 pub mod summary_html;
+pub mod system_html;
 pub mod text;

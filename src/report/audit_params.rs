@@ -609,6 +609,7 @@ mod tests {
             history: &[],
             custom_rule_duplicates: &[],
             priorities_html: String::new(),
+            system_html: String::new(),
         }
     }
 

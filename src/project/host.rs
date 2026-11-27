@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use crate::project::advisories::compare_versions;
+use crate::project::advisories::{Epss, Exploited, compare_versions};
 use crate::project::advisory_file::DatabaseFile;
 use crate::project::platform::{
     LIFECYCLE_TABLE, LifecycleRow, PLATFORM_TABLE, PlatformVulnerability, Product, product,
@@ -81,12 +81,19 @@ pub struct NotDetected {
     pub no_version: Option<String>,
 }
 
-/// The two tables of the pack, and the KEV CVEs (ADR-0071).
+/// The two tables of the pack, and the KEV and EPSS rows of their CVEs
+/// (ADR-0071). The advisories tool keeps the KEV and EPSS rows of the
+/// system CVEs too (`Database::cves` names the platform table's), so the
+/// report can detail each vulnerability of the system (ADR-0072, amended
+/// 2026-11-26).
 #[derive(Debug, Clone, Default)]
 pub struct Tables {
     pub lifecycle: BTreeMap<String, LifecycleRow>,
     pub platform: BTreeMap<String, Vec<PlatformVulnerability>>,
-    pub exploited: BTreeSet<String>,
+    /// The CVEs CISA lists as exploited, with the date it added them.
+    pub kev: BTreeMap<String, Exploited>,
+    /// The EPSS probability of each scored CVE, 0 to 1.
+    pub epss: BTreeMap<String, f64>,
     /// Date of the data: the lifecycle table's (`YYYY-MM-DD`).
     pub date: String,
 }
@@ -115,9 +122,11 @@ pub fn load_tables(file: &DatabaseFile) -> Result<Option<Tables>, String> {
         return Ok(None);
     };
     let platform = read::<Vec<PlatformVulnerability>>(file, PLATFORM_TABLE)?.unwrap_or_default();
-    let exploited = read::<serde_json::Value>(file, "kev")?
+    let kev = read::<Exploited>(file, "kev")?.unwrap_or_default();
+    let epss = read::<Epss>(file, "epss")?
         .unwrap_or_default()
-        .into_keys()
+        .into_iter()
+        .map(|(cve, row)| (cve, row.epss))
         .collect();
     let date = file
         .header
@@ -129,7 +138,8 @@ pub fn load_tables(file: &DatabaseFile) -> Result<Option<Tables>, String> {
     Ok(Some(Tables {
         lifecycle,
         platform,
-        exploited,
+        kev,
+        epss,
         date,
     }))
 }
@@ -585,6 +595,153 @@ pub struct Check {
     pub exploited: usize,
     /// Their CVEs, in the order of `vulnerabilities` (ticket #308).
     pub exploited_cves: Vec<String>,
+    /// The KEV row of each exploited one: since when, and whether
+    /// ransomware uses it (the report's detail of the system).
+    pub kev: BTreeMap<String, Exploited>,
+    /// The EPSS probability of each scored one of `vulnerabilities`.
+    pub epss: BTreeMap<String, f64>,
+}
+
+/// What the system check saw on this machine (ADR-0071), kept whole for
+/// the priorities of the console and the report and for the report's
+/// "System" section (ADR-0072, amended 2026-11-26): every detection, the
+/// ones that could not be checked too, and why nothing was checked when
+/// the pack holds no usable system data.
+#[derive(Debug, Clone, Default)]
+pub struct HostSurvey {
+    /// Set when nothing was checked: the pack has no system data, or they
+    /// could not be read. `entries` is then empty.
+    pub unavailable: Option<HostUnavailable>,
+    /// Date of the data (`YYYY-MM-DD`), empty when `unavailable`.
+    pub date: String,
+    /// Age of the data in days, when older than [`STALE_AFTER_DAYS`].
+    pub stale_days: Option<i64>,
+    /// One per detection, the system first, then the runtimes of the
+    /// scanned languages.
+    pub entries: Vec<HostEntry>,
+}
+
+/// One detection of the [`HostSurvey`].
+#[derive(Debug, Clone)]
+pub struct HostEntry {
+    /// The system the engine runs on, not a runtime.
+    pub system: bool,
+    /// Its check, or why it could not be checked.
+    pub result: Result<Check, NotDetected>,
+}
+
+/// Why the system check checked nothing.
+#[derive(Debug, Clone)]
+pub enum HostUnavailable {
+    /// The pack carries no system data (built before ADR-0071).
+    NoData,
+    /// The version rules could not be opened: a pack error, written in
+    /// the language of each output that shows it.
+    PackUnreadable(crate::rules::pack_format::PackError),
+    /// A system table could not be read (`load_tables`).
+    TableUnreadable(String),
+}
+
+impl HostSurvey {
+    /// The checks that could be made, the system first.
+    pub fn checks(&self) -> impl Iterator<Item = &Check> {
+        self.entries.iter().filter_map(|e| e.result.as_ref().ok())
+    }
+}
+
+impl HostUnavailable {
+    /// Why nothing was checked, in the language of `locale` (a script or
+    /// a report locale: both hold the `host_*` texts).
+    pub fn text(&self, locale: &serde_json::Value) -> String {
+        let say = |key: &str| crate::i18n::t(locale, key);
+        match self {
+            Self::NoData => say("host_no_data"),
+            Self::PackUnreadable(error) => {
+                say("host_unreadable").replace("{error}", &error.render(locale))
+            }
+            Self::TableUnreadable(error) => say("host_unreadable").replace("{error}", error),
+        }
+    }
+}
+
+/// Why `missing` was not checked, in the language of `locale` (a script
+/// or a report locale).
+pub fn not_detected_text(missing: &NotDetected, locale: &serde_json::Value) -> String {
+    let say = |key: &str| crate::i18n::t(locale, key);
+    match (&missing.not_found, &missing.no_version) {
+        (Some(programs), _) => say("host_not_installed")
+            .replace("{what}", &missing.what)
+            .replace("{programs}", programs),
+        (None, Some(answer)) => say("host_no_version")
+            .replace("{what}", &missing.what)
+            .replace("{answer}", answer),
+        (None, None) => say("host_not_checked")
+            .replace("{what}", &missing.what)
+            .replace("{reason}", &missing.reason),
+    }
+}
+
+/// The line that sums `check` up, in the language of `locale` (a script
+/// or a report locale): where its version stands in its release, the
+/// newest release, its known vulnerabilities and the exploited ones, and
+/// the date of the data. `system` picks the system's wording rather than
+/// a runtime's. The console prints it; the report's "System" section
+/// heads each detection with it (ADR-0072, amended 2026-11-26).
+pub fn check_line(check: &Check, system: bool, date: &str, locale: &serde_json::Value) -> String {
+    let say = |key: &str| crate::i18n::t(locale, key);
+    let status = match &check.support {
+        Support::UpToDate => say("host_status_up_to_date"),
+        Support::Behind { latest } => say("host_status_behind").replace("{latest}", latest),
+        Support::Unsupported { eol: Some(eol) } => {
+            say("host_status_unsupported_since").replace("{eol}", eol)
+        }
+        Support::Unsupported { eol: None } => say("host_status_unsupported"),
+        Support::UnknownCycle => say("host_status_unknown_cycle"),
+    };
+    let newer = check
+        .newer
+        .as_ref()
+        .map(|(cycle, latest)| {
+            // "26.10 (26.10)": a release whose latest version is its
+            // own name is named once.
+            if cycle == latest {
+                say("host_newer_same").replace("{latest}", latest)
+            } else {
+                say("host_newer")
+                    .replace("{cycle}", cycle)
+                    .replace("{latest}", latest)
+            }
+        })
+        .unwrap_or_default();
+    let vulnerabilities = if check.vulnerabilities.is_empty() {
+        String::new()
+    } else {
+        let mut text = say("host_vulnerabilities")
+            .replace("{count}", &check.vulnerabilities.len().to_string())
+            .replace(
+                "{severity}",
+                worst_severity(&check.vulnerabilities).unwrap_or("MEDIUM"),
+            );
+        if check.exploited > 0 {
+            text.push_str(&say("host_exploited").replace("{count}", &check.exploited.to_string()));
+        }
+        if check.detected.on_linux {
+            text.push_str(&say("host_to_confirm"));
+        }
+        text
+    };
+    let key = if system {
+        "host_line_system"
+    } else {
+        "host_line_runtime"
+    };
+    say(key)
+        .replace("{what}", check.detected.product.label)
+        .replace("{version}", &check.detected.shown_version)
+        .replace("{status}", &status)
+        .replace("{newer}", &newer)
+        .replace("{vulnerabilities}", &vulnerabilities)
+        .replace("{date}", date)
 }
 
 /// Checks `detected` against `tables`.
@@ -628,10 +785,18 @@ pub fn check(detected: &Detected, tables: &Tables) -> Check {
         .collect();
     let exploited_cves: Vec<String> = vulnerabilities
         .iter()
-        .filter(|v| tables.exploited.contains(&v.cve))
+        .filter(|v| tables.kev.contains_key(&v.cve))
         .map(|v| v.cve.clone())
         .collect();
     let exploited = exploited_cves.len();
+    let kev = exploited_cves
+        .iter()
+        .filter_map(|cve| Some((cve.clone(), tables.kev.get(cve)?.clone())))
+        .collect();
+    let epss = vulnerabilities
+        .iter()
+        .filter_map(|v| Some((v.cve.clone(), *tables.epss.get(&v.cve)?)))
+        .collect();
     Check {
         detected: detected.clone(),
         cycle: cycle.map(|c| c.name.clone()),
@@ -640,6 +805,8 @@ pub fn check(detected: &Detected, tables: &Tables) -> Check {
         vulnerabilities,
         exploited,
         exploited_cves,
+        kev,
+        epss,
     }
 }
 
@@ -727,7 +894,14 @@ mod tests {
                     vec![vulnerability("CVE-3", "10.0.26100.8875", "HIGH")],
                 ),
             ]),
-            exploited: BTreeSet::from(["CVE-2".to_string()]),
+            kev: BTreeMap::from([(
+                "CVE-2".to_string(),
+                Exploited {
+                    added: "2026-10-01".to_string(),
+                    ransomware: true,
+                },
+            )]),
+            epss: BTreeMap::from([("CVE-1".to_string(), 0.02)]),
             date: "2026-11-26".to_string(),
         }
     }
@@ -752,6 +926,12 @@ mod tests {
         assert_eq!(check.newer, Some(("27".to_string(), "27.2.1".to_string())));
         assert_eq!(check.vulnerabilities.len(), 2);
         assert_eq!(check.exploited, 1);
+        // The KEV row of the exploited one and the EPSS of the scored one
+        // follow the check, for the report's detail of the system.
+        assert_eq!(check.kev["CVE-2"].added, "2026-10-01");
+        assert!(check.kev["CVE-2"].ransomware);
+        assert_eq!(check.epss.get("CVE-1"), Some(&0.02));
+        assert_eq!(check.epss.get("CVE-2"), None);
         assert_eq!(worst_severity(&check.vulnerabilities), Some("CRITICAL"));
 
         let latest = Detected {

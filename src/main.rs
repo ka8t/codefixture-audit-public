@@ -3283,38 +3283,39 @@ fn warn_sbom_left_out(
 /// vulnerabilities, with the date of the data. A line with something to
 /// act on is a warning, which `--quiet` does not hide; an up-to-date one
 /// is progress. Without system data in the pack, one line says so.
+///
+/// Returns everything it saw (ADR-0072, amended 2026-11-26): the
+/// priorities and the report's "System" section show the same detections,
+/// the ones that could not be checked too.
 fn host_check(
     config: &ScanConfig,
     locale: &serde_json::Value,
     quiet: bool,
-) -> Vec<codefixture_audit::project::host::Check> {
-    let mut checks = Vec::new();
-    use codefixture_audit::project::host::{self, Support};
+) -> codefixture_audit::project::host::HostSurvey {
+    use codefixture_audit::project::host::{self, HostEntry, HostSurvey, HostUnavailable, Support};
+    let mut survey = HostSurvey::default();
     let say = |key: &str| codefixture_audit::i18n::t(locale, key);
     let tables = match codefixture_audit::scan::orchestrator::read_version_rules(&config.rules_path)
     {
-        Ok(Some(file)) => host::load_tables(&file),
+        Ok(Some(file)) => host::load_tables(&file).map_err(HostUnavailable::TableUnreadable),
         Ok(None) => Ok(None),
-        Err(e) => Err(e.render(locale)),
+        Err(e) => Err(HostUnavailable::PackUnreadable(e)),
     };
     let tables = match tables {
         Ok(Some(tables)) => tables,
-        Ok(None) => {
-            emit_warning(&format!("[codefixture-audit] {}", say("host_no_data")));
-            return checks;
-        }
-        Err(e) => {
-            emit_warning(&format!(
-                "[codefixture-audit] {}",
-                say("host_unreadable").replace("{error}", &e)
-            ));
-            return checks;
+        other => {
+            let unavailable = other.err().unwrap_or(HostUnavailable::NoData);
+            emit_warning(&format!("[codefixture-audit] {}", unavailable.text(locale)));
+            survey.unavailable = Some(unavailable);
+            return survey;
         }
     };
+    survey.date = tables.date.clone();
     let today = chrono::Local::now().format("%Y-%m-%d").to_string();
     if let Some(days) = host::days_between(&tables.date, &today)
         && days > host::STALE_AFTER_DAYS
     {
+        survey.stale_days = Some(days);
         emit_warning(&format!(
             "[codefixture-audit] {}",
             say("host_stale")
@@ -3329,78 +3330,21 @@ fn host_check(
         let detected = match detection {
             Ok(d) => d,
             Err(missing) => {
-                let line = match (&missing.not_found, &missing.no_version) {
-                    (Some(programs), _) => say("host_not_installed")
-                        .replace("{what}", &missing.what)
-                        .replace("{programs}", programs),
-                    (None, Some(answer)) => say("host_no_version")
-                        .replace("{what}", &missing.what)
-                        .replace("{answer}", answer),
-                    (None, None) => say("host_not_checked")
-                        .replace("{what}", &missing.what)
-                        .replace("{reason}", &missing.reason),
-                };
+                let line = host::not_detected_text(&missing, locale);
                 emit_warning(&format!("[codefixture-audit] {line}"));
+                survey.entries.push(HostEntry {
+                    system: index == 0,
+                    result: Err(missing),
+                });
                 continue;
             }
         };
         let check = host::check(&detected, &tables);
-        checks.push(check.clone());
-        let status = match &check.support {
-            Support::UpToDate => say("host_status_up_to_date"),
-            Support::Behind { latest } => say("host_status_behind").replace("{latest}", latest),
-            Support::Unsupported { eol: Some(eol) } => {
-                say("host_status_unsupported_since").replace("{eol}", eol)
-            }
-            Support::Unsupported { eol: None } => say("host_status_unsupported"),
-            Support::UnknownCycle => say("host_status_unknown_cycle"),
-        };
-        let newer = check
-            .newer
-            .as_ref()
-            .map(|(cycle, latest)| {
-                // "26.10 (26.10)": a release whose latest version is its
-                // own name is named once.
-                if cycle == latest {
-                    say("host_newer_same").replace("{latest}", latest)
-                } else {
-                    say("host_newer")
-                        .replace("{cycle}", cycle)
-                        .replace("{latest}", latest)
-                }
-            })
-            .unwrap_or_default();
-        let vulnerabilities = if check.vulnerabilities.is_empty() {
-            String::new()
-        } else {
-            let mut text = say("host_vulnerabilities")
-                .replace("{count}", &check.vulnerabilities.len().to_string())
-                .replace(
-                    "{severity}",
-                    host::worst_severity(&check.vulnerabilities).unwrap_or("MEDIUM"),
-                );
-            if check.exploited > 0 {
-                text.push_str(
-                    &say("host_exploited").replace("{count}", &check.exploited.to_string()),
-                );
-            }
-            if detected.on_linux {
-                text.push_str(&say("host_to_confirm"));
-            }
-            text
-        };
-        let key = if index == 0 {
-            "host_line_system"
-        } else {
-            "host_line_runtime"
-        };
-        let line = say(key)
-            .replace("{what}", detected.product.label)
-            .replace("{version}", &detected.shown_version)
-            .replace("{status}", &status)
-            .replace("{newer}", &newer)
-            .replace("{vulnerabilities}", &vulnerabilities)
-            .replace("{date}", &tables.date);
+        survey.entries.push(HostEntry {
+            system: index == 0,
+            result: Ok(check.clone()),
+        });
+        let line = host::check_line(&check, index == 0, &tables.date, locale);
         let fine = check.support == Support::UpToDate && check.vulnerabilities.is_empty();
         if fine {
             emit_progress(quiet, &format!("[codefixture-audit] {line}"));
@@ -3408,7 +3352,7 @@ fn host_check(
             emit_warning(&format!("[codefixture-audit] {line}"));
         }
     }
-    checks
+    survey
 }
 
 /// The first lines of a debug log (ticket #282): the build, the command
@@ -4073,6 +4017,7 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
     let priorities = codefixture_audit::report::priorities::Priorities::new(
         &host_checks,
         &report.dependency_priorities,
+        report.folder_check,
     );
     let priority_lines = priorities.console_lines(&script_locale, previous_urgent);
     if let Some(export_path) = &report.export_path
@@ -4080,6 +4025,7 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
             export_path,
             priorities.urgent_count(),
             &report.dependency_priorities,
+            report.folder_check,
         )
     {
         emit_warning(&format!(
@@ -4297,6 +4243,11 @@ fn run_scan_command(args: ScanArgs) -> ExitCode {
                 priorities_html: priorities.html(
                     &codefixture_audit::i18n::load_report_locale(&lang),
                     previous_urgent,
+                ),
+                // ADR-0072, amended 2026-11-26: the system, detailed.
+                system_html: codefixture_audit::report::system_html::section(
+                    &host_checks,
+                    &codefixture_audit::i18n::load_report_locale(&lang),
                 ),
             };
             let audit_params_info = codefixture_audit::report::audit_params::AuditParamsInfo {
@@ -4818,7 +4769,7 @@ struct UnchangedScan<'a> {
     t_command_start: std::time::Instant,
     /// This run's system check (ADR-0071), for the priorities (ticket
     /// #308), with the dependencies the last scan recorded.
-    host_checks: &'a [codefixture_audit::project::host::Check],
+    host_checks: &'a codefixture_audit::project::host::HostSurvey,
 }
 
 /// Ends a scan whose inputs are those of the last one (ADR-0050): nothing
@@ -4860,6 +4811,7 @@ fn report_unchanged_scan(scan: UnchangedScan<'_>) -> ExitCode {
     let priorities = codefixture_audit::report::priorities::Priorities::new(
         scan.host_checks,
         &export.dependency_priorities,
+        export.folder_check,
     );
     let priority_lines = priorities.console_lines(scan.script_locale, None);
     // The SBOM follows the report: the one written for these inputs is

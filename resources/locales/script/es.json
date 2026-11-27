@@ -720,6 +720,20 @@
     "chart_legend": "Barra: probabilidad de explotación en los próximos 30 días (EPSS), relativa a la más alta de la lista, color según la gravedad; llena y roja: explotada en ataques.",
     "see_finding": "ver el hallazgo",
     "nav": "A tratar con urgencia",
+    "machine": "Esta máquina:",
+    "platform_clear": "{what} {version}: ninguna vulnerabilidad explotada",
+    "folder_checked": "Carpeta analizada: {count} dependencia(s) comparada(s) con la base de vulnerabilidades{not_compared}{result}",
+    "folder_not_compared": " (no comparadas: {list})",
+    "folder_unversioned": "{count} sin versión",
+    "folder_outside_database": "{count} de un ecosistema ausente de la base",
+    "folder_unreadable_manifests": "{count} manifiesto(s) ilegible(s)",
+    "folder_result_none": ", ninguna con una vulnerabilidad explotada",
+    "folder_result_some": ", {exploited} con una vulnerabilidad explotada:",
+    "folder_no_dependency": "Carpeta analizada: ninguna dependencia declarada, nada que comparar con la base de vulnerabilidades",
+    "folder_quick": "Carpeta analizada: dependencias no comparadas con la base de vulnerabilidades (--quick)",
+    "folder_no_version_rules": "Carpeta analizada: dependencias no comparadas, las reglas leídas no contienen base de vulnerabilidades",
+    "folder_unreadable": "Carpeta analizada: dependencias no comparadas, la base de vulnerabilidades no se pudo leer (ver más arriba)",
+    "folder_unrecorded": "Carpeta analizada: no registrada por el último análisis; volver a lanzarlo con --no-cache para saberlo",
     "decimal_mark": ","
   }
 }

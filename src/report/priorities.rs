@@ -16,7 +16,7 @@
 //!
 //! No EPSS threshold decides anything: ADR-0051 found none with a reason.
 
-use crate::project::host::{Check, Support};
+use crate::project::host::{Check, HostSurvey, Support};
 
 /// How many dependencies the "next" list names.
 pub const NEXT_LIMIT: usize = 5;
@@ -78,23 +78,67 @@ impl DependencyPriority {
     }
 }
 
+/// What the dependency phase could say of the scanned folder: the
+/// folder's side of the urgent list, the machine's being the system check
+/// (ADR-0072, amended 2026-11-26). Before it, a folder without any
+/// exploited dependency was not named at all, and read as not scanned
+/// (a scan of my-ia, 2026-11-26). Recorded in the scan data, so a scan
+/// skipped as unchanged names it again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum FolderCheck {
+    /// The dependencies were compared with the vulnerability database:
+    /// `compared` of them; `unversioned` have no version to compare,
+    /// `outside_database` belong to an ecosystem the database does not
+    /// hold or could not load, and `unreadable_manifests` manifests could
+    /// not be read, so their dependencies are not known (ADR-0070). A
+    /// folder whose every manifest is unreadable is `Checked` with
+    /// nothing compared, never `NoDependency`.
+    Checked {
+        compared: usize,
+        unversioned: usize,
+        outside_database: usize,
+        #[serde(default)]
+        unreadable_manifests: usize,
+    },
+    /// No manifest of the folder declares a dependency, and none is
+    /// unreadable.
+    NoDependency,
+    /// `--quick` leaves the dependency phase out.
+    Quick,
+    /// The rules carry no vulnerability database.
+    NoVersionRules,
+    /// The vulnerability database could not be read; the console names why.
+    VersionRulesUnreadable,
+}
+
 /// What to treat first.
 #[derive(Debug, Clone, Default)]
 pub struct Priorities {
+    /// The system check of this run, whole: every detection is named,
+    /// exploited or not, checked or not.
+    pub host: HostSurvey,
     /// The system or runtimes with an exploited vulnerability.
     pub urgent_platform: Vec<Check>,
     /// The dependencies with an exploited vulnerability.
     pub urgent_dependencies: Vec<DependencyPriority>,
     /// The next dependencies, severity then EPSS.
     pub next: Vec<DependencyPriority>,
+    /// What the dependency phase said of the folder; `None` when the scan
+    /// data of a skipped scan predate it.
+    pub folder: Option<FolderCheck>,
 }
 
 impl Priorities {
-    /// The priorities of `checks` (the system check) and `dependencies`
-    /// (the dependency phase).
-    pub fn new(checks: &[Check], dependencies: &[DependencyPriority]) -> Self {
+    /// The priorities of `host` (the system check), `dependencies` (the
+    /// dependency phase) and `folder` (what that phase could compare).
+    pub fn new(
+        host: &HostSurvey,
+        dependencies: &[DependencyPriority],
+        folder: Option<FolderCheck>,
+    ) -> Self {
         let urgent_platform: Vec<Check> =
-            checks.iter().filter(|c| c.exploited > 0).cloned().collect();
+            host.checks().filter(|c| c.exploited > 0).cloned().collect();
         let (mut urgent, mut rest): (Vec<_>, Vec<_>) = dependencies
             .iter()
             .cloned()
@@ -109,9 +153,11 @@ impl Priorities {
         rest.sort_by(order);
         rest.truncate(NEXT_LIMIT);
         Self {
+            host: host.clone(),
             urgent_platform,
             urgent_dependencies: urgent,
             next: rest,
+            folder,
         }
     }
 
@@ -121,9 +167,97 @@ impl Priorities {
         self.urgent_platform.len() + self.urgent_dependencies.len()
     }
 
+    /// The machine's side, one text per detection in the language of
+    /// `locale`: what to do for an exploited one, "no exploited
+    /// vulnerability" otherwise, why for one not checked; a single text
+    /// when the pack has no usable system data. Each comes with the
+    /// check when there is one, for the report's chart.
+    fn machine_items<'a>(
+        &'a self,
+        locale: &serde_json::Value,
+        say: &dyn Fn(&str) -> String,
+    ) -> Vec<(String, Option<&'a Check>)> {
+        if let Some(unavailable) = &self.host.unavailable {
+            return vec![(unavailable.text(locale), None)];
+        }
+        self.host
+            .entries
+            .iter()
+            .map(|entry| match &entry.result {
+                Ok(check) if check.exploited > 0 => (platform_text(check, say), Some(check)),
+                Ok(check) => (
+                    say("platform_clear")
+                        .replace("{what}", check.detected.product.label)
+                        .replace("{version}", &check.detected.shown_version),
+                    None,
+                ),
+                Err(missing) => (
+                    crate::project::host::not_detected_text(missing, locale),
+                    None,
+                ),
+            })
+            .collect()
+    }
+
+    /// The folder's side, in the language of `say`'s locale.
+    fn folder_text(&self, say: &dyn Fn(&str) -> String) -> String {
+        let exploited = self.urgent_dependencies.len();
+        match self.folder {
+            None => say("folder_unrecorded"),
+            Some(FolderCheck::Checked {
+                compared,
+                unversioned,
+                outside_database,
+                unreadable_manifests,
+            }) => {
+                // What was not compared goes in parentheses, before the
+                // result, so the result is read as that of the compared
+                // ones only.
+                let mut left_out = Vec::new();
+                if unversioned > 0 {
+                    left_out.push(
+                        say("folder_unversioned").replace("{count}", &unversioned.to_string()),
+                    );
+                }
+                if outside_database > 0 {
+                    left_out.push(
+                        say("folder_outside_database")
+                            .replace("{count}", &outside_database.to_string()),
+                    );
+                }
+                if unreadable_manifests > 0 {
+                    left_out.push(
+                        say("folder_unreadable_manifests")
+                            .replace("{count}", &unreadable_manifests.to_string()),
+                    );
+                }
+                let not_compared = if left_out.is_empty() {
+                    String::new()
+                } else {
+                    say("folder_not_compared").replace("{list}", &left_out.join(", "))
+                };
+                let result = if exploited == 0 {
+                    say("folder_result_none")
+                } else {
+                    say("folder_result_some").replace("{exploited}", &exploited.to_string())
+                };
+                say("folder_checked")
+                    .replace("{count}", &compared.to_string())
+                    .replace("{not_compared}", &not_compared)
+                    .replace("{result}", &result)
+            }
+            Some(FolderCheck::NoDependency) => say("folder_no_dependency"),
+            Some(FolderCheck::Quick) => say("folder_quick"),
+            Some(FolderCheck::NoVersionRules) => say("folder_no_version_rules"),
+            Some(FolderCheck::VersionRulesUnreadable) => say("folder_unreadable"),
+        }
+    }
+
     /// The console lines, in the language of `locale` (the script
     /// locale). `previous` is the urgent count of the previous scan, when
-    /// known.
+    /// known. Both sides are named, even when nothing in them is
+    /// exploited: the machine, each detection on its line, then the
+    /// folder and its exploited dependencies.
     pub fn console_lines(
         &self,
         locale: &serde_json::Value,
@@ -143,11 +277,13 @@ impl Priorities {
                 say("urgent").replace("{count}", &self.urgent_count().to_string())
             ));
         }
-        for check in &self.urgent_platform {
-            lines.push(format!("   {}", platform_text(check, &say)));
+        lines.push(format!("   {}", say("machine")));
+        for (text, _) in self.machine_items(locale, &say) {
+            lines.push(format!("     {text}"));
         }
+        lines.push(format!("   {}", self.folder_text(&say)));
         for dependency in &self.urgent_dependencies {
-            lines.push(format!("   {}", urgent_dependency_text(dependency, &say)));
+            lines.push(format!("     {}", urgent_dependency_text(dependency, &say)));
         }
         if !self.next.is_empty() {
             lines.push(format!("➡  {}", say("next")));
@@ -166,8 +302,11 @@ impl Priorities {
     /// important", the maintainer, 2026-11-26):
     ///
     /// - the urgent count in large, red when above zero;
-    /// - each urgent item with a chart: its known vulnerabilities stacked by
-    ///   severity, and how many are exploited;
+    /// - the machine's side: each detection, an exploited one with a chart
+    ///   of its known vulnerabilities stacked by severity and how many are
+    ///   exploited, and a link to the report's "System" section;
+    /// - the folder's side: what was compared, and each exploited
+    ///   dependency with the same chart;
     /// - each next dependency with a bar as long as the EPSS of its worst
     ///   vulnerability relative to the highest of the list, coloured by
     ///   its severity, the absolute value beside it;
@@ -196,38 +335,67 @@ impl Priorities {
         };
         let exploited_label = say("exploited_badge");
 
-        let mut urgent_rows: Vec<String> = self
-            .urgent_platform
+        let machine_rows: String = self
+            .machine_items(report_locale, &say)
+            .into_iter()
+            .map(|(text, check)| match check {
+                Some(c) => {
+                    let ids: Vec<&str> = c.exploited_cves.iter().map(String::as_str).collect();
+                    let severities: Vec<&str> = c
+                        .vulnerabilities
+                        .iter()
+                        .map(|v| v.severity.as_deref().unwrap_or("UNKNOWN"))
+                        .collect();
+                    urgent_row(
+                        &linkify(&escape(&text), &ids),
+                        &severities,
+                        c.exploited,
+                        &exploited_label,
+                    )
+                }
+                None => format!(
+                    r#"<li class="priority priority-clear-item"><div class="priority-text">{}</div></li>"#,
+                    escape(&text)
+                ),
+            })
+            .collect();
+        let machine_html = if self.host.unavailable.is_some() {
+            format!(r#"<ul class="priorities-list">{machine_rows}</ul>"#)
+        } else {
+            format!(
+                r##"<h3>{} <a class="priority-details" href="#section-system" onclick="scrollToSection('section-system'); return false;">{}</a></h3><ul class="priorities-list">{machine_rows}</ul>"##,
+                escape(&say("machine")),
+                escape(&say("see_system"))
+            )
+        };
+
+        let dependency_rows: String = self
+            .urgent_dependencies
             .iter()
-            .map(|c| {
-                let ids: Vec<&str> = c.exploited_cves.iter().map(String::as_str).collect();
-                let severities: Vec<&str> = c
-                    .vulnerabilities
-                    .iter()
-                    .map(|v| v.severity.as_deref().unwrap_or("UNKNOWN"))
-                    .collect();
+            .map(|d| {
+                let ids: Vec<&str> = d.cves.iter().map(|c| c.id.as_str()).collect();
+                let severities: Vec<&str> = d.cves.iter().map(|c| c.severity.as_str()).collect();
                 urgent_row(
-                    &linkify(&escape(&platform_text(c, &say)), &ids),
+                    &format!(
+                        "{}{}",
+                        linkify(&escape(&urgent_dependency_text(d, &say)), &ids),
+                        details(&d.file, d.line)
+                    ),
                     &severities,
-                    c.exploited,
+                    d.exploited().count(),
                     &exploited_label,
                 )
             })
             .collect();
-        urgent_rows.extend(self.urgent_dependencies.iter().map(|d| {
-            let ids: Vec<&str> = d.cves.iter().map(|c| c.id.as_str()).collect();
-            let severities: Vec<&str> = d.cves.iter().map(|c| c.severity.as_str()).collect();
-            urgent_row(
-                &format!(
-                    "{}{}",
-                    linkify(&escape(&urgent_dependency_text(d, &say)), &ids),
-                    details(&d.file, d.line)
-                ),
-                &severities,
-                d.exploited().count(),
-                &exploited_label,
-            )
-        }));
+        let folder_html = format!(
+            r#"<h3>{}</h3>{}"#,
+            escape(&self.folder_text(&say)),
+            if dependency_rows.is_empty() {
+                String::new()
+            } else {
+                format!(r#"<ul class="priorities-list">{dependency_rows}</ul>"#)
+            }
+        );
 
         // Relative to the highest EPSS of the list: at the absolute scale,
         // 8 % and 0.5 % both read as nothing.
@@ -260,14 +428,6 @@ impl Priorities {
                 )
             })
             .collect();
-        let urgent_html = if urgent_rows.is_empty() {
-            String::new()
-        } else {
-            format!(
-                r#"<ul class="priorities-list">{}</ul>"#,
-                urgent_rows.concat()
-            )
-        };
         let next_html = if next_rows.is_empty() {
             String::new()
         } else {
@@ -283,7 +443,7 @@ impl Priorities {
             "urgent"
         };
         format!(
-            r#"<div class="priorities priorities-{state}" id="section-priorities"><div class="priorities-head"><div class="priorities-count">{}</div><h2>🚨 {}{}</h2></div>{urgent_html}{next_html}</div>"#,
+            r#"<div class="priorities priorities-{state}" id="section-priorities"><div class="priorities-head"><div class="priorities-count">{}</div><h2>🚨 {}{}</h2></div>{machine_html}{folder_html}{next_html}</div>"#,
             self.urgent_count(),
             escape(&title),
             escape(&compared)
@@ -466,6 +626,96 @@ mod tests {
         }
     }
 
+    /// A folder whose `compared` dependencies were all compared.
+    fn checked(compared: usize) -> Option<FolderCheck> {
+        Some(FolderCheck::Checked {
+            compared,
+            unversioned: 0,
+            outside_database: 0,
+            unreadable_manifests: 0,
+        })
+    }
+
+    /// macOS 26.5.2 with `exploited` of its two vulnerabilities exploited.
+    fn macos(exploited: usize) -> Check {
+        use crate::project::platform::PlatformVulnerability;
+        let vulnerability = |cve: &str, severity: &str| PlatformVulnerability {
+            cve: cve.to_string(),
+            version: None,
+            start_including: None,
+            start_excluding: None,
+            end_including: None,
+            end_excluding: Some("26.7.3".to_string()),
+            severity: Some(severity.to_string()),
+        };
+        let exploited_cves: Vec<String> = ["CVE-2026-1", "CVE-2026-2"]
+            .iter()
+            .take(exploited)
+            .map(|c| c.to_string())
+            .collect();
+        Check {
+            detected: crate::project::host::Detected {
+                product: crate::project::platform::product("macos").expect("followed"),
+                version: "26.5.2".to_string(),
+                cycle: None,
+                cpes: vec!["o:apple:macos".to_string()],
+                on_linux: false,
+                cpe_version: None,
+                shown_version: "26.5.2".to_string(),
+            },
+            cycle: Some("26".to_string()),
+            support: Support::Behind {
+                latest: "26.7.3".to_string(),
+            },
+            newer: None,
+            vulnerabilities: vec![
+                vulnerability("CVE-2026-1", "CRITICAL"),
+                vulnerability("CVE-2026-2", "HIGH"),
+            ],
+            exploited,
+            kev: exploited_cves
+                .iter()
+                .map(|c| {
+                    (
+                        c.clone(),
+                        crate::project::advisories::Exploited {
+                            added: "2026-11-01".to_string(),
+                            ransomware: false,
+                        },
+                    )
+                })
+                .collect(),
+            exploited_cves,
+            epss: Default::default(),
+        }
+    }
+
+    /// The system check of a machine: macOS with `exploited` exploited
+    /// vulnerabilities, and a Node.js not found.
+    fn machine(exploited: usize) -> HostSurvey {
+        use crate::project::host::{HostEntry, NotDetected};
+        HostSurvey {
+            unavailable: None,
+            date: "2026-11-26".to_string(),
+            stale_days: None,
+            entries: vec![
+                HostEntry {
+                    system: true,
+                    result: Ok(macos(exploited)),
+                },
+                HostEntry {
+                    system: false,
+                    result: Err(NotDetected {
+                        what: "Node.js".to_string(),
+                        reason: String::new(),
+                        not_found: Some("node".to_string()),
+                        no_version: None,
+                    }),
+                },
+            ],
+        }
+    }
+
     /// Exploited dependencies are urgent; the others follow by severity,
     /// then EPSS, at most five.
     #[test]
@@ -479,7 +729,7 @@ mod tests {
             dependency("f", "LOW", 0.2, false),
             dependency("g", "LOW", 0.3, false),
         ];
-        let p = Priorities::new(&[], &deps);
+        let p = Priorities::new(&HostSurvey::default(), &deps, checked(7));
         assert_eq!(p.urgent_count(), 1);
         assert_eq!(p.urgent_dependencies[0].package, "c");
         let next: Vec<&str> = p.next.iter().map(|d| d.package.as_str()).collect();
@@ -487,37 +737,114 @@ mod tests {
     }
 
     /// The console lines in French: the count compared with the previous
-    /// scan, each item with what to do.
+    /// scan, the machine's side then the folder's, each urgent item with
+    /// what to do.
     #[test]
     fn test_console_lines() {
         let locale = crate::i18n::load_script_locale("fr");
         let p = Priorities::new(
-            &[],
+            &machine(1),
             &[
                 dependency("c", "HIGH", 0.9, true),
                 dependency("d", "CRITICAL", 0.083, false),
             ],
+            checked(12),
         );
         let lines = p.console_lines(&locale, Some(3));
         assert!(lines[0].starts_with("🚨 À traiter en urgence"), "{lines:?}");
-        assert!(lines[0].contains("3"), "{lines:?}");
+        assert!(lines[0].contains("2 (analyse précédente : 3)"), "{lines:?}");
+        assert_eq!(lines[1], "   Cette machine :", "{lines:?}");
         assert!(
-            lines[1].contains("CVE-c") && lines[1].contains("2.0.0"),
+            lines[2].contains("macOS 26.5.2") && lines[2].contains("passer à 26.7.3"),
             "{lines:?}"
         );
-        assert!(lines[3].contains("EPSS 8,3"), "{lines:?}");
-        let none = Priorities::new(&[], &[]).console_lines(&locale, None);
-        assert_eq!(none.len(), 1);
+        assert!(lines[3].contains("Node.js non vérifié"), "{lines:?}");
+        assert!(
+            lines[4].starts_with("   Dossier analysé : 12 dépendance(s) comparée(s)")
+                && lines[4].contains("1 avec une faille exploitée"),
+            "{lines:?}"
+        );
+        assert!(
+            lines[5].contains("CVE-c") && lines[5].contains("2.0.0"),
+            "{lines:?}"
+        );
+        assert!(lines[7].contains("EPSS 8,3"), "{lines:?}");
+    }
+
+    /// Nothing exploited on either side: both are still named, so a folder
+    /// is never read as not scanned (my-ia, 2026-11-26).
+    #[test]
+    fn test_console_lines_name_both_sides_when_nothing_is_exploited() {
+        let locale = crate::i18n::load_script_locale("en");
+        let lines = Priorities::new(&machine(0), &[], checked(37)).console_lines(&locale, None);
+        assert_eq!(
+            lines,
+            vec![
+                "🚨 To treat urgently: no known exploited vulnerability (CISA KEV)".to_string(),
+                "   This machine:".to_string(),
+                "     macOS 26.5.2: no exploited vulnerability".to_string(),
+                "     Node.js not checked: node not found on PATH outside the scanned folder."
+                    .to_string(),
+                "   Scanned folder: 37 dependency(ies) compared with the vulnerability database, none with an exploited vulnerability".to_string(),
+            ]
+        );
+    }
+
+    /// Every state of the folder has its own text: nothing compared is
+    /// never written as nothing exploited.
+    #[test]
+    fn test_folder_states() {
+        let locale = crate::i18n::load_script_locale("en");
+        let folder = |state: Option<FolderCheck>| {
+            Priorities::new(&machine(0), &[], state).console_lines(&locale, None)[4].clone()
+        };
+        let partly = folder(Some(FolderCheck::Checked {
+            compared: 3,
+            unversioned: 1,
+            outside_database: 2,
+            unreadable_manifests: 1,
+        }));
+        assert!(
+            partly.contains("3 dependency(ies) compared")
+                && partly.contains("1 without a version")
+                && partly.contains("2 of an ecosystem the database does not hold")
+                && partly.contains("1 unreadable manifest(s)"),
+            "{partly}"
+        );
+        assert!(folder(Some(FolderCheck::NoDependency)).contains("no declared dependency"));
+        assert!(folder(Some(FolderCheck::Quick)).contains("--quick"));
+        assert!(folder(Some(FolderCheck::NoVersionRules)).contains("no vulnerability database"));
+        assert!(folder(Some(FolderCheck::VersionRulesUnreadable)).contains("could not be read"));
+        assert!(folder(None).contains("--no-cache"));
+        // Without system data, the machine's side says why on one line.
+        let survey = HostSurvey {
+            unavailable: Some(crate::project::host::HostUnavailable::NoData),
+            ..HostSurvey::default()
+        };
+        let lines = Priorities::new(&survey, &[], checked(1)).console_lines(&locale, None);
+        assert!(lines[2].contains("not checked"), "{lines:?}");
+        // Every state reads the same in the scan data and back.
+        for state in [
+            checked(2),
+            Some(FolderCheck::NoDependency),
+            Some(FolderCheck::Quick),
+        ] {
+            let json = serde_json::to_string(&state).unwrap();
+            assert_eq!(
+                serde_json::from_str::<Option<FolderCheck>>(&json).unwrap(),
+                state
+            );
+        }
     }
 
     /// The HTML block: escaped, marked urgent or clear, in the report's
-    /// language.
+    /// language, with both sides and the link to the "System" section.
     #[test]
     fn test_html_block() {
         let locale = crate::i18n::load_report_locale("en");
         let mut urgent = dependency("<x>", "HIGH", 0.9, true);
         urgent.cves[0].ransomware = true;
-        let html = Priorities::new(&[], &[urgent]).html(&locale, None);
+        let html = Priorities::new(&machine(2), &[urgent], checked(4)).html(&locale, None);
         assert!(html.contains("priorities-urgent"), "{html}");
         assert!(
             html.contains("&lt;x&gt;") && !html.contains("<x>"),
@@ -527,8 +854,7 @@ mod tests {
         // Links: the CVE to the NVD, the dependency to its finding; the
         // urgent row carries the chart of its vulnerabilities.
         assert!(
-            html.contains("https://nvd.nist.gov/vuln/detail/CVE-&lt;x&gt;")
-                || html.contains("nvd.nist.gov/vuln/detail/"),
+            html.contains("nvd.nist.gov/vuln/detail/CVE-2026-1"),
             "{html}"
         );
         let anchor = crate::report::findings_html::finding_anchor(
@@ -541,9 +867,19 @@ mod tests {
             html.contains("severity-stack") && html.contains("HIGH 1"),
             "{html}"
         );
-        let clear = Priorities::new(&[], &[]).html(&locale, Some(2));
+        assert!(html.contains("href=\"#section-system\""), "{html}");
+        assert!(html.contains("Node.js not checked"), "{html}");
+        assert!(
+            html.contains("Scanned folder: 4 dependency(ies) compared"),
+            "{html}"
+        );
+        let clear = Priorities::new(&machine(0), &[], checked(4)).html(&locale, Some(2));
         assert!(
             clear.contains("priorities-clear") && clear.contains("previous scan: 2"),
+            "{clear}"
+        );
+        assert!(
+            clear.contains("macOS 26.5.2: no exploited vulnerability"),
             "{clear}"
         );
     }

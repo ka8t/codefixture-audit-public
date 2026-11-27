@@ -83,6 +83,10 @@ pub struct ReportContext<'a> {
     /// The block of what to treat first (ticket #308), at the top of the
     /// report, already in the report's language; empty to show none.
     pub priorities_html: String,
+    /// The "System" section (`system_html`, ADR-0072 amended on
+    /// 2026-11-26), already in the report's language; empty to show none,
+    /// its links in the navigation hidden with it.
+    pub system_html: String,
 }
 
 fn category_severity_matrix(
@@ -846,6 +850,7 @@ pub fn generate_html(
         ("{{i18n_level_executive}}", "level_executive"),
         // Ticket #308: the link to what to treat first.
         ("{{i18n_priorities_nav}}", "priorities.nav"),
+        ("{{i18n_system_title}}", "system.title"),
         ("{{i18n_health_score}}", "health_score"),
         ("{{i18n_visualization}}", "visualization"),
         ("{{i18n_summary}}", "summary"),
@@ -1043,6 +1048,15 @@ pub fn generate_html(
     html = html.replace("{{severity_filter_banner}}", "");
     // Ticket #308: what to treat first, right below the health score.
     html = html.replace("{{priorities_section}}", &ctx.priorities_html);
+    html = html.replace("{{system_section}}", &ctx.system_html);
+    html = html.replace(
+        "{{system_display}}",
+        if ctx.system_html.is_empty() {
+            "display:none"
+        } else {
+            ""
+        },
+    );
 
     // --- assets ---------------------------------------------------------
     html = html.replace("{{css}}", load_asset("report.css"));
@@ -1306,6 +1320,7 @@ mod tests {
             history: &[],
             custom_rule_duplicates: &[],
             priorities_html: String::new(),
+            system_html: String::new(),
         }
     }
 
@@ -1688,6 +1703,7 @@ mod tests {
             history: &history,
             custom_rule_duplicates: &[],
             priorities_html: String::new(),
+            system_html: String::new(),
             ..ctx(&catalog)
         };
         let html = generate_html(&[], &context, None, None, None);

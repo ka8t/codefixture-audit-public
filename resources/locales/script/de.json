@@ -720,6 +720,20 @@
     "chart_legend": "Balken: Ausnutzungswahrscheinlichkeit in den nächsten 30 Tagen (EPSS), relativ zur höchsten der Liste, Farbe nach Schweregrad; voll und rot: in Angriffen ausgenutzt.",
     "see_finding": "Befund ansehen",
     "nav": "Dringend zu behandeln",
+    "machine": "Dieser Rechner:",
+    "platform_clear": "{what} {version}: keine ausgenutzte Schwachstelle",
+    "folder_checked": "Analysierter Ordner: {count} Abhängigkeit(en) mit der Schwachstellendatenbank verglichen{not_compared}{result}",
+    "folder_not_compared": " (nicht verglichen: {list})",
+    "folder_unversioned": "{count} ohne Version",
+    "folder_outside_database": "{count} aus einem Ökosystem, das die Datenbank nicht enthält",
+    "folder_unreadable_manifests": "{count} unlesbare(s) Manifest(e)",
+    "folder_result_none": ", keine mit einer ausgenutzten Schwachstelle",
+    "folder_result_some": ", {exploited} mit einer ausgenutzten Schwachstelle:",
+    "folder_no_dependency": "Analysierter Ordner: keine deklarierte Abhängigkeit, nichts mit der Schwachstellendatenbank zu vergleichen",
+    "folder_quick": "Analysierter Ordner: Abhängigkeiten nicht mit der Schwachstellendatenbank verglichen (--quick)",
+    "folder_no_version_rules": "Analysierter Ordner: Abhängigkeiten nicht verglichen, die gelesenen Regeln enthalten keine Schwachstellendatenbank",
+    "folder_unreadable": "Analysierter Ordner: Abhängigkeiten nicht verglichen, die Schwachstellendatenbank konnte nicht gelesen werden (siehe oben)",
+    "folder_unrecorded": "Analysierter Ordner: von der letzten Analyse nicht erfasst; mit --no-cache erneut starten, um es zu erfahren",
     "decimal_mark": ","
   }
 }

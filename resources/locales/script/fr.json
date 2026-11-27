@@ -720,6 +720,20 @@
     "chart_legend": "Barre : probabilité d'exploitation dans les 30 jours (EPSS), relative à la plus forte de la liste, couleur selon la sévérité ; pleine et rouge : exploitée dans des attaques.",
     "see_finding": "voir le constat",
     "nav": "À traiter en urgence",
+    "machine": "Cette machine :",
+    "platform_clear": "{what} {version} : aucune faille exploitée",
+    "folder_checked": "Dossier analysé : {count} dépendance(s) comparée(s) à la base des failles{not_compared}{result}",
+    "folder_not_compared": " (non comparées : {list})",
+    "folder_unversioned": "{count} sans version",
+    "folder_outside_database": "{count} d'un écosystème absent de la base",
+    "folder_unreadable_manifests": "{count} manifeste(s) illisible(s)",
+    "folder_result_none": ", aucune avec une faille exploitée",
+    "folder_result_some": ", {exploited} avec une faille exploitée :",
+    "folder_no_dependency": "Dossier analysé : aucune dépendance déclarée, rien à comparer à la base des failles",
+    "folder_quick": "Dossier analysé : dépendances non comparées à la base des failles (--quick)",
+    "folder_no_version_rules": "Dossier analysé : dépendances non comparées, les règles lues ne contiennent pas de base des failles",
+    "folder_unreadable": "Dossier analysé : dépendances non comparées, la base des failles est illisible (voir plus haut)",
+    "folder_unrecorded": "Dossier analysé : non enregistré par la dernière analyse ; la relancer avec --no-cache pour le savoir",
     "decimal_mark": ","
   }
 }
